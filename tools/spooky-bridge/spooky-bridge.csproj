@@ -12,8 +12,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\..\spooky-toolkit\src\SpookysAutomod.Esp\SpookysAutomod.Esp.csproj" />
-    <ProjectReference Include="..\..\..\spooky-toolkit\src\SpookysAutomod.Core\SpookysAutomod.Core.csproj" />
+    <ProjectReference Include="..\..\spooky-toolkit\src\SpookysAutomod.Esp\SpookysAutomod.Esp.csproj" />
+    <ProjectReference Include="..\..\spooky-toolkit\src\SpookysAutomod.Core\SpookysAutomod.Core.csproj" />
   </ItemGroup>
 
 </Project>

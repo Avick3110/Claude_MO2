@@ -38,3 +38,8 @@ unins000.dat
 
 # Installer binaries ship as GitHub Release assets, not in the repo
 claude-mo2-setup-*.exe
+
+# Dev-only: session handoffs, summaries, reports, local notes.
+# Kept locally for project history but not committed (some entries contain
+# personal paths and early-era modlist-specific context).
+dev/

@@ -112,6 +112,7 @@ Source: "..\KNOWN_ISSUES.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: i
 Source: "..\CLAUDE.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
 Source: "..\KB_Tools.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
 Source: "..\KB_LeveledListPatching.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
+Source: "..\KB_Diagnostics.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
 Source: "..\KB_ModDissection.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
 Source: "..\KB_NPCAnalysis.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
 Source: "..\KB_NPC_Outfits.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion

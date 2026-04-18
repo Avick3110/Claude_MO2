@@ -10,3 +10,4 @@
 | **KB_NPCAnalysis.md** | Before analyzing any NPC — routes to sub-KBs by topic |
 | **KB_NPC_Outfits.md** | NPC outfit/appearance investigation (loaded via NPCAnalysis router) |
 | **KB_LeveledListPatching.md** | Before creating any leveled list merge patch — reasoning framework for choosing correct base and overrides |
+| **KB_Diagnostics.md** | Before investigating any reported crash or freeze — triage the failure type first, then follow the layered diagnostic path |

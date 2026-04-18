@@ -6,11 +6,11 @@ Claude MO2 is an AI assistant for Skyrim SE modding, connected to your Mod Organ
 
 ## Connection
 
-The MCP server runs inside MO2. Start it from Tools > Start/Stop Claude Server. On startup, the plugin automatically writes the MCP config to `~/.claude/.mcp.json` so Claude Code can discover the server regardless of where the project folder is located. This handles Windows paths with spaces that break project-level `.mcp.json` discovery.
+The MCP server runs inside MO2. Start it from Tools > Start/Stop Claude Server. On startup, the plugin automatically merges its server entry into `~/.claude.json` under `mcpServers.mo2` — Claude Code's user-scoped MCP config — so the server is discoverable from any project directory. This avoids the project-level `.mcp.json` discovery path, which can fail on Windows installs where the plugin path contains spaces.
 
 If the server isn't responding, check in order:
 1. Is the server running in MO2? (Tools menu should show it as active)
-2. Does `~/.claude/.mcp.json` exist with the `mo2` entry? (The plugin creates this automatically)
+2. Does `~/.claude.json` contain an `mcpServers.mo2` entry? (The plugin writes this automatically)
 3. Did you restart Claude Code after the first server start? (Required once for initial discovery)
 4. Call `mo2_ping` to verify the connection.
 

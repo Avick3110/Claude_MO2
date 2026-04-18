@@ -4,6 +4,25 @@ All plugin changes are made in the Dev Build copy first. Once tested and stable,
 
 ---
 
+## v2.5.1 — 2026-04-18
+
+Hotfix: auto-registration into Claude Code was writing to a path Claude Code does not read. Fresh installs on v2.5.0 appeared to "silently succeed" (server running, log showing config written) but Claude Code never discovered the server unless the user manually added a project-level `.mcp.json`.
+
+### Fixed
+
+- **`_ensure_claude_mcp_config` wrote to the wrong file.** The function was creating `~/.claude/.mcp.json`, which Claude Code does not read. Claude Code's user-scoped MCP servers live under the top-level `mcpServers` key of `~/.claude.json` (a single file containing all user settings). The function now merges the `mo2` server entry into that file, preserving every other key the user has. The write is atomic (temp file + `os.replace`) so a crash mid-write cannot corrupt `~/.claude.json`. If `~/.claude.json` does not exist (Claude Code not installed) the function returns silently, same as before. No-op on unchanged configs avoids pointless rewrites on every server restart.
+- **`README.md` / `CLAUDE.md` path references** updated to `~/.claude.json` + `mcpServers.mo2` throughout (Quick Install, Quick Start, Troubleshooting; Connection section).
+
+### Migration
+
+Users who installed v2.5.0 will have a stale `~/.claude/.mcp.json` left behind. It is harmless (Claude Code never read it) and can be deleted. The first v2.5.1 server start will register the server into `~/.claude.json`; a one-time Claude Code restart picks up the new server.
+
+### Changed
+
+- **`PLUGIN_VERSION`** bumped to `(2, 5, 1)`.
+
+---
+
 ## v2.5.0 — 2026-04-17
 
 Public-release prep: first shippable build. Audit cleanup, documentation rewrite, Inno Setup installer, repo layout for GitHub.

@@ -4,7 +4,7 @@ An MCP server plugin that connects AI assistants to [Mod Organizer 2](https://ww
 
 ## Quick Install (Recommended)
 
-**Download [claude-mo2-setup-v2.5.0.exe](https://github.com/Avick3110/Claude_MO2/releases/latest/download/claude-mo2-setup-v2.5.0.exe) and run it.**
+**Download [claude-mo2-setup-v2.5.1.exe](https://github.com/Avick3110/Claude_MO2/releases/latest/download/claude-mo2-setup-v2.5.1.exe) and run it.**
 
 The installer:
 - Detects whether .NET 8 Runtime is installed; guides you to Microsoft's download page if missing
@@ -56,18 +56,18 @@ See [Manual Install](#manual-install) below if you prefer to copy files yourself
 Alternative to the installer above. Use this if you prefer to copy files yourself, or if you're on a platform where the installer doesn't run.
 
 1. Copy the `mo2_mcp/` folder into your MO2 `plugins/` directory
-2. Copy `claude-mo2-setup-v2.5.0.exe` internals (specifically, the bundled `tools/spooky-bridge/` and `tools/spooky-cli/`) into `plugins/mo2_mcp/tools/` — or run the installer once to populate those, then copy the result somewhere else
+2. Copy `claude-mo2-setup-v2.5.1.exe` internals (specifically, the bundled `tools/spooky-bridge/` and `tools/spooky-cli/`) into `plugins/mo2_mcp/tools/` — or run the installer once to populate those, then copy the result somewhere else
 3. Restart MO2
 4. Start the server: **Tools > Start/Stop Claude Server**
 
-The plugin automatically configures Claude Code's MCP connection on first start — it writes the server entry to `~/.claude/.mcp.json`. No manual config needed.
+The plugin automatically configures Claude Code's MCP connection on first start — it merges the server entry into `~/.claude.json` under `mcpServers.mo2`. No manual config needed.
 
 If you're using a different MCP client, point it to `http://localhost:27015/mcp` (Streamable HTTP transport).
 
 ## Quick Start
 
 1. Start the server in MO2
-2. Open Claude Code and set this folder as your project directory (or any folder — the `~/.claude/.mcp.json` config is global)
+2. Open Claude Code and set this folder as your project directory (or any folder — the server is registered user-scoped in `~/.claude.json`, so it's visible from any directory)
 3. Ask Claude to build the record index:
    > "Build the record index so we can query plugin records."
 
@@ -141,7 +141,7 @@ Claude will offer to create these as it learns about your modlist. They allow Cl
 
 **Plugin doesn't appear in Tools menu:** Verify `plugins/mo2_mcp/__init__.py` exists. Restart MO2. Check MO2's log panel for Python errors.
 
-**Claude can't find the tools:** The plugin writes MCP config to `~/.claude/.mcp.json` on first server start. Restart Claude Code after the first start so it picks up the new config.
+**Claude can't find the tools:** The plugin registers itself in `~/.claude.json` (under `mcpServers.mo2`) on first server start. Confirm that entry is present, then restart Claude Code so it picks up the new config. Claude Code caches the MCP tool list at session start, so adding a server mid-session has no effect until restart.
 
 **Record queries return nothing:** Build the record index first (`mo2_build_record_index`). This is required once per session.
 

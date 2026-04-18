@@ -30,37 +30,46 @@ from .tools_audio import register_audio_tools
 
 
 def _ensure_claude_mcp_config(port: int) -> None:
-    """Write or update ~/.claude/.mcp.json so Claude Code can find this server.
+    """Register this server as a user-scoped MCP server in ~/.claude.json.
 
-    Merges with any existing config to preserve other MCP servers the user
-    may have configured.  Silently skips if ~/.claude/ does not exist
+    Claude Code stores user-scoped MCP servers under the top-level
+    `mcpServers` key of ~/.claude.json. Registering there makes the server
+    discoverable from any project directory without per-project `.mcp.json`
+    files — which matters on Windows where spaces in the install path can
+    break project-level discovery.
+
+    The write is atomic (temp file + os.replace) so a crash mid-write cannot
+    corrupt ~/.claude.json. Skips silently if the file does not exist
     (Claude Code not installed) or if anything goes wrong — server startup
     must never fail because of this.
     """
     try:
-        claude_dir = os.path.expanduser("~/.claude")
-        if not os.path.isdir(claude_dir):
+        config_path = os.path.expanduser("~/.claude.json")
+        if not os.path.isfile(config_path):
             return
 
-        config_path = os.path.join(claude_dir, ".mcp.json")
-        config = {}
-        if os.path.exists(config_path):
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
 
-        servers = config.setdefault("mcpServers", {})
-        servers["mo2"] = {
+        entry = {
             "type": "http",
             "url": f"http://127.0.0.1:{port}/mcp",
         }
+        servers = config.setdefault("mcpServers", {})
+        if servers.get("mo2") == entry:
+            return
 
-        with open(config_path, "w", encoding="utf-8") as f:
+        servers["mo2"] = entry
+
+        tmp_path = config_path + ".mo2-tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
             f.write("\n")
+        os.replace(tmp_path, config_path)
 
-        qInfo(f"{PLUGIN_NAME}: wrote Claude Code MCP config to {config_path}")
+        qInfo(f"{PLUGIN_NAME}: registered MCP server with Claude Code in {config_path}")
     except Exception as exc:
-        qWarning(f"{PLUGIN_NAME}: failed to write Claude MCP config: {exc}")
+        qWarning(f"{PLUGIN_NAME}: failed to update Claude Code MCP config: {exc}")
 
 
 class Mo2McpPlugin(mobase.IPluginTool):

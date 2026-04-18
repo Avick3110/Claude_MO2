@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>SpookyBridge</RootNamespace>
+    <AssemblyName>spooky-bridge</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\spooky-toolkit\src\SpookysAutomod.Esp\SpookysAutomod.Esp.csproj" />
+    <ProjectReference Include="..\..\..\spooky-toolkit\src\SpookysAutomod.Core\SpookysAutomod.Core.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,3 @@
+[submodule "spooky-toolkit"]
+	path = spooky-toolkit
+	url = https://github.com/SpookyPirate/spookys-automod-toolkit.git

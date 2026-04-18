@@ -1,0 +1,34 @@
+Claude MO2 — MCP plugin for Mod Organizer 2
+
+This installer will set up Claude MO2 so AI assistants can read your modlist, analyze conflicts, and help you develop patches through the Model Context Protocol.
+
+Before you continue:
+
+ * You should already have Mod Organizer 2 installed.
+ * You will be asked to select your MO2 installation folder — the one containing ModOrganizer.exe.
+ * The .NET 8 Runtime is required. The installer will prompt you if it's missing.
+
+What gets installed:
+
+ * The Python plugin under <MO2>\plugins\mo2_mcp\
+ * spooky-bridge.exe (our Mutagen bridge for ESP patching)
+ * Spooky's AutoMod Toolkit CLI (for BSA, NIF, Audio tools)
+ * README stubs for the three optional user-provided tools (BSArch, nif-tool, PapyrusCompiler)
+
+What you provide separately, if you want those specific capabilities:
+
+ * BSArch.exe  — Needed for BSA/BA2 tools.
+      Ships inside xEdit's release 7z:
+      https://github.com/TES5Edit/TES5Edit/releases
+
+ * nif-tool.exe  — Needed for NIF texture/shader inspection.
+      Rust binary from Spooky's release:
+      https://github.com/SpookyPirate/spookys-automod-toolkit/releases
+
+ * PapyrusCompiler.exe + Scripts.zip  — Needed to compile Papyrus scripts.
+      Part of the Creation Kit (free via Steam, requires Skyrim SE):
+      https://store.steampowered.com/app/1946180/
+
+You can install the plugin now and drop these tools in later — their target folders will be created with README instructions.
+
+Click Next to continue.

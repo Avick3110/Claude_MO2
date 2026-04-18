@@ -1,0 +1,40 @@
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Claude MO2 runtime-generated files
+.record_index.pkl
+
+# Build artifacts (rebuilt by build/build-release.ps1)
+build-output/
+tools/spooky-bridge/bin/
+tools/spooky-bridge/obj/
+
+# Spooky toolkit submodule build state
+spooky-toolkit/**/bin/
+spooky-toolkit/**/obj/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temp / logs
+*.log
+*.tmp
+*~
+
+# Test install artifacts (if someone runs installer into a repo dir)
+unins000.exe
+unins000.dat
+
+# Installer binaries ship as GitHub Release assets, not in the repo
+claude-mo2-setup-*.exe

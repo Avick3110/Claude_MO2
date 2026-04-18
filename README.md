@@ -4,7 +4,7 @@ An MCP server plugin that connects AI assistants to [Mod Organizer 2](https://ww
 
 ## Quick Install (Recommended)
 
-**Download [claude-mo2-setup-v2.5.2.exe](https://github.com/Avick3110/Claude_MO2/releases/latest/download/claude-mo2-setup-v2.5.2.exe) and run it.**
+**Download [claude-mo2-setup-v2.5.3.exe](https://github.com/Avick3110/Claude_MO2/releases/latest/download/claude-mo2-setup-v2.5.3.exe) and run it.**
 
 The installer:
 - Detects whether .NET 8 Runtime is installed; guides you to Microsoft's download page if missing
@@ -56,7 +56,7 @@ See [Manual Install](#manual-install) below if you prefer to copy files yourself
 Alternative to the installer above. Use this if you prefer to copy files yourself, or if you're on a platform where the installer doesn't run.
 
 1. Copy the `mo2_mcp/` folder into your MO2 `plugins/` directory
-2. Copy `claude-mo2-setup-v2.5.2.exe` internals (specifically, the bundled `tools/spooky-bridge/` and `tools/spooky-cli/`) into `plugins/mo2_mcp/tools/` — or run the installer once to populate those, then copy the result somewhere else
+2. Copy `claude-mo2-setup-v2.5.3.exe` internals (specifically, the bundled `tools/spooky-bridge/` and `tools/spooky-cli/`) into `plugins/mo2_mcp/tools/` — or run the installer once to populate those, then copy the result somewhere else
 3. Restart MO2
 4. Start the server: **Tools > Start/Stop Claude Server**
 

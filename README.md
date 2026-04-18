@@ -4,7 +4,7 @@ An MCP server plugin that connects AI assistants to [Mod Organizer 2](https://ww
 
 ## Quick Install (Recommended)
 
-**Download [claude-mo2-setup-v2.5.0.exe](claude-mo2-setup-v2.5.0.exe) and run it.**
+**Download [claude-mo2-setup-v2.5.0.exe](https://github.com/Avick3110/Claude_MO2/releases/latest/download/claude-mo2-setup-v2.5.0.exe) and run it.**
 
 The installer:
 - Detects whether .NET 8 Runtime is installed; guides you to Microsoft's download page if missing

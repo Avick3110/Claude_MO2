@@ -18,7 +18,7 @@
 ; 5. Reports which optional tools are detected post-install.
 
 #define AppName "Claude MO2"
-#define AppVersion "2.5.3"
+#define AppVersion "2.5.5"
 #define AppPublisher "Aaronavich"
 #define AppURL "https://github.com/Aaronavich/claude-mo2"
 #define PluginFolder "mo2_mcp"
@@ -111,13 +111,13 @@ Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}\plugins\{#PluginFolder}"; F
 Source: "..\KNOWN_ISSUES.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
 Source: "..\CLAUDE.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
 Source: "..\kb\KB_Tools.md"; DestDir: "{app}\plugins\{#PluginFolder}\kb"; Flags: ignoreversion
-Source: "..\kb\KB_LeveledListPatching.md"; DestDir: "{app}\plugins\{#PluginFolder}\kb"; Flags: ignoreversion
-Source: "..\kb\KB_Diagnostics.md"; DestDir: "{app}\plugins\{#PluginFolder}\kb"; Flags: ignoreversion
-Source: "..\kb\KB_ModDissection.md"; DestDir: "{app}\plugins\{#PluginFolder}\kb"; Flags: ignoreversion
-Source: "..\kb\KB_NPCAnalysis.md"; DestDir: "{app}\plugins\{#PluginFolder}\kb"; Flags: ignoreversion
-Source: "..\kb\KB_NPC_Outfits.md"; DestDir: "{app}\plugins\{#PluginFolder}\kb"; Flags: ignoreversion
-Source: "..\kb\KB_SessionStrategy.md"; DestDir: "{app}\plugins\{#PluginFolder}\kb"; Flags: ignoreversion
 Source: "..\KNOWLEDGEBASE.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
+
+; Skills — Claude Code auto-discovers .claude/skills/*/SKILL.md when the user
+; opens Claude Code in this dir. Trigger-matched, loaded on demand.
+Source: "..\.claude\skills\*"; \
+    DestDir: "{app}\plugins\{#PluginFolder}\.claude\skills"; \
+    Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Dirs]
 ; Ensure tool dirs exist even if README gets removed (keeps path resolution predictable)

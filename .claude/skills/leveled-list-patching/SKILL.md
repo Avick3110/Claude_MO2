@@ -1,6 +1,10 @@
-# KB_LeveledListPatching.md — Leveled List Conflict Resolution
+---
+description: Reasoning framework for creating leveled list (LVLI/LVLN/LVSP) merge patches. Walks through choosing the correct base plugin (overhaul/extension vs vanilla), classifying each conflicting plugin's intent (overhaul/extension/content-addition/ITM), identifying what entries to merge in, and avoiding common mistakes (starting from vanilla when an overhaul exists, treating restructures as additions, deduplicating weighting). Use before any `mo2_create_patch` call with `merge_leveled_list`, or when the user reports loot/weapon/spell drop distribution issues tied to leveled list conflicts.
+---
 
-Load this before creating any leveled list merge patch. Leveled list conflicts are among the most complex in Skyrim modding and require careful reasoning — the merge tool is a mechanism, not a decision-maker.
+# Leveled List Conflict Resolution
+
+Leveled list conflicts are among the most complex in Skyrim modding and require careful reasoning — the merge tool is a mechanism, not a decision-maker.
 
 ---
 

@@ -1,8 +1,8 @@
-# KB_Diagnostics.md — Crash & Freeze Diagnosis
-
-Load this at the start of any session where the user reports a crash, freeze, or unexplained game misbehavior that wasn't present before a change. The triage step at the top costs nothing and changes the entire diagnostic path.
-
 ---
+description: Diagnose Skyrim crashes, freezes, and unexplained game misbehavior. Triages hard freezes (game hangs, no crash log) vs CTDs (crash to desktop with log) and routes to the correct investigation layer — Papyrus log, assets, or records. Use at the start of any session where the user reports a crash, freeze, stuck loading screen, or post-change game misbehavior. Critical first step is asking freeze-vs-CTD before any investigation.
+---
+
+# Crash & Freeze Diagnosis
 
 ## First: ask about the failure type
 

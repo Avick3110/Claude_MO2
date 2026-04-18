@@ -1,4 +1,8 @@
-# KB_NPC_Outfits.md — NPC Outfit Investigation
+---
+description: Investigate what an NPC actually wears when outfit/appearance conflicts or unexpected visuals appear. Covers the outfit override priority chain (script SetOutfit > quest alias > SkyPatcher > DOFT > WNAM), OTFT record tracing, and quest-script outfit management. Use when the user asks what an NPC is wearing, reports an outfit conflict, investigates armor overrides, or suspects a patch plugin is redirecting outfits without touching the NPC_ record.
+---
+
+# NPC Outfit Investigation
 
 ## Override Priority (highest wins)
 
@@ -11,7 +15,7 @@ If an NPC has a management quest with outfit script properties, DOFT and WNAM on
 ## Steps
 
 ### 1. Check Flagged Quests from NPC Router
-The parallel query in kb/KB_NPCAnalysis.md already found QUST records. Check the winning version's VMAD script properties for:
+The parallel query in the NPC analysis skill already found QUST records. Check the winning version's VMAD script properties for:
 - `*Outfit*` properties — OTFT FormID references
 - `*Armor*` / equipment properties — ARMO references
 - Container/FormList properties — outfit system storage

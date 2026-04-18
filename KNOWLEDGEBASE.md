@@ -1,13 +1,11 @@
 # KNOWLEDGEBASE.md — KB File Index
 
-## When to Load Each File
+Task-specific procedures and category-specific tool references live as skills under `.claude/skills/` and are auto-loaded by Claude Code when their trigger descriptions match the current task. See `CLAUDE.md` for the full skill inventory.
+
+## Remaining KB Files
 
 | File | Load When |
 |---|---|
-| **kb/KB_Tools.md** | Any session using MCP tools (always load) |
-| **kb/KB_SessionStrategy.md** | Sessions involving heavy tool use or multiple parallel MCP calls |
-| **kb/KB_ModDissection.md** | Before performing a mod dissection or full mod analysis |
-| **kb/KB_NPCAnalysis.md** | Before analyzing any NPC — routes to sub-KBs by topic |
-| **kb/KB_NPC_Outfits.md** | NPC outfit/appearance investigation (loaded via NPCAnalysis router) |
-| **kb/KB_LeveledListPatching.md** | Before creating any leveled list merge patch — reasoning framework for choosing correct base and overrides |
-| **kb/KB_Diagnostics.md** | Before investigating any reported crash or freeze — triage the failure type first, then follow the layered diagnostic path |
+| **kb/KB_Tools.md** | Any session using MCP tools (always load) — core tools, FormID format, field interpretation output types, pointer to category skills |
+
+Addon files (`CLAUDE_*.md`) may add their own KB files — load them per the addon's routing guidance.

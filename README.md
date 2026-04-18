@@ -4,7 +4,7 @@ An MCP server plugin that connects AI assistants to [Mod Organizer 2](https://ww
 
 ## Quick Install (Recommended)
 
-**Download [claude-mo2-setup-v2.5.3.exe](https://github.com/Avick3110/Claude_MO2/releases/latest/download/claude-mo2-setup-v2.5.3.exe) and run it.**
+**Download [claude-mo2-setup-v2.5.5.exe](https://github.com/Avick3110/Claude_MO2/releases/latest/download/claude-mo2-setup-v2.5.5.exe) and run it.**
 
 The installer:
 - Detects whether .NET 8 Runtime is installed; guides you to Microsoft's download page if missing
@@ -43,7 +43,7 @@ See [Manual Install](#manual-install) below if you prefer to copy files yourself
 - Mod Organizer 2 (v2.5.0+) with a Skyrim SE modlist
 - Python 3.11+ (bundled with MO2)
 - [.NET 8 Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (required by the bundled `spooky-bridge.exe` and Spooky CLI for ESP patching and other capabilities)
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or any MCP-compatible client
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) **v2.1.73 or later** — earlier versions install fine but the bundled `.claude/skills/` won't auto-load. Any MCP-compatible client also works for tool access; skills are a Claude Code feature.
 
 ### Optional — only needed for specific capabilities
 
@@ -56,7 +56,7 @@ See [Manual Install](#manual-install) below if you prefer to copy files yourself
 Alternative to the installer above. Use this if you prefer to copy files yourself, or if you're on a platform where the installer doesn't run.
 
 1. Copy the `mo2_mcp/` folder into your MO2 `plugins/` directory
-2. Copy `claude-mo2-setup-v2.5.3.exe` internals (specifically, the bundled `tools/spooky-bridge/` and `tools/spooky-cli/`) into `plugins/mo2_mcp/tools/` — or run the installer once to populate those, then copy the result somewhere else
+2. Copy `claude-mo2-setup-v2.5.5.exe` internals (specifically, the bundled `tools/spooky-bridge/` and `tools/spooky-cli/`) into `plugins/mo2_mcp/tools/` — or run the installer once to populate those, then copy the result somewhere else
 3. Restart MO2
 4. Start the server: **Tools > Start/Stop Claude Server**
 

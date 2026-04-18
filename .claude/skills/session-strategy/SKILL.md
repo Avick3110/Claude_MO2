@@ -1,8 +1,8 @@
-# KB_SessionStrategy.md — MCP Session Operational Rules
-
-Load this at the start of any session involving heavy MCP tool use, multiple parallel calls, or mixed tool types (MCP + Bash + file processing).
-
 ---
+description: Operational rules for sessions using heavy MCP tool use, multiple parallel calls, or mixed tool types (MCP + Bash + file processing). Covers safe vs unsafe parallel batching (never mix Bash + MCP in one batch), agent delegation rules for bulk reads, context management and priority order when approaching limits, and tool-specific notes (record index, large plugin conflicts, file listing, editor ID searches). Use at the start of any session involving extensive MCP work or when orchestrating many parallel calls.
+---
+
+# MCP Session Operational Rules
 
 ## Parallel Execution Rules
 

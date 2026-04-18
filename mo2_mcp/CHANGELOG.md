@@ -4,6 +4,66 @@ All plugin changes are made in the Dev Build copy first. Once tested and stable,
 
 ---
 
+## v2.5.5 — 2026-04-19
+
+Full KB → Skills migration. Six task-procedure KBs and most of the tool reference (`kb/KB_Tools.md`) are now Claude Code skills at `.claude/skills/<name>/SKILL.md`. Skills are auto-discovered and trigger-matched by Claude Code based on each skill's `description` frontmatter — no manual routing table required. The always-loaded core (`kb/KB_Tools.md`) shrinks from 369 lines to 149 lines, covering only the tools used in every session (modlist queries, VFS, write, record indexing, record queries, conflict analysis) plus FormID format, field interpretation output types, and a pointer to the category skills. Functional behavior is unchanged; this is a delivery-mechanism upgrade that eliminates eager loading of procedures and tool categories that aren't relevant to the current task.
+
+**Prerequisite: Claude Code v2.1.73+.** Earlier versions install fine but the bundled `.claude/skills/` folder won't auto-load.
+
+### Added
+
+- **6 task-procedure skills** at `.claude/skills/<name>/SKILL.md`:
+  - `crash-diagnostics` (was `kb/KB_Diagnostics.md`)
+  - `leveled-list-patching` (was `kb/KB_LeveledListPatching.md`)
+  - `mod-dissection` (was `kb/KB_ModDissection.md`, now absorbs three procedural sections from `kb/KB_Tools.md`: script health check workflow, efficient conflict analysis workflow, CELL/WRLD ITM handling)
+  - `npc-analysis` (was `kb/KB_NPCAnalysis.md`)
+  - `npc-outfit-investigation` (was `kb/KB_NPC_Outfits.md`)
+  - `session-strategy` (was `kb/KB_SessionStrategy.md`)
+- **5 MCP tool category skills** (new — split out of `kb/KB_Tools.md`):
+  - `esp-patching` — `mo2_create_patch` (override ops, merge leveled lists, attach scripts) + Mutagen field interpretation narrative
+  - `papyrus-compilation` — `mo2_compile_script` and its Creation Kit prerequisite
+  - `bsa-archives` — all four BSA/BA2 tools (`mo2_list_bsa`, `mo2_extract_bsa`, `mo2_extract_bsa_file`, `mo2_validate_bsa`)
+  - `nif-meshes` — all three NIF tools (`mo2_nif_info`, `mo2_nif_list_textures`, `mo2_nif_shader_info`)
+  - `audio-voice` — both audio tools (`mo2_audio_info`, `mo2_extract_fuz`)
+- **`.claude/skills/` auto-bundled by the installer** into `<MO2>/plugins/mo2_mcp/.claude/skills/`. Same project-scope behavior as `CLAUDE.md` and `kb/KB_Tools.md` — skills are discovered when Claude Code opens a working directory that contains them.
+
+### Changed
+
+- **`kb/KB_Tools.md` reduced from 369 lines to 149 lines** (60% shrink). Now contains only the core tool reference loaded in every session: startup procedure, the core tool tables (modlist queries, VFS, write, index management, record queries, conflict analysis), FormID format, field interpretation output types table, and a "Category Skills" pointer. Tool-category documentation (ESP patching, Papyrus, BSA, NIF, audio) moved into the new category skills. Procedural content (efficient conflict analysis workflow, CELL/WRLD handling, script health check) moved into `mod-dissection`. ESP binary format quick reference and Nexus research guidance dropped — the former is derivable from UESP, the latter is already covered in `CLAUDE.md` and `mod-dissection`.
+- **`CLAUDE.md`** — removed the "Operational KB Routing" block (no longer needed; skills auto-load). Added a Skills section listing all 11 bundled skills grouped into task-procedure skills and MCP tool category skills. "Building Knowledge Through Use" now routes findings into three buckets: modlist rules → `CLAUDE_*.md` addon, reusable procedures or tool categories → new skill, topic reference → `kb/KB_*.md`.
+- **`KNOWLEDGEBASE.md`** — reduced to a short index pointing at the shrunken `kb/KB_Tools.md` and cross-referencing the skills in `CLAUDE.md`.
+- **Installer** (`installer/claude-mo2-installer.iss`) — removed the six individual `kb/KB_*.md` copy lines for files that became skills; added one recursive copy of `.claude/skills/*`. `kb/KB_Tools.md` still ships as the always-load core tools reference.
+- **`README.md`** — Requirements section now specifies Claude Code v2.1.73+ as the minimum supported version (for skills auto-discovery). Added note that any MCP-compatible client works for tool access; skills are a Claude Code feature.
+- **`KNOWN_ISSUES.md`** — new "Environmental quirks" entry documenting the CC v2.1.73+ prerequisite for skills auto-discovery.
+- **`PLUGIN_VERSION`** bumped to `(2, 5, 4)`.
+
+### Removed
+
+- **6 `kb/KB_*.md` files** from the repo (Diagnostics, LeveledListPatching, ModDissection, NPCAnalysis, NPC_Outfits, SessionStrategy). Content lives in the corresponding `SKILL.md` files.
+- Several sections of `kb/KB_Tools.md` — ESP patching reference (→ `esp-patching` skill), Papyrus reference (→ `papyrus-compilation` skill), BSA/NIF/Audio references (→ respective skills), efficient conflict analysis + CELL/WRLD + script health check workflows (→ `mod-dissection` skill), ESP binary format quick reference (derivable from UESP), and Nexus research guidance (already in `CLAUDE.md` and `mod-dissection`).
+
+### Not changed
+
+- MCP tool count, behavior, or interface — 29 tools, identical surface.
+- Bridge binary — unchanged since v2.4.1.
+- `~/.claude.json` auto-registration — same as v2.5.1+.
+
+### Context budget impact
+
+Across the six task-procedure skills and the KB_Tools shrink, approximately **745 lines of previously eager-loaded content** (525 across the deleted KB files + 220 from the KB_Tools reduction) now load on demand instead of every session. Actual per-session token savings depend on which skills the task triggers — sessions that don't touch ESP patching, BSA, NIF, audio, Papyrus, or the deep diagnostic procedures may save the entire 745 lines.
+
+### Addon authors
+
+Modlist-specific procedures can now live as skills in an addon's `.claude/skills/<name>/SKILL.md` alongside `CLAUDE_*.md` files — Claude Code auto-discovers them alongside the bundled set. Useful for modlist-specific patching workflows, list-specific diagnostic steps, or conventions unique to a particular overhaul.
+
+### Migration
+
+- **Requires Claude Code v2.1.73+.** Users on older CC can install the plugin but skills won't auto-load — task-specific procedures and category-specific tool references will silently fail to fire. Upgrade CC first.
+- Upgrading over v2.5.3 leaves the old `kb/KB_Diagnostics.md`, `kb/KB_LeveledListPatching.md`, `kb/KB_ModDissection.md`, `kb/KB_NPCAnalysis.md`, `kb/KB_NPC_Outfits.md`, and `kb/KB_SessionStrategy.md` in `<MO2>/plugins/mo2_mcp/kb/` as orphans. Inno Setup only removes files it installed, not prior-layout stragglers. They're harmless (CLAUDE.md no longer routes to them) but can be manually deleted for tidiness. `kb/KB_Tools.md` is overwritten in place with the shrunken version — no orphan.
+- For skills to be discovered, Claude Code's working directory must contain the `.claude/` folder — same scope constraint as CLAUDE.md and the kb/ files. Nothing new to configure.
+
+---
+
 ## v2.5.3 — 2026-04-18
 
 Cosmetic reorg: moved the 7 `KB_*.md` knowledge-base files into a `kb/` subdirectory. No functional or tool-behavior changes.

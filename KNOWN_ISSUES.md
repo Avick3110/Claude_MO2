@@ -40,7 +40,7 @@ These are by design — we don't bundle proprietary or license-undecidable tools
 
 `mo2_create_patch` can merge LVLI / LVLN / LVSP entries across conflicting plugins, but the **base plugin** (whose records are used as-is) must be chosen by the caller. For an overhaul conflict with a content mod, using the vanilla master as base would revert the overhaul's intentional restructuring (deleveling, reweighting) — you want the overhaul as the base and the content mod's unique entries merged in.
 
-See `kb/KB_LeveledListPatching.md` for the reasoning framework.
+See the `leveled-list-patching` skill (`.claude/skills/leveled-list-patching/SKILL.md`) for the reasoning framework.
 
 ### Spell conditions apply at effect level, not record level
 
@@ -58,6 +58,7 @@ By default, FormIDs in the output are rendered as `Plugin:HexID`. Pass `resolve_
 
 ## Environmental quirks (not code bugs, but worth knowing)
 
+- **Claude Code v2.1.73+ required for skills auto-discovery.** The plugin ships procedures and tool-category references as skills under `.claude/skills/`. Claude Code auto-discovers these when the working directory contains the `.claude/` folder. Versions older than v2.1.73 may not support auto-discovery — the plugin still installs and the MCP tools still work, but task-specific skills (crash diagnostics, mod dissection, category-specific tool reference, etc.) won't fire automatically.
 - **Claude Code caches the MCP tool list at session start.** If you start the server in MO2 mid-session, Claude Code doesn't see the new tools until you restart Claude Code.
 - **MO2 doesn't reload Python modules on server stop/start.** After editing any `.py` inside the plugin, delete `__pycache__/` AND fully restart MO2 (not just the Tools > Start/Stop Claude Server toggle).
 - **Losing the MCP server during MO2 restart breaks the Claude Code connection** for that session. Restart Claude Code to rediscover. Known Claude Code limitation, not fixable on our side.

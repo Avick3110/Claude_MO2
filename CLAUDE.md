@@ -26,7 +26,7 @@ If the server isn't responding, check in order:
 
 ## Available Tools
 
-Claude has 29 MCP tools. Load `kb/KB_Tools.md` for the full reference with parameters and usage patterns.
+Claude has 29 MCP tools. `kb/KB_Tools.md` covers the core tools used every session (modlist, VFS, write, records, conflicts). Category-specific tools (ESP patching, Papyrus, BSA, NIF, audio) live in skills under `.claude/skills/` that auto-load when the task matches.
 
 **Modlist queries:** `mo2_ping`, `mo2_list_mods`, `mo2_mod_info`, `mo2_list_plugins`, `mo2_plugin_info`, `mo2_find_conflicts`
 
@@ -57,33 +57,43 @@ On first launch, or if the record index hasn't been built yet:
 ## Knowledge Base
 
 ### Bundled Files
-- **kb/KB_Tools.md** — Load this for any session that uses MCP tools. Contains the full tool reference, workflow patterns, anti-patterns, and ESP format reference.
+- **kb/KB_Tools.md** — Load this for any session that uses MCP tools. Contains the core tool reference (modlist queries, VFS, write, record indexing, record queries, conflict analysis), FormID format, and field interpretation output types. Category-specific tool references (ESP patching, Papyrus, BSA, NIF, audio) live in skills.
+
+### Skills (`.claude/skills/`)
+Task-specific procedures live as skills in `.claude/skills/` and are auto-loaded by Claude Code when their trigger description matches the current task. No manual routing needed — when the user asks about a crash, the `crash-diagnostics` skill fires; when they ask to analyze a mod, `mod-dissection` fires; and so on.
+
+Current skills:
+
+Task-procedure skills:
+- `crash-diagnostics` — Crash and freeze triage (hard freeze vs CTD)
+- `leveled-list-patching` — Merge-patch reasoning framework for LVLI/LVLN/LVSP
+- `mod-dissection` — Mod analysis playbook (tool order, script reading, script health check, efficient conflict analysis, CELL/WRLD handling, context budget)
+- `npc-analysis` — NPC investigation router (parallel first-step queries)
+- `npc-outfit-investigation` — Outfit override chain tracing
+- `session-strategy` — Parallel execution, agent delegation, context management rules
+
+MCP tool category skills (auto-load when their tools are relevant to the task):
+- `esp-patching` — `mo2_create_patch` (override records, merge leveled lists, attach scripts)
+- `papyrus-compilation` — `mo2_compile_script`
+- `bsa-archives` — `mo2_list_bsa`, `mo2_extract_bsa`, `mo2_extract_bsa_file`, `mo2_validate_bsa`
+- `nif-meshes` — `mo2_nif_info`, `mo2_nif_list_textures`, `mo2_nif_shader_info`
+- `audio-voice` — `mo2_audio_info`, `mo2_extract_fuz`
+
+Core tools (modlist queries, VFS, write, records, conflicts) are documented in `kb/KB_Tools.md` which loads every session.
 
 ### Addon Files
-On startup, scan this directory for any `CLAUDE_*.md` files beyond this one. These are modlist-specific addon files provided by list authors or built through use. Load them — they contain the modlist's balance philosophy, conventions, and any rules that extend the general instructions here. Addon files may include their own KB routing table that maps tasks to additional `KB_*.md` files.
+On startup, scan this directory for any `CLAUDE_*.md` files beyond this one. These are modlist-specific addon files provided by list authors or built through use. Load them — they contain the modlist's balance philosophy, conventions, and any rules that extend the general instructions here. Addon files may define additional skills or reference extra KB files.
 
-If no addon files are present, Claude works in general mode using only the MCP tools and general Skyrim modding knowledge. This is fully functional — addon files add depth and context, not core capability.
-
-### Knowledge Base Routing
-If `KNOWLEDGEBASE.md` exists in this directory, read it on startup. It is the index of all available `KB_*.md` files and defines when to load each one based on the task at hand. Only load the KB files relevant to the current task — don't front-load everything.
-
-If no `KNOWLEDGEBASE.md` exists, the only KB file is `kb/KB_Tools.md` (loaded as described above).
-
-### Operational KB Routing
-- Before performing a mod dissection or full mod analysis: load `kb/KB_ModDissection.md`
-- At session start if the session involves heavy tool use or multiple parallel MCP calls: load `kb/KB_SessionStrategy.md`
-- Before creating any leveled list merge patch: load `kb/KB_LeveledListPatching.md`
-- Before investigating any reported crash or freeze: load `kb/KB_Diagnostics.md`
+If no addon files are present, Claude works in general mode using only the MCP tools, bundled skills, and general Skyrim modding knowledge. This is fully functional — addon files add depth and context, not core capability.
 
 ### Building Knowledge Through Use
 As you work with a user's modlist, you will learn things: balance conventions, load order principles, patching patterns, mod-specific quirks. When you discover something significant that would be valuable in future sessions, offer to save it.
 
-Rules for creating and managing KB files:
-- **Naming:** KB files are named `KB_[Topic].md` and live in the `kb/` subdirectory (e.g., `kb/KB_Balance.md`, `kb/KB_NPCs.md`, `kb/KB_LoadOrder.md`)
-- **Creating:** When creating a new KB file, also create or update `KNOWLEDGEBASE.md` to index it. Include a description of what the file contains and when to load it.
-- **Updating:** When adding to an existing KB file, append to the relevant section. Don't reorganize existing content without the user's approval.
-- **Scope:** Each KB file should cover one topic area. Don't create catch-all files.
-- **Always ask first:** Never create or modify KB files without offering and getting confirmation from the user. These files persist across sessions and affect all future interactions.
+Rules for capturing knowledge:
+- **Modlist-specific rules** → add to a `CLAUDE_[YourList].md` addon file.
+- **Reusable procedures (how to do X)** → propose a new skill at `.claude/skills/<name>/SKILL.md` with a clear trigger description.
+- **Topic reference material** → `kb/KB_[Topic].md` when the content is a reference someone reads, not a procedure Claude follows.
+- **Always ask first:** Never create or modify these files without offering and getting confirmation from the user. They persist across sessions and affect all future interactions.
 
 ## Standing Rules
 

@@ -70,6 +70,108 @@ def _find_flags_file(papyrus_exe: Path | None) -> Path | None:
     return None
 
 
+# Spooky CLI helpers
+#
+# Used by tools_archive, tools_nif, and tools_audio to invoke
+# `spookys-automod.exe` in --json mode and parse its Result<T> output.
+# Historically lived here because tools_papyrus was the first consumer; they
+# are NOT used by mo2_compile_script itself (which calls PapyrusCompiler.exe
+# directly — see the module docstring for why). The helpers were briefly
+# removed in v2.5.0 under the mistaken belief they were unused; restored in
+# v2.5.2 after the import failure broke plugin initialization at MO2 load.
+
+
+def _find_spooky_cli(organizer, plugin_dir: Path) -> Path | None:
+    """Locate the bundled spookys-automod.exe.
+
+    Always ships under `<plugin>/tools/spooky-cli/spookys-automod.exe`
+    (installed by the Claude MO2 installer). Returns None if missing so
+    callers can surface a clear install-guidance error. The `organizer`
+    parameter is accepted for symmetry with other discovery helpers and is
+    currently unused.
+    """
+    cli = plugin_dir / "tools" / "spooky-cli" / "spookys-automod.exe"
+    return cli if cli.is_file() else None
+
+
+def _invoke_cli(cli: Path, args: list[str], timeout: int = 60) -> dict:
+    """Run spookys-automod.exe with --json and parse its Result<T> payload.
+
+    Spooky's CLI writes a JSON object to stdout with this shape (keys omitted
+    when null/default by the serializer):
+      - success: bool
+      - result: payload (T)
+      - error: str
+      - errorContext: str
+      - suggestions: list[str]
+
+    The returned dict passes those through plus two diagnostics the callers
+    rely on when failures need surfacing to the model:
+      - stderr: captured stderr
+      - raw_output: stdout (useful when JSON parse failed)
+
+    All failure paths — timeout, exception, empty output, non-JSON output,
+    non-object JSON — return `{"success": False, "error": ..., ...}` so
+    callers can rely on `.get("success")` alone.
+    """
+    try:
+        proc = subprocess.run(
+            [str(cli), *args, "--json"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "error": f"spookys-automod timed out after {timeout}s",
+            "stderr": "",
+            "raw_output": "",
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": f"Failed to run spookys-automod: {exc}",
+            "stderr": "",
+            "raw_output": "",
+        }
+
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+
+    if not stdout.strip():
+        return {
+            "success": False,
+            "error": f"spookys-automod produced no output (exit {proc.returncode})",
+            "stderr": stderr,
+            "raw_output": stdout,
+        }
+
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return {
+            "success": False,
+            "error": f"spookys-automod output was not JSON (exit {proc.returncode})",
+            "stderr": stderr,
+            "raw_output": stdout,
+        }
+
+    if not isinstance(payload, dict):
+        return {
+            "success": False,
+            "error": "spookys-automod JSON output was not an object",
+            "stderr": stderr,
+            "raw_output": stdout,
+        }
+
+    # Surface diagnostics alongside the Result<T> fields. Missing keys on the
+    # happy path are normal — Spooky's serializer omits null/default values.
+    payload.setdefault("stderr", stderr)
+    payload.setdefault("raw_output", "")
+    return payload
+
+
 # Tool registration
 
 

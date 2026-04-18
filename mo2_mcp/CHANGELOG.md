@@ -4,6 +4,30 @@ All plugin changes are made in the Dev Build copy first. Once tested and stable,
 
 ---
 
+## v2.5.2 — 2026-04-18
+
+Hotfix: the plugin failed to load in Mod Organizer 2 with `ImportError: cannot import name '_find_spooky_cli' from 'mo2_mcp.tools_papyrus'`. No MCP server started, so no `mo2_*` tools appeared regardless of whether Claude Code was configured correctly. Both v2.5.0 and v2.5.1 shipped with this bug; v2.5.2 restores the helpers that three other modules depend on.
+
+### Fixed
+
+- **Restored `_find_spooky_cli` and `_invoke_cli` in `tools_papyrus.py`.** The v2.5.0 changelog claimed these were unused and removed them. In fact, `tools_archive.py`, `tools_nif.py`, and `tools_audio.py` all import them to invoke Spooky's CLI for BSA, NIF, and Audio operations. Their removal broke the cascading imports in `__init__.py`, and MO2 refused to load the plugin on startup. The helpers now live back in `tools_papyrus.py` with full docstrings describing their cross-module use, and the import surface is audited (all other intra-package imports are valid).
+
+### Changed
+
+- **`PLUGIN_VERSION`** bumped to `(2, 5, 2)`.
+
+### Not changed
+
+- All MCP tool behavior — no capability or interface changes.
+- Bridge binary — unchanged since v2.4.1.
+- `~/.claude.json` auto-registration from v2.5.1 — still in place, still correct.
+
+### Migration
+
+Install this over v2.5.0 or v2.5.1 and restart MO2. The plugin will now load and register the MCP server with Claude Code. If you already tested v2.5.1 and saw no `mo2_*` tools, that was this bug — the v2.5.1 fix for auto-registration was correct, but the plugin never got far enough to call it.
+
+---
+
 ## v2.5.1 — 2026-04-18
 
 Hotfix: auto-registration into Claude Code was writing to a path Claude Code does not read. Fresh installs on v2.5.0 appeared to "silently succeed" (server running, log showing config written) but Claude Code never discovered the server unless the user manually added a project-level `.mcp.json`.

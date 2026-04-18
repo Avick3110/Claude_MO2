@@ -99,7 +99,7 @@ Both steps are required. Deleting `__pycache__` alone does nothing — the old m
   - `add_conditions` / `remove_conditions` — works on any record with a `Conditions` property (PERK, MGEF, PACK, etc.). Spells carry conditions per effect; use the MGEF. Supports `ConditionFloat` (numeric) and `ConditionGlobal` (via `global: "Plugin:FormID"`).
   - `attach_scripts` — VMAD scripts with typed properties (Object / Int / Float / Bool / String / Alias).
   - `set_enchantment` / `clear_enchantment`
-- `merge_leveled_list` params: `base_plugin` (required — the overhaul whose restructuring to keep as-is), `overrides` (list of plugins whose unique entries to add). See `KB_LeveledListPatching.md` for how to pick the base.
+- `merge_leveled_list` params: `base_plugin` (required — the overhaul whose restructuring to keep as-is), `overrides` (list of plugins whose unique entries to add). See `kb/KB_LeveledListPatching.md` for how to pick the base.
 - Returns: success, per-operation counters (`keywords_added`, `spells_added`, etc.), output ESP path, master count.
 
 ### Papyrus
@@ -365,5 +365,5 @@ See `KNOWN_ISSUES.md` in the plugin root for the current list. Highlights:
 - BSA tools need `BSArch.exe` (xEdit release).
 - NIF extras (`list-textures`, `shader-info`) need `nif-tool.exe`.
 - Spells carry conditions per effect (MGEF), not at the record level — condition SPEL via its MGEF.
-- Leveled list merge requires caller judgment on `base_plugin` — see `KB_LeveledListPatching.md`.
+- Leveled list merge requires caller judgment on `base_plugin` — see `kb/KB_LeveledListPatching.md`.
 - `mo2_record_detail` has a reflection depth cap (default 6) that can truncate extremely deep objects.

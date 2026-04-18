@@ -15,4 +15,4 @@ On the QUST results, flag any quest **won by an unexpected plugin** (not the ori
 
 | Topic | File | Load When |
 |---|---|---|
-| Outfit / appearance / what the NPC wears | `KB_NPC_Outfits.md` | Outfit consistency checks, armor conflicts, visual overhaul analysis |
+| Outfit / appearance / what the NPC wears | `kb/KB_NPC_Outfits.md` | Outfit consistency checks, armor conflicts, visual overhaul analysis |

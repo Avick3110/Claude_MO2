@@ -4,6 +4,28 @@ All plugin changes are made in the Dev Build copy first. Once tested and stable,
 
 ---
 
+## v2.5.3 — 2026-04-18
+
+Cosmetic reorg: moved the 7 `KB_*.md` knowledge-base files into a `kb/` subdirectory. No functional or tool-behavior changes.
+
+### Changed
+
+- **`KB_*.md` location.** Moved from the repo root (and installer's flat `{app}\plugins\mo2_mcp\`) into a `kb/` subdirectory. Installer now writes KBs to `{app}\plugins\mo2_mcp\kb\`, alongside the existing `tools/` and `ordlookup/` subfolders. Repo root drops from 9 top-level `.md` files to 4 (README, LICENSE, THIRD_PARTY_NOTICES, KNOWN_ISSUES) plus CLAUDE.md + KNOWLEDGEBASE.md, which stay at root because Claude Code auto-loads CLAUDE.md and the routing index pairs naturally with it.
+- **Cross-references updated.** `CLAUDE.md`, `KNOWLEDGEBASE.md`, `README.md`, `KNOWN_ISSUES.md`, `KB_Tools.md`, `KB_NPCAnalysis.md`, and `KB_NPC_Outfits.md` now point to `kb/KB_*.md` paths consistently (both routing instructions and cross-KB references).
+- **`PLUGIN_VERSION`** bumped to `(2, 5, 3)`.
+
+### Not changed
+
+- MCP tool count, behavior, or interface — 29 tools, identical surface.
+- Bridge binary — unchanged since v2.4.1.
+- `~/.claude.json` auto-registration — same as v2.5.1+.
+
+### Migration
+
+Upgrading over an earlier install leaves the old flat `KB_*.md` files in `<MO2>\plugins\mo2_mcp\` as orphans — Inno Setup only removes files it installed, not previous-layout stragglers. They're harmless (CLAUDE.md + KNOWLEDGEBASE.md now route through `kb/` so the flat copies are never loaded), but can be manually deleted for tidiness. A clean reinstall (delete the plugin folder first, then run the installer) avoids this entirely.
+
+---
+
 ## v2.5.2 — 2026-04-18
 
 Hotfix: the plugin failed to load in Mod Organizer 2 with `ImportError: cannot import name '_find_spooky_cli' from 'mo2_mcp.tools_papyrus'`. No MCP server started, so no `mo2_*` tools appeared regardless of whether Claude Code was configured correctly. Both v2.5.0 and v2.5.1 shipped with this bug; v2.5.2 restores the helpers that three other modules depend on.

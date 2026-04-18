@@ -82,7 +82,7 @@ If you're using a different MCP client, point it to `http://localhost:27015/mcp`
 
 ## Tool Reference
 
-The plugin provides 29 MCP tools. See `KB_Tools.md` for the full reference with parameters, usage patterns, and workflow examples.
+The plugin provides 29 MCP tools. See `kb/KB_Tools.md` for the full reference with parameters, usage patterns, and workflow examples.
 
 | Category | Tools |
 |----------|-------|

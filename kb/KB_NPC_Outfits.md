@@ -11,7 +11,7 @@ If an NPC has a management quest with outfit script properties, DOFT and WNAM on
 ## Steps
 
 ### 1. Check Flagged Quests from NPC Router
-The parallel query in KB_NPCAnalysis.md already found QUST records. Check the winning version's VMAD script properties for:
+The parallel query in kb/KB_NPCAnalysis.md already found QUST records. Check the winning version's VMAD script properties for:
 - `*Outfit*` properties — OTFT FormID references
 - `*Armor*` / equipment properties — ARMO references
 - Container/FormList properties — outfit system storage

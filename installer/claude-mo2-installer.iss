@@ -18,7 +18,7 @@
 ; 5. Reports which optional tools are detected post-install.
 
 #define AppName "Claude MO2"
-#define AppVersion "2.5.2"
+#define AppVersion "2.5.3"
 #define AppPublisher "Aaronavich"
 #define AppURL "https://github.com/Aaronavich/claude-mo2"
 #define PluginFolder "mo2_mcp"
@@ -110,13 +110,13 @@ Source: "..\README.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignorev
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
 Source: "..\KNOWN_ISSUES.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
 Source: "..\CLAUDE.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
-Source: "..\KB_Tools.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
-Source: "..\KB_LeveledListPatching.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
-Source: "..\KB_Diagnostics.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
-Source: "..\KB_ModDissection.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
-Source: "..\KB_NPCAnalysis.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
-Source: "..\KB_NPC_Outfits.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
-Source: "..\KB_SessionStrategy.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
+Source: "..\kb\KB_Tools.md"; DestDir: "{app}\plugins\{#PluginFolder}\kb"; Flags: ignoreversion
+Source: "..\kb\KB_LeveledListPatching.md"; DestDir: "{app}\plugins\{#PluginFolder}\kb"; Flags: ignoreversion
+Source: "..\kb\KB_Diagnostics.md"; DestDir: "{app}\plugins\{#PluginFolder}\kb"; Flags: ignoreversion
+Source: "..\kb\KB_ModDissection.md"; DestDir: "{app}\plugins\{#PluginFolder}\kb"; Flags: ignoreversion
+Source: "..\kb\KB_NPCAnalysis.md"; DestDir: "{app}\plugins\{#PluginFolder}\kb"; Flags: ignoreversion
+Source: "..\kb\KB_NPC_Outfits.md"; DestDir: "{app}\plugins\{#PluginFolder}\kb"; Flags: ignoreversion
+Source: "..\kb\KB_SessionStrategy.md"; DestDir: "{app}\plugins\{#PluginFolder}\kb"; Flags: ignoreversion
 Source: "..\KNOWLEDGEBASE.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
 
 [Dirs]

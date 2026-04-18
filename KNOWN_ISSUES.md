@@ -40,7 +40,7 @@ These are by design — we don't bundle proprietary or license-undecidable tools
 
 `mo2_create_patch` can merge LVLI / LVLN / LVSP entries across conflicting plugins, but the **base plugin** (whose records are used as-is) must be chosen by the caller. For an overhaul conflict with a content mod, using the vanilla master as base would revert the overhaul's intentional restructuring (deleveling, reweighting) — you want the overhaul as the base and the content mod's unique entries merged in.
 
-See `KB_LeveledListPatching.md` for the reasoning framework.
+See `kb/KB_LeveledListPatching.md` for the reasoning framework.
 
 ### Spell conditions apply at effect level, not record level
 

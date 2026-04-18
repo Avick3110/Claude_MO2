@@ -26,7 +26,7 @@ If the server isn't responding, check in order:
 
 ## Available Tools
 
-Claude has 29 MCP tools. Load `KB_Tools.md` for the full reference with parameters and usage patterns.
+Claude has 29 MCP tools. Load `kb/KB_Tools.md` for the full reference with parameters and usage patterns.
 
 **Modlist queries:** `mo2_ping`, `mo2_list_mods`, `mo2_mod_info`, `mo2_list_plugins`, `mo2_plugin_info`, `mo2_find_conflicts`
 
@@ -57,7 +57,7 @@ On first launch, or if the record index hasn't been built yet:
 ## Knowledge Base
 
 ### Bundled Files
-- **KB_Tools.md** — Load this for any session that uses MCP tools. Contains the full tool reference, workflow patterns, anti-patterns, and ESP format reference.
+- **kb/KB_Tools.md** — Load this for any session that uses MCP tools. Contains the full tool reference, workflow patterns, anti-patterns, and ESP format reference.
 
 ### Addon Files
 On startup, scan this directory for any `CLAUDE_*.md` files beyond this one. These are modlist-specific addon files provided by list authors or built through use. Load them — they contain the modlist's balance philosophy, conventions, and any rules that extend the general instructions here. Addon files may include their own KB routing table that maps tasks to additional `KB_*.md` files.
@@ -67,19 +67,19 @@ If no addon files are present, Claude works in general mode using only the MCP t
 ### Knowledge Base Routing
 If `KNOWLEDGEBASE.md` exists in this directory, read it on startup. It is the index of all available `KB_*.md` files and defines when to load each one based on the task at hand. Only load the KB files relevant to the current task — don't front-load everything.
 
-If no `KNOWLEDGEBASE.md` exists, the only KB file is `KB_Tools.md` (loaded as described above).
+If no `KNOWLEDGEBASE.md` exists, the only KB file is `kb/KB_Tools.md` (loaded as described above).
 
 ### Operational KB Routing
-- Before performing a mod dissection or full mod analysis: load `KB_ModDissection.md`
-- At session start if the session involves heavy tool use or multiple parallel MCP calls: load `KB_SessionStrategy.md`
-- Before creating any leveled list merge patch: load `KB_LeveledListPatching.md`
-- Before investigating any reported crash or freeze: load `KB_Diagnostics.md`
+- Before performing a mod dissection or full mod analysis: load `kb/KB_ModDissection.md`
+- At session start if the session involves heavy tool use or multiple parallel MCP calls: load `kb/KB_SessionStrategy.md`
+- Before creating any leveled list merge patch: load `kb/KB_LeveledListPatching.md`
+- Before investigating any reported crash or freeze: load `kb/KB_Diagnostics.md`
 
 ### Building Knowledge Through Use
 As you work with a user's modlist, you will learn things: balance conventions, load order principles, patching patterns, mod-specific quirks. When you discover something significant that would be valuable in future sessions, offer to save it.
 
 Rules for creating and managing KB files:
-- **Naming:** KB files are named `KB_[Topic].md` (e.g., `KB_Balance.md`, `KB_NPCs.md`, `KB_LoadOrder.md`)
+- **Naming:** KB files are named `KB_[Topic].md` and live in the `kb/` subdirectory (e.g., `kb/KB_Balance.md`, `kb/KB_NPCs.md`, `kb/KB_LoadOrder.md`)
 - **Creating:** When creating a new KB file, also create or update `KNOWLEDGEBASE.md` to index it. Include a description of what the file contains and when to load it.
 - **Updating:** When adding to an existing KB file, append to the relevant section. Don't reorganize existing content without the user's approval.
 - **Scope:** Each KB file should cover one topic area. Don't create catch-all files.

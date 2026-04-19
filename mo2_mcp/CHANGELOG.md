@@ -35,7 +35,7 @@ Full KB → Skills migration. Six task-procedure KBs and most of the tool refere
 - **Installer** (`installer/claude-mo2-installer.iss`) — removed the six individual `kb/KB_*.md` copy lines for files that became skills; added one recursive copy of `.claude/skills/*`. `kb/KB_Tools.md` still ships as the always-load core tools reference.
 - **`README.md`** — Requirements section now specifies Claude Code v2.1.73+ as the minimum supported version (for skills auto-discovery). Added note that any MCP-compatible client works for tool access; skills are a Claude Code feature.
 - **`KNOWN_ISSUES.md`** — new "Environmental quirks" entry documenting the CC v2.1.73+ prerequisite for skills auto-discovery.
-- **`PLUGIN_VERSION`** bumped to `(2, 5, 4)`.
+- **`PLUGIN_VERSION`** bumped to `(2, 5, 5)`.
 
 ### Removed
 

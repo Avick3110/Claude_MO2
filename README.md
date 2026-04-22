@@ -9,7 +9,7 @@ An MCP server plugin that connects AI assistants to [Mod Organizer 2](https://ww
 The installer:
 - Detects whether .NET 8 Runtime is installed; guides you to Microsoft's download page if missing
 - Prompts for your Mod Organizer 2 folder (the one containing `ModOrganizer.exe`)
-- Copies the plugin + `spooky-bridge.exe` + Spooky CLI into `<MO2>\plugins\mo2_mcp\`
+- Copies the plugin + `mutagen-bridge.exe` + Spooky CLI into `<MO2>\plugins\mo2_mcp\`
 - Reports which optional tools are detected on completion
 
 After install:
@@ -28,7 +28,7 @@ See [Manual Install](#manual-install) below if you prefer to copy files yourself
 - **Full modlist access** — list mods, query plugins, resolve virtual file paths
 - **ESP/ESM/ESL record reading** — parse any record type with field-level detail via Mutagen (localized strings resolve, VMAD scripts and properties render correctly)
 - **Conflict detection** — field-by-field comparison across the full override chain
-- **ESP patch creation** — overrides with field/flag/keyword/spell/perk/faction/inventory/package/outfit/form-list/leveled-list/condition/script modifications; leveled list merging (LVLI/LVLN/LVSP). Built on [Spooky's AutoMod Toolkit](https://github.com/SpookyPirate/spookys-automod-toolkit) + [Mutagen](https://github.com/Mutagen-Modding/Mutagen).
+- **ESP patch creation** — overrides with field/flag/keyword/spell/perk/faction/inventory/package/outfit/form-list/leveled-list/condition/script modifications; leveled list merging (LVLI/LVLN/LVSP). Built on [Mutagen](https://github.com/Mutagen-Modding/Mutagen).
 - **Papyrus** — compile `.psc` scripts to `.pex` (requires the Creation Kit for `PapyrusCompiler.exe` + base-Skyrim script sources). Decompile is intentionally not included — no currently-available decompiler produces clean round-trip output.
 - **BSA/BA2 archives** — list, extract, and validate (requires BSArch.exe, ships with xEdit)
 - **NIF meshes** — read format metadata; list textures and inspect shader properties (requires nif-tool.exe for the last two)
@@ -42,7 +42,7 @@ See [Manual Install](#manual-install) below if you prefer to copy files yourself
 
 - Mod Organizer 2 (v2.5.0+) with a Skyrim SE modlist
 - Python 3.11+ (bundled with MO2)
-- [.NET 8 Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (required by the bundled `spooky-bridge.exe` and Spooky CLI for ESP patching and other capabilities)
+- [.NET 8 Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (required by the bundled `mutagen-bridge.exe` and Spooky CLI for ESP patching and other capabilities)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) **v2.1.73 or later** — earlier versions install fine but the bundled `.claude/skills/` won't auto-load. Any MCP-compatible client also works for tool access; skills are a Claude Code feature.
 
 ### Optional — only needed for specific capabilities
@@ -56,7 +56,7 @@ See [Manual Install](#manual-install) below if you prefer to copy files yourself
 Alternative to the installer above. Use this if you prefer to copy files yourself, or if you're on a platform where the installer doesn't run.
 
 1. Copy the `mo2_mcp/` folder into your MO2 `plugins/` directory
-2. Copy `claude-mo2-setup-v2.5.5.exe` internals (specifically, the bundled `tools/spooky-bridge/` and `tools/spooky-cli/`) into `plugins/mo2_mcp/tools/` — or run the installer once to populate those, then copy the result somewhere else
+2. Copy `claude-mo2-setup-v2.5.5.exe` internals (specifically, the bundled `tools/mutagen-bridge/` and `tools/spooky-cli/`) into `plugins/mo2_mcp/tools/` — or run the installer once to populate those, then copy the result somewhere else
 3. Restart MO2
 4. Start the server: **Tools > Start/Stop Claude Server**
 
@@ -102,7 +102,7 @@ The plugin runs a lightweight HTTP server inside MO2's process, exposing MO2's P
 
 **Record indexing (Python, in-process):** A record index built on first use caches the location of every record across your load order. ~18-20 seconds for a large modlist on first scan, ~6 seconds from cache thereafter. Index queries (`mo2_query_records`, `mo2_conflict_chain`, `mo2_plugin_conflicts`) answer from the cache with no file I/O.
 
-**Field interpretation and ESP patching (Mutagen via spooky-bridge):** When you need a record's actual field values (`mo2_record_detail`) or want to write an ESP patch (`mo2_create_patch`), the Python handler invokes `spooky-bridge.exe` — a thin .NET 8 CLI that references [Spooky's AutoMod Toolkit](https://github.com/SpookyPirate/spookys-automod-toolkit) and [Mutagen](https://github.com/Mutagen-Modding/Mutagen) for engine-correct parsing and writing.
+**Field interpretation and ESP patching (Mutagen via mutagen-bridge):** When you need a record's actual field values (`mo2_record_detail`) or want to write an ESP patch (`mo2_create_patch`), the Python handler invokes `mutagen-bridge.exe` — a thin .NET 8 CLI that references [Mutagen](https://github.com/Mutagen-Modding/Mutagen) directly via NuGet for engine-correct parsing and writing.
 
 **Ancillary modules (Spooky CLI subprocess):** Papyrus, BSA, NIF, and Audio tools shell out to Spooky's CLI with JSON output. Each is one subprocess per call.
 
@@ -163,7 +163,7 @@ See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for the full list. Key limitations:
 
 ## Building from Source
 
-You only need this if you want to build the installer or the `spooky-bridge.exe` binary yourself.
+You only need this if you want to build the installer or the `mutagen-bridge.exe` binary yourself.
 
 Prerequisites:
 - [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) (not just the runtime)
@@ -186,7 +186,7 @@ git submodule update --init --recursive
 Build:
 
 ```powershell
-# Binaries only (spooky-bridge.exe + Spooky CLI into build-output\)
+# Binaries only (mutagen-bridge.exe + Spooky CLI into build-output\)
 .\build\build-release.ps1
 
 # Also compile the installer (.exe into build-output\installer\)
@@ -201,10 +201,10 @@ The repo layout:
 | Path | What |
 |---|---|
 | `mo2_mcp/` | Python plugin source (runs inside MO2) |
-| `tools/spooky-bridge/` | .NET 8 C# source for the Mutagen bridge |
+| `tools/mutagen-bridge/` | .NET 8 C# source for the Mutagen bridge |
 | `installer/` | Inno Setup script + user-provided tool README stubs |
 | `build/build-release.ps1` | Build pipeline |
-| `spooky-toolkit/` | Git submodule — Spooky's AutoMod Toolkit (upstream) |
+| `spooky-toolkit/` | Git submodule — Spooky's AutoMod Toolkit (still required for the Spooky CLI build: Papyrus, BSA, NIF, non-FUZ audio). The mutagen-bridge itself does not depend on it. |
 | `build-output/` | Build artifacts (gitignored; not committed) |
 | `KB_*.md`, `CLAUDE.md` | Knowledge-base docs shipped with the plugin |
 
@@ -214,8 +214,8 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 Bundled third-party components (all MIT-licensed):
 - [pefile](https://github.com/erocarrera/pefile)
-- [Mutagen](https://github.com/Mutagen-Modding/Mutagen) — linked into `spooky-bridge.exe`
-- [Spooky's AutoMod Toolkit](https://github.com/SpookyPirate/spookys-automod-toolkit) — CLI + library
+- [Mutagen](https://github.com/Mutagen-Modding/Mutagen) — linked into `mutagen-bridge.exe` via NuGet
+- [Spooky's AutoMod Toolkit](https://github.com/SpookyPirate/spookys-automod-toolkit) — CLI (Papyrus, BSA, NIF, non-FUZ audio)
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for full attribution.
 
@@ -224,5 +224,5 @@ See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for full attribution.
 - Built with [MO2's Python plugin API](https://github.com/ModOrganizer2/modorganizer)
 - DLL analysis via [pefile](https://github.com/erocarrera/pefile) by Ero Carrera
 - ESP reading and writing via [Mutagen.Bethesda.Skyrim](https://github.com/Mutagen-Modding/Mutagen) by the Mutagen team
-- ESP patching built on [Spooky's AutoMod Toolkit](https://github.com/SpookyPirate/spookys-automod-toolkit) by SpookyPirate
+- Papyrus / BSA / NIF / non-FUZ audio tools built on [Spooky's AutoMod Toolkit](https://github.com/SpookyPirate/spookys-automod-toolkit) by SpookyPirate
 - ESP binary format reference from [UESP](https://en.uesp.net/wiki/Skyrim_Mod:Mod_File_Format)

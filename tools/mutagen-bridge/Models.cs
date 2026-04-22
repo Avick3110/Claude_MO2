@@ -1,11 +1,11 @@
-// spooky-bridge - Mutagen bridge for the mo2_mcp plugin
+// mutagen-bridge - Mutagen bridge for the mo2_mcp plugin
 // Copyright (c) 2026 Aaronavich
 // Licensed under the MIT License. See LICENSE for details.
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace SpookyBridge;
+namespace MutagenBridge;
 
 // ── Request Models ──────────────────────────────────────────────────
 

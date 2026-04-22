@@ -1,4 +1,4 @@
-# build-release.ps1 - Build Spooky CLI + spooky-bridge, optionally produce installer or sync to a live MO2 install.
+# build-release.ps1 - Build Spooky CLI + mutagen-bridge, optionally produce installer or sync to a live MO2 install.
 #
 # Usage:
 #   .\build\build-release.ps1                                # Build only, outputs to build-output\
@@ -8,12 +8,15 @@
 #   .\build\build-release.ps1 -SkipCli                       # Skip Spooky CLI build (faster iteration on bridge)
 #
 # Outputs (relative to repo root):
-#   build-output\spooky-cli\    - Spooky's CLI (Papyrus, BSA, NIF, Audio)
-#   build-output\spooky-bridge\ - Our thin bridge exe (ESP patching, record-reading)
-#   build-output\installer\     - claude-mo2-setup-vX.Y.Z.exe (when -BuildInstaller)
+#   build-output\spooky-cli\     - Spooky's CLI (Papyrus, BSA, NIF, Audio)
+#   build-output\mutagen-bridge\ - Our thin bridge exe (ESP patching, record-reading)
+#   build-output\installer\      - claude-mo2-setup-vX.Y.Z.exe (when -BuildInstaller)
 #
 # Prerequisites:
 #   - spooky-toolkit\ submodule cloned (run: git submodule update --init --recursive)
+#     (spooky-toolkit is still needed for the Spooky CLI build targeting
+#     Papyrus / BSA / NIF / Audio non-FUZ workflows. The bridge itself
+#     no longer references the toolkit -- it uses Mutagen direct via NuGet.)
 #   - .NET 8+ SDK on PATH
 #   - Inno Setup 6 (only for -BuildInstaller): https://jrsoftware.org/isdl.php
 
@@ -43,10 +46,10 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $SpookyToolkit = Join-Path $RepoRoot "spooky-toolkit"
-$BridgeProj = Join-Path $RepoRoot "tools\spooky-bridge\spooky-bridge.csproj"
+$BridgeProj = Join-Path $RepoRoot "tools\mutagen-bridge\mutagen-bridge.csproj"
 $BuildOutput = Join-Path $RepoRoot "build-output"
 $CliOutDir = Join-Path $BuildOutput "spooky-cli"
-$BridgeOutDir = Join-Path $BuildOutput "spooky-bridge"
+$BridgeOutDir = Join-Path $BuildOutput "mutagen-bridge"
 
 # Preflight
 
@@ -55,7 +58,7 @@ if (-not (Test-Path $SpookyToolkit)) {
 }
 
 if (-not (Test-Path $BridgeProj)) {
-    throw "spooky-bridge csproj not found at $BridgeProj"
+    throw "mutagen-bridge csproj not found at $BridgeProj"
 }
 
 $dotnetVer = & dotnet --version
@@ -76,16 +79,16 @@ if (-not $SkipCli) {
     Write-Host "[1/2] Skipping Spooky CLI build (-SkipCli)" -ForegroundColor DarkYellow
 }
 
-# Build spooky-bridge
+# Build mutagen-bridge
 
-Write-Host "`n[2/2] Building spooky-bridge ($Configuration)..." -ForegroundColor Cyan
+Write-Host "`n[2/2] Building mutagen-bridge ($Configuration)..." -ForegroundColor Cyan
 dotnet publish $BridgeProj -c $Configuration -o $BridgeOutDir --nologo -v minimal
-if ($LASTEXITCODE -ne 0) { throw "spooky-bridge build failed (exit $LASTEXITCODE)" }
+if ($LASTEXITCODE -ne 0) { throw "mutagen-bridge build failed (exit $LASTEXITCODE)" }
 Write-Host "  -> $BridgeOutDir" -ForegroundColor DarkGray
 
-$BridgeExe = Join-Path $BridgeOutDir "spooky-bridge.exe"
+$BridgeExe = Join-Path $BridgeOutDir "mutagen-bridge.exe"
 if (-not (Test-Path $BridgeExe)) {
-    throw "spooky-bridge.exe not produced at $BridgeExe (check build output)"
+    throw "mutagen-bridge.exe not produced at $BridgeExe (check build output)"
 }
 
 # Bundle external tools into spooky-cli/tools/ so they ride the sync
@@ -140,7 +143,16 @@ if ($SyncLive) {
     }
 
     # Bridge
-    $LiveBridgeDir = Join-Path $MO2PluginDir "tools\spooky-bridge"
+    $LiveBridgeDir = Join-Path $MO2PluginDir "tools\mutagen-bridge"
+
+    # One-release cleanup: wipe any legacy tools/spooky-bridge/ the installer
+    # previously dropped. Keeps the live install from holding two bridge
+    # binaries side by side after an in-place -SyncLive upgrade.
+    $LegacyBridgeDir = Join-Path $MO2PluginDir "tools\spooky-bridge"
+    if (Test-Path $LegacyBridgeDir) {
+        Write-Host "[sync] Removing legacy $LegacyBridgeDir" -ForegroundColor DarkYellow
+        Remove-Item -Recurse -Force $LegacyBridgeDir
+    }
     Write-Host "`n[sync] Copying bridge to $LiveBridgeDir..." -ForegroundColor Cyan
     if (Test-Path $LiveBridgeDir) {
         Remove-Item -Recurse -Force $LiveBridgeDir
@@ -232,7 +244,7 @@ if ($BuildInstaller) {
         throw "Installer script not found at $IssFile"
     }
 
-    # Preflight: installer expects build-output/spooky-bridge and build-output/spooky-cli to be populated.
+    # Preflight: installer expects build-output/mutagen-bridge and build-output/spooky-cli to be populated.
     if (-not (Test-Path $BridgeOutDir)) {
         throw "Bridge output dir missing: $BridgeOutDir. Run a full build first."
     }

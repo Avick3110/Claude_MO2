@@ -13,7 +13,7 @@
 ; This installer:
 ; 1. Prompts the user for their Mod Organizer 2 installation folder (validates that ModOrganizer.exe exists there).
 ; 2. Checks for .NET 8 Runtime; guides to Microsoft's download page if missing.
-; 3. Copies the Python plugin + spooky-bridge.exe + Spooky CLI into <MO2>\plugins\mo2_mcp\.
+; 3. Copies the Python plugin + mutagen-bridge.exe + Spooky CLI into <MO2>\plugins\mo2_mcp\.
 ; 4. Creates placeholder dirs with README stubs for the three user-provided tools (BSArch, nif-tool, PapyrusCompiler).
 ; 5. Reports which optional tools are detected post-install.
 
@@ -77,9 +77,9 @@ Source: "..\{#PluginFolder}\*"; \
     Flags: recursesubdirs createallsubdirs ignoreversion; \
     Excludes: "__pycache__\*,*.pyc"
 
-; spooky-bridge.exe + Mutagen deps — from build-output (produced by build-release.ps1)
-Source: "..\build-output\spooky-bridge\*"; \
-    DestDir: "{app}\plugins\{#PluginFolder}\tools\spooky-bridge"; \
+; mutagen-bridge.exe + Mutagen deps — from build-output (produced by build-release.ps1)
+Source: "..\build-output\mutagen-bridge\*"; \
+    DestDir: "{app}\plugins\{#PluginFolder}\tools\mutagen-bridge"; \
     Flags: recursesubdirs createallsubdirs ignoreversion
 
 ; Spooky CLI — from build-output. Excludes user-provided tools + Champollion
@@ -127,6 +127,14 @@ Name: "{app}\plugins\{#PluginFolder}\tools\spooky-cli\tools\papyrus-compiler"
 
 [Icons]
 ; No start menu icons — this is an MO2 plugin, not a standalone app.
+
+[InstallDelete]
+; Upgrade hygiene: wipe the v2.5.x tools\spooky-bridge\ directory. v2.6+ ships
+; the renamed mutagen-bridge; leaving the old dir behind wastes disk and could
+; confuse _find_bridge's fallback chain. Inno only removes files it installed
+; by default, so the legacy dir would otherwise orphan. Safe because v2.6's
+; binaries land at tools\mutagen-bridge\ (different destination).
+Type: filesandordirs; Name: "{app}\plugins\{#PluginFolder}\tools\spooky-bridge"
 
 [UninstallDelete]
 ; Python creates __pycache__ at runtime; Inno didn't install them, so they'd

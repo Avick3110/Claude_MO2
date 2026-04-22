@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Aaronavich
 # Licensed under the MIT License. See LICENSE for details.
 
-"""MCP tool for ESP patch creation via the Spooky-backed Mutagen bridge.
+"""MCP tool for ESP patch creation via the Mutagen bridge.
 
 Handles every ESP operation we support:
 - override records with field modifications (set_fields, set_flags, clear_flags)
@@ -13,10 +13,9 @@ Handles every ESP operation we support:
 - set/clear enchantment
 - merge leveled lists (LVLI/LVLN/LVSP) with base + overrides
 
-Calls spooky-bridge.exe via subprocess — JSON on stdin, JSON from stdout.
-The bridge references SpookysAutomod.Esp.dll for correct master handling
-and the ScriptPropertyService for VMAD type dispatch. All other modification
-logic lives in the bridge's PatchEngine.cs (ported forward from v3.0).
+Calls mutagen-bridge.exe via subprocess — JSON on stdin, JSON from stdout.
+The bridge references Mutagen.Bethesda.Skyrim directly via NuGet
+(v0.53.1+). All modification logic lives in the bridge's PatchEngine.cs.
 """
 
 from __future__ import annotations
@@ -51,7 +50,7 @@ def register_patching_tools(registry, organizer) -> None:
             "plugins; attach scripts with properties (Object/Int/Float/Bool/"
             "String/Alias); add/remove conditions (ConditionFloat against a "
             "literal, or ConditionGlobal against a global variable). All "
-            "output is Mutagen-validated. Requires spooky-bridge.exe."
+            "output is Mutagen-validated. Requires mutagen-bridge.exe."
         ),
         input_schema={
             "type": "object",
@@ -154,10 +153,10 @@ def _handle_create_patch(organizer, plugin_dir: Path, args: dict) -> str:
     if bridge_path is None:
         return json.dumps({
             "error": (
-                "spooky-bridge.exe not found. "
-                "Expected at: {plugin_dir}/tools/spooky-bridge.exe "
-                "or {plugin_dir}/tools/spooky-bridge/spooky-bridge.exe, "
-                "or configure via 'spooky-bridge-path' plugin setting."
+                "mutagen-bridge.exe not found. "
+                "Expected at: {plugin_dir}/tools/mutagen-bridge.exe "
+                "or {plugin_dir}/tools/mutagen-bridge/mutagen-bridge.exe, "
+                "or configure via 'mutagen-bridge-path' plugin setting."
             ),
         })
 
@@ -253,7 +252,7 @@ def _handle_create_patch(organizer, plugin_dir: Path, args: dict) -> str:
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
         )
     except subprocess.TimeoutExpired:
-        return json.dumps({"error": "spooky-bridge timed out after 60s."})
+        return json.dumps({"error": "mutagen-bridge timed out after 60s."})
     except FileNotFoundError:
         return json.dumps({"error": f"Bridge exe not found: {bridge_path}"})
     except Exception as e:
@@ -282,7 +281,7 @@ def _handle_create_patch(organizer, plugin_dir: Path, args: dict) -> str:
         response.setdefault("warnings", []).extend(errors)
 
     qInfo(
-        f"{PLUGIN_NAME}: spooky bridge - "
+        f"{PLUGIN_NAME}: mutagen bridge - "
         f"{'success' if response.get('success') else 'failed'}: "
         f"{output_name}"
     )
@@ -321,20 +320,30 @@ def _handle_create_patch(organizer, plugin_dir: Path, args: dict) -> str:
 
 
 def _find_bridge(organizer, plugin_dir: Path) -> Path | None:
-    """Find the spooky-bridge executable.
+    """Find the mutagen-bridge executable.
 
-    Search order:
-    1. Plugin setting 'spooky-bridge-path' (explicit override)
-    2. {plugin_dir}/tools/spooky-bridge.exe
-    3. {plugin_dir}/tools/spooky-bridge/spooky-bridge.exe
+    Search order (mutagen-named first; spooky-named is a one-release shim
+    for v2.5.x installs where the user has not yet run the v2.6 installer
+    or -SyncLive wipe-and-copy, and for users who explicitly set the
+    legacy 'spooky-bridge-path' plugin setting):
+    1. Plugin setting 'mutagen-bridge-path' (explicit override)
+    2. Plugin setting 'spooky-bridge-path' (legacy fallback)
+    3. {plugin_dir}/tools/mutagen-bridge.exe
+    4. {plugin_dir}/tools/mutagen-bridge/mutagen-bridge.exe
+    5. {plugin_dir}/tools/spooky-bridge.exe (pre-rename fallback)
+    6. {plugin_dir}/tools/spooky-bridge/spooky-bridge.exe (pre-rename fallback)
     """
-    # Check explicit setting
-    setting = organizer.pluginSetting(PLUGIN_NAME, "spooky-bridge-path")
+    # Check explicit setting (prefer new name; legacy fallback for v2.5.x).
+    setting = organizer.pluginSetting(PLUGIN_NAME, "mutagen-bridge-path")
+    if not setting:
+        setting = organizer.pluginSetting(PLUGIN_NAME, "spooky-bridge-path")
     if setting and os.path.isfile(str(setting)):
         return Path(str(setting))
 
-    # Check standard locations
+    # Check standard locations.
     candidates = [
+        plugin_dir / "tools" / "mutagen-bridge.exe",
+        plugin_dir / "tools" / "mutagen-bridge" / "mutagen-bridge.exe",
         plugin_dir / "tools" / "spooky-bridge.exe",
         plugin_dir / "tools" / "spooky-bridge" / "spooky-bridge.exe",
     ]

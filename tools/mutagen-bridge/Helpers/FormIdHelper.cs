@@ -1,10 +1,10 @@
-// spooky-bridge - Mutagen bridge for the mo2_mcp plugin
+// mutagen-bridge - Mutagen bridge for the mo2_mcp plugin
 // Copyright (c) 2026 Aaronavich
 // Licensed under the MIT License. See LICENSE for details.
 
 using Mutagen.Bethesda.Plugins;
 
-namespace SpookyBridge;
+namespace MutagenBridge;
 
 /// <summary>
 /// Converts between Claude MO2's "PluginName:LocalID" format

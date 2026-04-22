@@ -1,4 +1,4 @@
-// spooky-bridge - Mutagen bridge for the mo2_mcp plugin
+// mutagen-bridge - Mutagen bridge for the mo2_mcp plugin
 // Copyright (c) 2026 Aaronavich
 // Licensed under the MIT License. See LICENSE for details.
 
@@ -10,7 +10,7 @@ using Mutagen.Bethesda.Plugins.Records;
 using Mutagen.Bethesda.Skyrim;
 using Noggog;
 
-namespace SpookyBridge;
+namespace MutagenBridge;
 
 /// <summary>
 /// Core patching engine. Creates an ESP patch mod and applies

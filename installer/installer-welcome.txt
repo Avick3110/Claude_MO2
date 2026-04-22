@@ -11,7 +11,7 @@ Before you continue:
 What gets installed:
 
  * The Python plugin under <MO2>\plugins\mo2_mcp\
- * spooky-bridge.exe (our Mutagen bridge for ESP patching)
+ * mutagen-bridge.exe (our Mutagen bridge for ESP patching)
  * Spooky's AutoMod Toolkit CLI (for BSA, NIF, Audio tools)
  * README stubs for the three optional user-provided tools (BSArch, nif-tool, PapyrusCompiler)
 

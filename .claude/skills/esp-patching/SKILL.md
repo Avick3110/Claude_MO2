@@ -4,7 +4,7 @@ description: Create ESP patch plugins via mo2_create_patch — overrides (set_fi
 
 # ESP Patching
 
-**`mo2_create_patch`** — Write an ESP patch via the Mutagen-backed `spooky-bridge.exe`. One call per patch file, regardless of operation count.
+**`mo2_create_patch`** — Write an ESP patch via the Mutagen-backed `mutagen-bridge.exe`. One call per patch file, regardless of operation count.
 
 - Params: `output_name` (required), `operations` (array)
 - Each operation is either an `override` (on an existing record) or a `merge_leveled_list` (LVLI/LVLN/LVSP).
@@ -22,7 +22,7 @@ description: Create ESP patch plugins via mo2_create_patch — overrides (set_fi
 
 ## Field Interpretation via Mutagen
 
-As of v2.0.0, `mo2_record_detail` and ESP patching internals route through `spooky-bridge.exe` → Mutagen for engine-correct field interpretation.
+`mo2_record_detail` and ESP patching internals route through `mutagen-bridge.exe` → Mutagen for engine-correct field interpretation.
 
 What this means in practice:
 - Localized strings (`.STRINGS` / `.DLSTRINGS` / `.ILSTRINGS`) resolve to actual text, not `[lstring ID]` placeholders.

@@ -121,8 +121,8 @@ class Mo2McpPlugin(mobase.IPluginTool):
                 DEFAULT_AUTO_START,
             ),
             mobase.PluginSetting(
-                "spooky-bridge-path",
-                "Path to spooky-bridge.exe (leave empty for auto-detect)",
+                "mutagen-bridge-path",
+                "Path to mutagen-bridge.exe (leave empty for auto-detect)",
                 "",
             ),
             mobase.PluginSetting(

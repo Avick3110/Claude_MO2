@@ -88,7 +88,7 @@ Implicit-load plugins (Skyrim.esm, DLC ESMs, Creation Club masters listed in `<g
 **`mo2_record_detail`** — Full field interpretation for one record.
 - Params: `formid` or `editor_id` (at least one required), `plugin_name` (optional, default: winner), `plugin_names` (list, batch variant), `resolve_links` (bool, annotates FormIDs with EditorIDs), `include_disabled` (bool, default false)
 - Returns: All subrecord fields with named values, resolved FormIDs, enum labels, flag names
-- Routes through Mutagen (via `spooky-bridge.exe`) for engine-correct field interpretation — localized strings resolve, VMAD scripts render, union types use Mutagen's deciders
+- Routes through Mutagen (via `mutagen-bridge.exe`) for engine-correct field interpretation — localized strings resolve, VMAD scripts render, union types use Mutagen's deciders
 
 ### Conflict Analysis
 

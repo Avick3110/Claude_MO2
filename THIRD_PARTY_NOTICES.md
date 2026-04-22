@@ -36,9 +36,9 @@ SOFTWARE.
 
 ---
 
-## Mutagen.Bethesda.Skyrim (v0.52.0)
+## Mutagen.Bethesda.Skyrim (v0.53.1)
 
-**Linked by:** `tools/spooky-bridge/spooky-bridge.exe` (NuGet dependency)
+**Linked by:** `tools/mutagen-bridge/mutagen-bridge.exe` (NuGet dependency, direct `PackageReference`)
 
 Copyright (c) Noggog and Mutagen contributors
 
@@ -48,13 +48,13 @@ The full license text is reproduced above under the pefile section and applies i
 
 **Source:** https://github.com/Mutagen-Modding/Mutagen
 
-**Usage:** ESP/ESM/ESL reading and writing — field interpretation, override record creation, FormID management, subrecord serialization. Linked as a library reference from our `spooky-bridge.exe` (via Spooky's `SpookysAutomod.Esp.dll`).
+**Usage:** ESP/ESM/ESL reading and writing — field interpretation, override record creation, FormID management, subrecord serialization. Linked directly into `mutagen-bridge.exe` via NuGet (v2.6+ dropped the indirection through Spooky's toolkit). Upgraded from 0.52.0 → 0.53.1 to get correct ESL FormID compaction on the write path (`BeginWrite.WithLoadOrder`).
 
 ---
 
 ## Spooky's AutoMod Toolkit (v1.11.1)
 
-**Bundled as:** `tools/spooky-cli/` (CLI binary `spookys-automod.exe` and dependencies), and linked into `spooky-bridge.exe` (the ESP library `SpookysAutomod.Esp.dll`)
+**Bundled as:** `tools/spooky-cli/` (CLI binary `spookys-automod.exe` and dependencies).
 
 Copyright (c) SpookyPirate and contributors
 
@@ -65,14 +65,15 @@ The full license text is reproduced above under the pefile section and applies i
 **Source:** https://github.com/SpookyPirate/spookys-automod-toolkit
 
 **Usage:**
-- **Spooky CLI subprocess** — BSA/BA2 list/extract/validate, NIF info/list-textures/shader-info, audio format probing. (Papyrus compile calls `PapyrusCompiler.exe` directly, bypassing Spooky's wrapper.)
-- **SpookysAutomod.Esp library** — battle-tested `PluginService.CreateOverride` (master management), `ScriptPropertyService` (VMAD property dispatch), and related services. Our `spooky-bridge.exe` references these from Spooky's library and composes them into our batch MCP schema.
+- **Spooky CLI subprocess** — BSA/BA2 list/extract/validate, NIF info/list-textures/shader-info, audio format probing (XWM/WAV — FUZ handled by our own bridge parser). Papyrus compile calls `PapyrusCompiler.exe` directly, bypassing Spooky's wrapper.
+
+**Note:** v2.0.0 through v2.5.7 also linked `SpookysAutomod.Esp.dll` as a library reference from the bridge (then named `spooky-bridge.exe`). v2.6.0 drops that dependency — the bridge (renamed `mutagen-bridge.exe`) now references `Mutagen.Bethesda.Skyrim` directly via NuGet. Verified at rename time: the bridge's C# source never used any `SpookysAutomod.*` API, only `Mutagen.Bethesda.*` and `Noggog`. The Spooky toolkit is still bundled for the CLI subprocess workloads above.
 
 ---
 
-## System.CommandLine, System.Text.Json, SharpCompress (NuGet dependencies of spooky-bridge.exe)
+## System.CommandLine, System.Text.Json, SharpCompress (NuGet dependencies of mutagen-bridge.exe)
 
-These are standard MIT-licensed .NET libraries pulled in as transitive dependencies of `spooky-bridge.exe` via NuGet. See `tools/spooky-bridge/spooky-bridge.csproj` for exact versions.
+These are standard MIT-licensed .NET libraries pulled in as transitive dependencies of `mutagen-bridge.exe` via NuGet. See `tools/mutagen-bridge/mutagen-bridge.csproj` for exact versions.
 
 Source URLs:
 - System.CommandLine — https://github.com/dotnet/command-line-api

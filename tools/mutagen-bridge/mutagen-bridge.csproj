@@ -3,8 +3,8 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
-    <RootNamespace>SpookyBridge</RootNamespace>
-    <AssemblyName>spooky-bridge</AssemblyName>
+    <RootNamespace>MutagenBridge</RootNamespace>
+    <AssemblyName>mutagen-bridge</AssemblyName>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
@@ -12,8 +12,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\spooky-toolkit\src\SpookysAutomod.Esp\SpookysAutomod.Esp.csproj" />
-    <ProjectReference Include="..\..\spooky-toolkit\src\SpookysAutomod.Core\SpookysAutomod.Core.csproj" />
+    <PackageReference Include="Mutagen.Bethesda.Skyrim" Version="0.53.1" />
   </ItemGroup>
 
 </Project>

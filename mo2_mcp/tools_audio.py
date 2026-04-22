@@ -93,7 +93,7 @@ def _resolve(organizer, path: str, kind: str) -> tuple[str | None, str | None]:
 
 
 def _invoke_bridge(bridge: Path, request: dict, timeout: int = 30) -> dict:
-    """Run spooky-bridge with a JSON request on stdin, return the decoded response."""
+    """Run mutagen-bridge with a JSON request on stdin, return the decoded response."""
     try:
         proc = subprocess.run(
             [str(bridge)],
@@ -129,7 +129,7 @@ def _handle_audio_info(organizer, plugin_dir: Path, args: dict) -> str:
     if disk.lower().endswith(".fuz"):
         bridge = _find_bridge(organizer, plugin_dir)
         if bridge is None:
-            return json.dumps({"error": "spooky-bridge.exe not found."})
+            return json.dumps({"error": "mutagen-bridge.exe not found."})
         resp = _invoke_bridge(bridge, {"command": "fuz_info", "fuz_path": disk}, timeout=30)
         if not resp.get("success"):
             return json.dumps({
@@ -207,7 +207,7 @@ def _handle_extract_fuz(organizer, plugin_dir: Path, args: dict) -> str:
     # Use our own bridge-side FUZ splitter — Spooky v1.11.1 rejects real FUZes.
     bridge = _find_bridge(organizer, plugin_dir)
     if bridge is None:
-        return json.dumps({"error": "spooky-bridge.exe not found."})
+        return json.dumps({"error": "mutagen-bridge.exe not found."})
 
     resp = _invoke_bridge(
         bridge,

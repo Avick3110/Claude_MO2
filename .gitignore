@@ -8,8 +8,8 @@ __pycache__/
 
 # Build artifacts (rebuilt by build/build-release.ps1)
 build-output/
-tools/spooky-bridge/bin/
-tools/spooky-bridge/obj/
+tools/mutagen-bridge/bin/
+tools/mutagen-bridge/obj/
 
 # Spooky toolkit submodule build state
 spooky-toolkit/**/bin/

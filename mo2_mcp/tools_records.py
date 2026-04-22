@@ -1,6 +1,6 @@
 """MCP tools for record-level queries, field interpretation, and conflict detection.
 
-Field interpretation for `mo2_record_detail` is routed through spooky-bridge.exe
+Field interpretation for `mo2_record_detail` is routed through mutagen-bridge.exe
 (Mutagen-backed) as of v2.0.0. The v1.x esp_schema/esp_fields schema walker was
 retired because it had known limitations (VMAD fragments, localized strings,
 union deciders) that Mutagen handles correctly.
@@ -101,9 +101,12 @@ def _get_index_fresh(timeout_s: float = _BUILD_WAIT_TIMEOUT_S) -> tuple[LoadOrde
 
 
 def _find_bridge_for_read(plugin_dir: Path) -> Path | None:
-    """Find spooky-bridge.exe. Same search order as tools_patching._find_bridge,
-    duplicated here to keep tools_records free of tools_patching imports."""
+    """Find mutagen-bridge.exe. Same search order as tools_patching._find_bridge,
+    duplicated here to keep tools_records free of tools_patching imports.
+    Spooky-named paths remain as a one-release shim for v2.5.x installs."""
     candidates = [
+        plugin_dir / "tools" / "mutagen-bridge.exe",
+        plugin_dir / "tools" / "mutagen-bridge" / "mutagen-bridge.exe",
         plugin_dir / "tools" / "spooky-bridge.exe",
         plugin_dir / "tools" / "spooky-bridge" / "spooky-bridge.exe",
     ]
@@ -636,7 +639,7 @@ def _run_bridge_read(bridge: Path, request: dict, timeout: int = 15) -> dict:
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
         )
     except subprocess.TimeoutExpired:
-        return {'success': False, 'error': f'spooky-bridge timed out after {timeout}s.'}
+        return {'success': False, 'error': f'mutagen-bridge timed out after {timeout}s.'}
     except FileNotFoundError:
         return {'success': False, 'error': f'Bridge exe not found: {bridge}'}
     except Exception as e:
@@ -690,9 +693,11 @@ def _handle_record_detail(args: dict, plugin_dir: Path) -> str:
     if bridge is None:
         return json.dumps({
             'error': (
-                'spooky-bridge.exe not found. Expected at '
-                '{plugin_dir}/tools/spooky-bridge.exe or '
-                '{plugin_dir}/tools/spooky-bridge/spooky-bridge.exe.'
+                'mutagen-bridge.exe not found. Expected at '
+                '{plugin_dir}/tools/mutagen-bridge.exe or '
+                '{plugin_dir}/tools/mutagen-bridge/mutagen-bridge.exe '
+                '(legacy spooky-bridge paths also accepted for v2.5.x '
+                'installs).'
             ),
         })
 

@@ -4,6 +4,70 @@ All plugin changes are made in the Dev Build copy first. Once tested and stable,
 
 ---
 
+## v2.5.7 — 2026-04-21
+
+Correctness fixes for v2.5.6's enabled/disabled filtering. Surfaced by live verification on 2026-04-21 (see `Live Reported Bugs/mo2_v256_enabled_disabled_filtering_RETEST_CLEAN_LOADORDER_2026-04-21.md`): the filter was classifying implicit-load plugins (base-game ESMs + Creation Club masters) as disabled, which silently hid their records from default conflict analysis. A large modlist saw default `mo2_conflict_summary.total_conflicts` reporting 229,609 vs. the true 428,260 — off by nearly 2× because every conflict involving `Skyrim.esm` / `Update.esm` / any CC master as origin was dropped from the chain.
+
+### Fixed
+
+- **Implicit-load plugins (Skyrim.esm, DLC ESMs, Creation Club masters) now correctly classified as enabled** (esp_index.py). These plugins load at runtime regardless of `plugins.txt` state — Skyrim auto-loads its base masters, and `<game_root>/Skyrim.ccc` lists the Creation Club content that loads implicitly. New module-level `IMPLICIT_MASTERS` frozenset covers the 5 hardcoded base masters (Skyrim, Update, Dawnguard, HearthFires, Dragonborn); new `read_ccc_plugins()` parses `Skyrim.ccc` from the game root; `read_implicit_plugins()` combines both. At index build time, the implicit set is unioned into `active_lower` before per-plugin classification, so these plugins are flagged `enabled=True` alongside starred `plugins.txt` entries. Graceful fallback when `Skyrim.ccc` is missing — base masters only.
+- **`mo2_record_index_status` now surfaces the `errors` list alongside `error_count`** (tools_records.py). Previously `errors` (capped at 20 entries) was explicitly stripped when building `_build_status`, so users seeing `error_count: 1` had no way to see which plugin(s) failed to scan. Root cause: the `**{k: v for k, v in result.items() if k != 'errors'}` comprehension excluded the field; replaced with an unconditional `**result` spread.
+- **`mo2_build_record_index(force_rebuild=true)` now actually forces a re-scan** (esp_index.py). `LoadOrderIndex.rebuild()` only cleared the in-memory `_plugin_cache`; `build()`'s subsequent `_load_cache()` reloaded the on-disk `.record_index.pkl` and every plugin came back as `cached_hits`. Fixed by also unlinking the pickle in `rebuild()` before calling `build()`. Post-fix a forced rebuild reports `scanned == total, cached_hits == 0`.
+
+### Changed
+
+- **`esp-patching` skill post-write workflow section rewritten** (`.claude/skills/esp-patching/SKILL.md`). Points #2 and #5 had stale/incorrect claims:
+  - Old #2 asserted pre-enable read-back always returned empty. Correct behavior: when `loadorder.txt` is clean at `mo2_create_patch` time, the new plugin lands in the index as `enabled: false` and is visible via `include_disabled: true` before the user ticks the checkbox. Only when orphans disrupt MO2's refresh (from external `rm`/`cp`/`mv` without a manual MO2 refresh) does pre-enable read-back fail.
+  - Old #5 claimed "the record index does not filter by plugin enable state" as a known separate bug — this shipped in v2.5.6 and was never updated in the skill. Corrected: filtering works; fresh patches correctly don't appear as conflict winners until the user enables them.
+  - Finding I (external filesystem hygiene) folded into #2 and surfaced as a new always-loaded standing rule in `CLAUDE.md`: after any external `rm`/`cp`/`mv` on plugin files, ask the user to manually refresh MO2 (F5) before `mo2_create_patch`, `mo2_build_record_index`, or any read-back.
+- **`PLUGIN_VERSION`** bumped to `(2, 5, 7)`.
+
+### Not changed
+
+- MCP tool count, behavior, or core interface — 29 tools, same surface.
+- Cache format (`.record_index.pkl`) — per-plugin scan data only; enabled state is re-derived on every build.
+- Bridge binary path or installer layout.
+
+### Migration
+
+No action required. Existing caches load fine; the new implicit-load classification is computed on every build from `Skyrim.ccc` + hardcoded base masters. After upgrading, `plugins_enabled` / `plugins_disabled` counts will shift — on a typical modlist, `plugins_disabled` may drop from 60+ to single digits as Creation Club masters reclassify. Default `mo2_conflict_chain` / `mo2_conflict_summary` / `mo2_query_records` output will now include vanilla and CC records that were previously hidden.
+
+---
+
+## v2.5.6 — 2026-04-20
+
+Fixes for `mo2_create_patch` surfaced by a 2026-04-19 MUSC music merge patch that wrote an empty ESP and silently reported success. All three underlying bugs are fixed and verified end-to-end; the associated auto-refresh-and-enable machinery that was built on top proved unsustainable and has been removed in favour of a simpler write-and-refresh flow that asks the user to enable the plugin manually.
+
+### Fixed
+
+- **ESP `set_fields` on `ExtendedList<T>` collection fields** (bridge/PatchEngine.cs). Fields like `MUSICTYPE.Tracks`, `FLST.Items`, `OTFT.Items`, and other `ExtendedList<IFormLinkGetter<T>>` properties previously failed with `"Cannot convert JSON Array to ExtendedList\`1"` for every record and the output ESP contained no overrides. A new `JsonConverter<ExtendedList<T>>` registered into the bridge's Newtonsoft settings resolves FormID strings via the existing `FormLinkResolver` path and appends them into a freshly-constructed `ExtendedList<T>`. MUSC `Tracks` merge patches and all other array-of-FormID fields now round-trip correctly.
+- **Honest `success` / per-record counts** (bridge/PatchEngine.cs + Models.cs). Before: `success: true` and `records_written: N` were returned even when every per-record operation failed. Now: top-level `success` is `false` whenever any `details[].error` is non-null, `successful_count` / `failed_count` / `records_written` reflect what actually landed in the output ESP, and failed records are rolled back from the Mutagen mod before write so the ESP contains only the successful overrides.
+- **spooky-bridge.exe console windows no longer flash on every call** (all six `subprocess.run` sites in Python). Added `creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)` to every bridge / CLI invocation. Previously, bulk operations (e.g., a 40+ record read-back using `mo2_record_detail` in parallel) strobed black CMD windows across the screen for minutes and stole focus from other apps. Now invisible.
+
+### Changed
+
+- **Dropped the `auto_enable` parameter on `mo2_create_patch` and the whole post-write auto-enable mechanism.** Four attempts across v2.5.6 beta builds at programmatically ticking the MO2 plugin checkbox (via `IPluginList.setState` routed through `organizer.onNextRefresh`, then a two-phase queue drained from `plugin_list.onRefreshed`, then observation-first retry) each surfaced a different MO2-integration quirk: `setState` silently no-ops for newly-written plugins, `organizer.refresh(save_changes=True)` can revert in-memory setState during its plugin-list rescan, and MO2 autonomously enables new plugins (fighting our opt-out path). The retry machinery was stacking up to 7 refresh cycles per patch (~2 minutes on Aaron's modlist) for no reliable gain. The replacement flow: `mo2_create_patch` writes the file, fires one MO2 refresh, waits for the record index to rebuild, and returns with a `next_step` field telling the user to tick the plugin's checkbox in MO2 when they're ready to load the patch in-game. Once the user ticks it, MO2's `onPluginStateChanged` event fires an auto-rebuild of the record index (no manual `mo2_build_record_index` needed) and `mo2_record_detail` / `mo2_query_records` see the new records. Pre-enable read-back returns empty — verified against live v2.5.6 on 2026-04-20 — so callers must wait for user confirmation before chaining read-back calls. Typical write call time drops from ~60–120s back to ~20–30s.
+- **`trigger_refresh_and_wait` helper → `trigger_refresh_and_wait_for_index`.** Simpler shape: one refresh, one wait on `_build_complete`, no queue, no drain, no retry, no `plugin_to_enable` / `plugin_to_disable` / `output_mod` params. Response shape is correspondingly simplified to `{refreshed, elapsed_s, error}`; the old `mod_enabled` / `plugin_enabled` / `mod_enable_error` / `plugin_enable_error` fields are removed.
+- **`next_step` field added to every write tool's response** (`mo2_create_patch`, `mo2_write_file`, `mo2_extract_bsa`, `mo2_extract_bsa_file`, `mo2_extract_fuz`, `mo2_compile_script`). Each explains what the user needs to do — if anything — for the written content to be visible / loaded. For ESP patches this is "tick the right-pane checkbox when ready"; for VFS assets (files, extracted BSA contents, compiled .pex) there's no user action needed and `next_step` says so.
+- **`esp-patching` skill** gains a "Post-write workflow" section describing the no-auto-enable flow and how Claude should phrase results to the user.
+- **Record index now tracks plugin enable state and filters queries by it.** `PluginInfo` gains an `enabled` bit populated at build time from `plugins.txt` via the existing `read_active_plugins()` helper; the index still scans every plugin in `loadorder.txt` so toggling a checkbox doesn't invalidate the record cache. The five query tools (`mo2_query_records`, `mo2_record_detail`, `mo2_conflict_chain`, `mo2_plugin_conflicts`, `mo2_conflict_summary`) take a new `include_disabled` boolean that defaults to `false` — meaning "winning plugin" claims and conflict chains reflect what the game actually loads at runtime. Pass `include_disabled=true` for diagnostic queries ("was this record ever overridden, even by disabled mods?", "what would change if I enabled this plugin?"). When a record only exists in disabled plugins, the error now distinguishes "not found" from "found but disabled" and tells the caller how to recover. `mo2_record_index_status` stats now include `plugins_enabled` / `plugins_disabled` counts.
+- **`onPluginStateChanged` no longer triggers a full index rebuild.** Toggling a plugin's right-pane checkbox now flips the `enabled` bit on the existing `PluginInfo` in place — queries pick up the new state immediately with no ~10-15s rebuild cost. Multi-select toggles still resolve in one event dispatch. Falls back to a full rebuild only when the event references a plugin the index hasn't seen yet (e.g., first-time enable of a freshly-written patch), so the just-written-and-then-enabled workflow still works end-to-end.
+- **`PLUGIN_VERSION`** bumped to `(2, 5, 6)`.
+
+### Not changed
+
+- MCP tool count, behavior, or core interface — 29 tools, same surface.
+- Bridge binary path or installer layout.
+- Record index build path — still reads every plugin listed in `loadorder.txt` via `read_load_order()`. `plugins.txt` is now read alongside it to populate the `enabled` bit on each `PluginInfo`, but the record-scan workload is unchanged. Cache format (`.record_index.pkl`) stores per-plugin scan data only; enable state is re-derived on every build, so toggling a plugin never needs a re-scan.
+
+### Migration
+
+No action required for existing installs. Cache format (`.record_index.pkl`) is unchanged — the `enabled` bit on `PluginInfo` is derived fresh from `plugins.txt` on every build, so the old cache still loads without migration. Response shape on write tools adds `next_step` (new field, additive) and drops the `mod_enabled` / `plugin_enabled` / `*_enable_error` fields (removed; the `auto_enable` param on `mo2_create_patch` is gone with them). Callers that branched on those fields should now surface `next_step` to the user and wait for the user to tick the plugin's checkbox before attempting read-back queries against the just-written plugin.
+
+**Behavior change for record queries:** the five query tools (`mo2_query_records`, `mo2_record_detail`, `mo2_conflict_chain`, `mo2_plugin_conflicts`, `mo2_conflict_summary`) now default to enabled-only. Pre-v2.5.6 queries returned results from disabled plugins as if they were live; post-v2.5.6 they don't. Existing analyses that relied on seeing the full "ever-touched" history need to pass `include_disabled=true`. Error messages for "record exists only in disabled plugins" explicitly tell the caller how to recover, so accidental filter-outs are self-diagnosing.
+
+---
+
 ## v2.5.5 — 2026-04-19
 
 Full KB → Skills migration. Six task-procedure KBs and most of the tool reference (`kb/KB_Tools.md`) are now Claude Code skills at `.claude/skills/<name>/SKILL.md`. Skills are auto-discovered and trigger-matched by Claude Code based on each skill's `description` frontmatter — no manual routing table required. The always-loaded core (`kb/KB_Tools.md`) shrinks from 369 lines to 149 lines, covering only the tools used in every session (modlist queries, VFS, write, record indexing, record queries, conflict analysis) plus FormID format, field interpretation output types, and a pointer to the category skills. Functional behavior is unchanged; this is a delivery-mechanism upgrade that eliminates eager loading of procedures and tool categories that aren't relevant to the current task.

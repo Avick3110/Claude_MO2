@@ -32,6 +32,7 @@ import mobase
 
 from .config import PLUGIN_NAME
 from .tools_papyrus import _find_spooky_cli, _invoke_cli
+from .tools_records import trigger_refresh_and_wait_for_index
 
 
 def register_archive_tools(registry, organizer: mobase.IOrganizer) -> None:
@@ -279,6 +280,14 @@ def _handle_extract_file(organizer, plugin_dir: Path, args: dict) -> str:
         "file_in_archive": file_in_archive,
         "output_path": final_path.replace("\\", "/"),
         "size_bytes": size,
+        # Refresh MO2 + reindex so the extracted file is visible to subsequent
+        # mo2_list_files / mo2_read_file calls without manual F5.
+        "mo2_refresh": trigger_refresh_and_wait_for_index(organizer),
+        "next_step": (
+            f"Extracted file is visible to mo2_list_files / mo2_read_file "
+            f"via MO2's VFS (as long as '{output_mod}' is enabled in "
+            f"MO2's left pane). No further action needed."
+        ),
     }, indent=2)
 
 
@@ -382,6 +391,14 @@ def _handle_extract(organizer, plugin_dir: Path, args: dict) -> str:
             "extractedCount": extracted,
             "errors": errors,
         },
+        # Refresh MO2 + reindex so the extracted files are visible to
+        # subsequent mo2_list_files / mo2_read_file calls without manual F5.
+        "mo2_refresh": trigger_refresh_and_wait_for_index(organizer),
+        "next_step": (
+            f"Extracted files are visible to mo2_list_files / "
+            f"mo2_read_file via MO2's VFS (as long as '{output_mod}' is "
+            f"enabled in MO2's left pane). No further action needed."
+        ),
     }, indent=2)
 
 

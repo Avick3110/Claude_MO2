@@ -29,7 +29,11 @@ from pathlib import Path
 from PyQt6.QtCore import qInfo, qWarning
 
 from .config import PLUGIN_NAME
-from .tools_records import _get_index, _parse_formid_str
+from .tools_records import (
+    _get_index,
+    _parse_formid_str,
+    trigger_refresh_and_wait_for_index,
+)
 
 
 def register_patching_tools(registry, organizer) -> None:
@@ -246,6 +250,7 @@ def _handle_create_patch(organizer, plugin_dir: Path, args: dict) -> str:
             capture_output=True,
             text=True,
             timeout=60,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
         )
     except subprocess.TimeoutExpired:
         return json.dumps({"error": "spooky-bridge timed out after 60s."})
@@ -281,6 +286,33 @@ def _handle_create_patch(organizer, plugin_dir: Path, args: dict) -> str:
         f"{'success' if response.get('success') else 'failed'}: "
         f"{output_name}"
     )
+
+    # Refresh MO2 and wait for the record index to rebuild so read-back
+    # tools see the new patch without the user having to press F5. The
+    # plugin lands in the load order as DISABLED -- surface that to the
+    # caller via next_step so Claude can tell the user to tick the
+    # checkbox when they want to load the patch in-game. Skip when
+    # nothing was actually written (full-failure or pre-bridge error).
+    wrote_anything = (
+        response.get('success')
+        or response.get('successful_count', 0) > 0
+        or (response.get('records_written') or 0) > 0
+    )
+    if wrote_anything:
+        response['mo2_refresh'] = trigger_refresh_and_wait_for_index(
+            organizer,
+        )
+        response['next_step'] = (
+            f"Plugin written to the load order as DISABLED. Tell the "
+            f"user to tick the checkbox next to '{output_name}' in "
+            f"MO2's right pane before attempting read-back or loading "
+            f"the patch in-game. Once they enable it, MO2's "
+            f"plugin-state-change event auto-triggers a record-index "
+            f"rebuild and mo2_record_detail / mo2_query_records will "
+            f"see the new records -- no manual mo2_build_record_index "
+            f"needed. Do NOT chain read-back calls in the same turn as "
+            f"the write; wait for the user's confirmation."
+        )
 
     return json.dumps(response, indent=2)
 
@@ -336,7 +368,7 @@ def _resolve_record_paths(idx, organizer, rec_spec: dict, index: int) -> dict:
         if origin is None:
             raise ValueError(f"Invalid FormID: {formid_str}")
 
-        chain = idx.get_conflict_chain(origin, local_id)
+        chain = idx.get_conflict_chain(origin, local_id, include_disabled=True)
         if not chain:
             raise ValueError(f"Record {formid_str} not found in index")
 
@@ -455,7 +487,7 @@ def _validate_alias_properties(bridge_records: list, idx, bridge_path: Path) -> 
             quest_aliases[quest_fid] = None
             continue
 
-        chain = idx.get_conflict_chain(origin, local_id)
+        chain = idx.get_conflict_chain(origin, local_id, include_disabled=True)
         if not chain:
             quest_aliases[quest_fid] = None
             continue
@@ -539,6 +571,7 @@ def _run_bridge_read_patching(bridge: Path, request: dict, timeout: int = 15) ->
             capture_output=True,
             text=True,
             timeout=timeout,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
         )
     except Exception as e:
         return {"success": False, "error": f"Bridge invocation failed: {e}"}

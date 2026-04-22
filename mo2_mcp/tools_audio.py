@@ -26,6 +26,7 @@ import mobase
 from .config import PLUGIN_NAME
 from .tools_papyrus import _find_spooky_cli, _invoke_cli
 from .tools_patching import _find_bridge
+from .tools_records import trigger_refresh_and_wait_for_index
 
 
 def register_audio_tools(registry, organizer: mobase.IOrganizer) -> None:
@@ -100,6 +101,7 @@ def _invoke_bridge(bridge: Path, request: dict, timeout: int = 30) -> dict:
             capture_output=True,
             text=True,
             timeout=timeout,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
         )
     except Exception as e:
         return {"success": False, "error": f"Bridge invocation failed: {e}"}
@@ -230,4 +232,12 @@ def _handle_extract_fuz(organizer, plugin_dir: Path, args: dict) -> str:
         "xwm_path": resp.get("xwm_path"),
         "lip_size": resp.get("lip_size"),
         "xwm_size": resp.get("xwm_size"),
+        # Refresh MO2 + reindex so the extracted xwm/lip are visible to
+        # subsequent mo2_list_files / mo2_read_file calls without manual F5.
+        "mo2_refresh": trigger_refresh_and_wait_for_index(organizer),
+        "next_step": (
+            f"Extracted files are visible to mo2_list_files / "
+            f"mo2_read_file via MO2's VFS (as long as '{output_mod}' is "
+            f"enabled in MO2's left pane). No further action needed."
+        ),
     }, indent=2)

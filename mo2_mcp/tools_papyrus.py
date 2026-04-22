@@ -35,6 +35,7 @@ from PyQt6.QtCore import qInfo
 import mobase
 
 from .config import PLUGIN_NAME
+from .tools_records import trigger_refresh_and_wait_for_index
 
 
 # PapyrusCompiler discovery
@@ -120,6 +121,7 @@ def _invoke_cli(cli: Path, args: list[str], timeout: int = 60) -> dict:
             capture_output=True,
             text=True,
             timeout=timeout,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
         )
     except subprocess.TimeoutExpired:
         return {
@@ -358,6 +360,7 @@ def _handle_compile(organizer, args: dict) -> str:
                 capture_output=True,
                 text=True,
                 timeout=90,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
             )
         except subprocess.TimeoutExpired:
             return json.dumps({"error": "PapyrusCompiler timed out after 90s."})
@@ -405,4 +408,13 @@ def _handle_compile(organizer, args: dict) -> str:
         "output_path": final_pex_path.replace("\\", "/"),
         "headers_used": headers_disk.replace("\\", "/"),
         "optimize": optimize,
+        # Refresh MO2 + reindex so the new .pex is visible to subsequent
+        # mo2_list_files / mo2_read_file calls without manual F5.
+        "mo2_refresh": trigger_refresh_and_wait_for_index(organizer),
+        "next_step": (
+            f"Compiled .pex is visible to mo2_list_files / mo2_read_file "
+            f"via MO2's VFS (as long as '{output_mod}' is enabled in "
+            f"MO2's left pane) and will load at runtime for any script "
+            f"that references it. No further action needed."
+        ),
     }, indent=2)

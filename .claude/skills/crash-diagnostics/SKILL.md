@@ -4,6 +4,18 @@ description: Diagnose Skyrim crashes, freezes, and unexplained game misbehavior.
 
 # Crash & Freeze Diagnosis
 
+## Zero-th check: missing masters
+
+Before asking about the failure type, call `mo2_record_index_status`. If `missing_masters_count > 0`, the game won't launch or crashes instantly at startup — the engine refuses to load a plugin whose declared masters aren't present (or are disabled, which looks identical to missing at load time).
+
+Report the affected plugins and which masters each one is missing, then stop the diagnostic. No freeze-vs-CTD triage needed. The user resolves it by either:
+- Installing the missing master mod(s), or
+- Disabling the plugins that depend on them
+
+Only proceed to the triage below if `missing_masters_count == 0`.
+
+---
+
 ## First: ask about the failure type
 
 Before any investigation, prompt the user:

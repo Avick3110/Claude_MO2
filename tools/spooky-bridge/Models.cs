@@ -410,6 +410,12 @@ public class PatchResponse
     [JsonPropertyName("records_written")]
     public int RecordsWritten { get; set; }
 
+    [JsonPropertyName("successful_count")]
+    public int SuccessfulCount { get; set; }
+
+    [JsonPropertyName("failed_count")]
+    public int FailedCount { get; set; }
+
     [JsonPropertyName("esl_flagged")]
     public bool EslFlagged { get; set; }
 

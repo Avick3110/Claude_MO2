@@ -6,6 +6,7 @@ import os
 import mobase
 
 from .config import PLUGIN_NAME
+from .tools_records import trigger_refresh_and_wait_for_index
 
 # Disallowed extensions — never write executable or plugin files
 BLOCKED_EXTENSIONS = {
@@ -119,5 +120,13 @@ def _write_file(organizer, args: dict) -> str:
         "output_mod": output_mod,
         "path": path,
         "size": size,
+        # Refresh MO2 + reindex so subsequent mo2_list_files / mo2_read_file
+        # calls see the new file via the VFS without manual F5.
+        "mo2_refresh": trigger_refresh_and_wait_for_index(organizer),
+        "next_step": (
+            f"File written and visible to mo2_list_files / mo2_read_file "
+            f"via MO2's VFS (as long as '{output_mod}' is enabled in "
+            f"MO2's left pane). No further action needed."
+        ),
     }
     return json.dumps(result, indent=2)

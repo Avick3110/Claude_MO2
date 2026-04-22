@@ -1,6 +1,6 @@
 # Known Issues & Limitations
 
-Current as of v2.4.0. These are known limitations, not bugs — all reported bugs have been resolved. For the full version history see `mo2_mcp/CHANGELOG.md`.
+Current as of v2.5.7. These are known limitations, not bugs — all reported bugs have been resolved. For the full version history see `mo2_mcp/CHANGELOG.md`.
 
 ---
 
@@ -54,6 +54,14 @@ The bridge refuses `add_conditions` on SPEL records with "Record type Spell does
 
 By default, FormIDs in the output are rendered as `Plugin:HexID`. Pass `resolve_links: true` to annotate each with its EditorID via the record index (`"Skyrim.esm:000019"` → `"Skyrim.esm:000019 (NordRace)"`). Opt-in because the extra lookup takes time on large records and most callers don't need it.
 
+### Record queries default to enabled plugins only
+
+Since v2.5.6, the five query tools (`mo2_query_records`, `mo2_record_detail`, `mo2_conflict_chain`, `mo2_plugin_conflicts`, `mo2_conflict_summary`) filter out plugins whose right-pane checkbox is unticked. Rationale: "winning plugin" claims and conflict chains should reflect what the game actually loads at runtime, not every plugin that ever touched the record.
+
+Pass `include_disabled: true` for diagnostic queries ("was this record ever overridden, even by disabled mods?", "what would change if I enabled this plugin?"). When a record only exists in disabled plugins, the error distinguishes "not found" from "found but disabled" and tells the caller how to recover.
+
+Implicit-load plugins (Skyrim.esm, DLC ESMs, Creation Club masters listed in `<game_root>/Skyrim.ccc`) are classified as enabled regardless of `plugins.txt` state — the engine auto-loads them. This was corrected in v2.5.7 after v2.5.6 initially missed the implicit-load case and reported `total_conflicts` off by ~2× on typical modlists.
+
 ---
 
 ## Environmental quirks (not code bugs, but worth knowing)
@@ -62,6 +70,7 @@ By default, FormIDs in the output are rendered as `Plugin:HexID`. Pass `resolve_
 - **Claude Code caches the MCP tool list at session start.** If you start the server in MO2 mid-session, Claude Code doesn't see the new tools until you restart Claude Code.
 - **MO2 doesn't reload Python modules on server stop/start.** After editing any `.py` inside the plugin, delete `__pycache__/` AND fully restart MO2 (not just the Tools > Start/Stop Claude Server toggle).
 - **Losing the MCP server during MO2 restart breaks the Claude Code connection** for that session. Restart Claude Code to rediscover. Known Claude Code limitation, not fixable on our side.
+- **External filesystem changes require a manual MO2 refresh.** MO2 does not auto-detect `rm`/`cp`/`mv` of plugin files made outside its API. After any external change to plugin files (via Bash, another tool, or manual intervention), press F5 in MO2 (or use the Refresh button) before calling `mo2_create_patch`, `mo2_build_record_index`, or any read-back against the affected plugin. Skipping this leaves orphans in `loadorder.txt` and new plugins may be missing from the index entirely — symptoms include read-back returning empty even with `include_disabled: true`. Prefer `mo2_write_file` (routes through MO2's output mod, detected immediately) over Bash for plugin-adjacent writes.
 
 ---
 
@@ -72,6 +81,12 @@ These are reported or reportable to Spooky upstream; our wrappers already work a
 - **`archive extract --filter` is ignored upstream.** Our `mo2_extract_bsa` full-extracts to a temp dir then filters on our side. Disk-usage trade-off for correctness; cleanup is automatic.
 - **`audio info` rejects valid FUZ files.** Our bridge includes a local FUZ parser (`AudioCommands.cs`) so `mo2_audio_info` and `mo2_extract_fuz` don't depend on Spooky's broken path. XWM/WAV still go through Spooky's CLI.
 - **`tools/` resolution is 5-up from the CLI exe.** Spooky's CLI looks for external tools at an unusual relative path. Our direct `PapyrusCompiler.exe` invocation sidesteps this, but if Spooky CLI is ever used directly, the user should be aware.
+
+---
+
+## Not yet implemented
+
+**Papyrus save-file reading.** Can't yet read `.ess` save files to inspect script state at runtime — which scripts are loaded, variable values on suspended stacks, orphan script instances. Planned for Phase G of the roadmap. Static `.psc`/`.pex` analysis (via `mo2_compile_script` + Creation Kit) works today; only in-save runtime state is unavailable.
 
 ---
 
@@ -96,3 +111,11 @@ These are reported or reportable to Spooky upstream; our wrappers already work a
 | BSA extract ignored filter, storming subprocesses | v2.4.1 (full-extract-then-filter) |
 | FUZ parser rejected valid files | v2.4.1 (local bridge parser) |
 | Champollion tool-path resolution broken on live install | v2.4.1 (5-up placement) |
+| Claude Code auto-registration wrote to `~/.claude/.mcp.json` (wrong path; CC reads `~/.claude.json`) | v2.5.1 |
+| Plugin import error blocked MCP server startup (deleted `_find_spooky_cli`/`_invoke_cli` were still imported by three other modules) | v2.5.2 |
+| `set_fields` silently failed on `ExtendedList<T>` fields — MUSC `Tracks`, FLST `Items`, OTFT `Items` — with "Cannot convert JSON Array" | v2.5.6 |
+| `mo2_create_patch` reported `success: true` and inflated `records_written` when every per-record op failed | v2.5.6 |
+| Bridge subprocess calls flashed black CMD windows, stealing focus during bulk operations | v2.5.6 |
+| Implicit-load plugins (base-game ESMs + Creation Club masters in `Skyrim.ccc`) misclassified as disabled, silently hiding their records from default queries (`total_conflicts` off by ~2×) | v2.5.7 |
+| `mo2_record_index_status` stripped the `errors` list from its response, only surfacing `error_count` | v2.5.7 |
+| `mo2_build_record_index(force_rebuild=true)` was a silent no-op because on-disk cache reloaded immediately after the in-memory clear | v2.5.7 |

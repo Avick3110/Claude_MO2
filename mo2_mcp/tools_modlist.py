@@ -8,6 +8,29 @@ import mobase
 from .config import PLUGIN_NAME
 
 
+def scan_missing_masters(plugin_list) -> dict:
+    """Return {plugin_name: [missing_master, ...]} for every enabled plugin
+    that has at least one missing master. Matches MO2's PluginList::testMasters()
+    exactly — a declared master is "missing" when it is not ACTIVE (i.e. either
+    absent from the list entirely, or present but disabled). Both cases break
+    the game at load time.
+
+    Fresh every call: no caching. Cost is a single pluginNames() walk plus one
+    state() + masters() lookup per enabled plugin — cheap, runs in MO2 memory.
+    """
+    problems = {}
+    for name in plugin_list.pluginNames():
+        if plugin_list.state(name) != mobase.PluginState.ACTIVE:
+            continue
+        missing = [
+            m for m in plugin_list.masters(name)
+            if plugin_list.state(m) != mobase.PluginState.ACTIVE
+        ]
+        if missing:
+            problems[name] = missing
+    return problems
+
+
 def register_modlist_tools(registry, organizer: mobase.IOrganizer):
     """Register all mod/plugin query tools with the MCP tool registry."""
 
@@ -113,7 +136,8 @@ def register_modlist_tools(registry, organizer: mobase.IOrganizer):
         name="mo2_plugin_info",
         description=(
             "Get detailed info about a specific plugin including its "
-            "master chain, load order, flags, author, and description."
+            "master chain (with any missing masters flagged), load "
+            "order, flags, author, and description."
         ),
         input_schema={
             "type": "object",
@@ -300,6 +324,15 @@ def _plugin_info(plugin_list, args: dict) -> str:
         return json.dumps({"error": f"Plugin not found: {name}"})
 
     masters = list(plugin_list.masters(name))
+    is_active = (state == mobase.PluginState.ACTIVE)
+
+    # Matches MO2's PluginList::testMasters() exactly: for enabled plugins, a
+    # declared master is "missing" if it's not also enabled. Covers both
+    # absent-from-list and present-but-disabled cases.
+    missing_masters = [
+        m for m in masters
+        if plugin_list.state(m) != mobase.PluginState.ACTIVE
+    ] if is_active else []
 
     # Find plugins that depend on this one
     dependents = []
@@ -313,10 +346,11 @@ def _plugin_info(plugin_list, args: dict) -> str:
         "name": name,
         "load_order": plugin_list.loadOrder(name),
         "priority": plugin_list.priority(name),
-        "enabled": (state == mobase.PluginState.ACTIVE),
+        "enabled": is_active,
         "is_master": plugin_list.isMasterFlagged(name),
         "is_light": plugin_list.isLightFlagged(name),
         "masters": masters,
+        "missing_masters": missing_masters,
         "dependent_plugins": dependents,
         "providing_mod": plugin_list.origin(name),
     }

@@ -54,6 +54,9 @@ public class PatchEngine
             }
         }
 
+        var successfulCount = details.Count(d => d.Error == null);
+        var failedCount = details.Count - successfulCount;
+
         var recordCount = patchMod.EnumerateMajorRecords().Count();
 
         if (recordCount == 0)
@@ -63,6 +66,8 @@ public class PatchEngine
                 Success = false,
                 Error = "No records were successfully added to the patch.",
                 Details = details,
+                SuccessfulCount = successfulCount,
+                FailedCount = failedCount,
             };
         }
 
@@ -82,12 +87,17 @@ public class PatchEngine
 
         return new PatchResponse
         {
-            Success = true,
+            // True only when every record operation succeeded. ProcessOverride
+            // rolls back partial overrides on ApplyModifications failure, so
+            // the output ESP also reflects only the successful records.
+            Success = failedCount == 0,
             OutputPath = request.OutputPath,
             RecordsWritten = recordCount,
             EslFlagged = request.EslFlag,
             Masters = masters,
             Details = details,
+            SuccessfulCount = successfulCount,
+            FailedCount = failedCount,
         };
     }
 
@@ -135,7 +145,17 @@ public class PatchEngine
             Modifications = new Dictionary<string, object>(),
         };
 
-        ApplyModifications(overrideRecord, op, detail);
+        try
+        {
+            ApplyModifications(overrideRecord, op, detail);
+        }
+        catch
+        {
+            // Roll back the no-op override so the output ESP and the
+            // success-reporting both reflect what was actually applied.
+            TryRemoveOverride(patchMod, overrideRecord);
+            throw;
+        }
 
         return detail;
     }
@@ -738,8 +758,108 @@ public class PatchEngine
         if (underlying.IsEnum && value.ValueKind == JsonValueKind.Number)
             return Enum.ToObject(underlying, value.GetInt32());
 
+        // JSON arrays into Mutagen list-typed fields (ExtendedList<T> / IExtendedList<T> / IList<T>).
+        // Common case: properties typed ExtendedList<IFormLinkGetter<X>> — e.g. MUSC.Tracks.
+        if (value.ValueKind == JsonValueKind.Array)
+            return ConvertJsonArray(value, underlying);
+
         throw new ArgumentException(
-            $"Cannot convert JSON {value.ValueKind} to {targetType.Name}");
+            $"Cannot convert JSON {value.ValueKind} to {FriendlyTypeName(targetType)}");
+    }
+
+    /// <summary>
+    /// Build a Mutagen list (ExtendedList&lt;T&gt;) from a JSON array, applying per-element
+    /// conversion. Supports element types of FormLink&lt;X&gt; / IFormLink&lt;X&gt; /
+    /// IFormLinkGetter&lt;X&gt; (parsed from "Plugin:LocalID" strings) and primitives/enums
+    /// (delegated back to ConvertJsonValue). Complex Mutagen entry types
+    /// (LeveledItemEntry, ContainerEntry, etc.) are not supported here — callers should
+    /// use the dedicated add_* operations for those.
+    /// </summary>
+    private static object ConvertJsonArray(JsonElement array, Type targetType)
+    {
+        var elementType = ExtractListElementType(targetType);
+        if (elementType == null)
+            throw new ArgumentException(
+                $"Cannot convert JSON Array to {FriendlyTypeName(targetType)}: " +
+                "target is not a list type (no IList<T> interface).");
+
+        // Mutagen accepts ExtendedList<T> for any IList<T> / IExtendedList<T> property setter.
+        var listType = typeof(ExtendedList<>).MakeGenericType(elementType);
+        var list = (System.Collections.IList)System.Activator.CreateInstance(listType)!;
+
+        int index = 0;
+        foreach (var element in array.EnumerateArray())
+        {
+            try
+            {
+                list.Add(ConvertJsonElementToListItem(element, elementType));
+            }
+            catch (Exception ex)
+            {
+                throw new ArgumentException(
+                    $"Element [{index}] of JSON Array could not be converted to " +
+                    $"{FriendlyTypeName(elementType)}: {ex.Message}", ex);
+            }
+            index++;
+        }
+
+        return list;
+    }
+
+    private static Type? ExtractListElementType(Type targetType)
+    {
+        if (targetType.IsGenericType)
+        {
+            var def = targetType.GetGenericTypeDefinition();
+            if (def == typeof(IList<>) || def == typeof(ICollection<>) || def == typeof(IEnumerable<>))
+                return targetType.GetGenericArguments()[0];
+        }
+
+        // Walk implemented/inherited interfaces — finds IList<T> on
+        // ExtendedList<T>, IExtendedList<T>, and any other IList<T> implementer.
+        foreach (var iface in targetType.GetInterfaces())
+        {
+            if (iface.IsGenericType && iface.GetGenericTypeDefinition() == typeof(IList<>))
+                return iface.GetGenericArguments()[0];
+        }
+
+        return null;
+    }
+
+    private static object? ConvertJsonElementToListItem(JsonElement element, Type elementType)
+    {
+        // FormLink family. List elements are non-nullable in Mutagen
+        // (FormLinkNullable only appears in single-field slots, not list elements),
+        // so a single FormLink<T> instance satisfies all three target shapes.
+        if (elementType.IsGenericType)
+        {
+            var def = elementType.GetGenericTypeDefinition();
+            if (def == typeof(IFormLinkGetter<>) || def == typeof(IFormLink<>) || def == typeof(FormLink<>))
+            {
+                if (element.ValueKind != JsonValueKind.String)
+                    throw new ArgumentException(
+                        "FormLink elements must be JSON strings (e.g. \"Plugin.esp:01ABCD\"), " +
+                        $"got {element.ValueKind}.");
+
+                var formKey = FormIdHelper.Parse(element.GetString()!);
+                var inner = elementType.GetGenericArguments()[0];
+                var formLinkType = typeof(FormLink<>).MakeGenericType(inner);
+                return System.Activator.CreateInstance(formLinkType, formKey);
+            }
+        }
+
+        // Primitive / string / enum element — recurse.
+        return ConvertJsonValue(element, elementType);
+    }
+
+    private static string FriendlyTypeName(Type t)
+    {
+        if (!t.IsGenericType) return t.Name;
+        var def = t.GetGenericTypeDefinition().Name;
+        var tick = def.IndexOf('`');
+        if (tick > 0) def = def.Substring(0, tick);
+        var args = string.Join(", ", t.GetGenericArguments().Select(FriendlyTypeName));
+        return $"{def}<{args}>";
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -1162,6 +1282,92 @@ public class PatchEngine
         IMusicTypeGetter r => patchMod.MusicTypes.GetOrAddAsOverride(r),
         _ => null,
     };
+
+    /// <summary>
+    /// Remove a previously-copied override from the patch mod. Mirrors
+    /// <see cref="CopyAsOverride"/>'s group dispatch — when CopyAsOverride
+    /// learns a new record type, this switch must too.
+    /// Used by <see cref="ProcessOverride"/> to roll back when
+    /// <see cref="ApplyModifications"/> fails partway through, so the output
+    /// ESP doesn't end up with no-op overrides masquerading as real changes.
+    /// </summary>
+    private static void TryRemoveOverride(SkyrimMod patchMod, IMajorRecord record)
+    {
+        var fk = record.FormKey;
+        try
+        {
+            switch (record)
+            {
+                // Items & equipment
+                case IArmorGetter: patchMod.Armors.Remove(fk); break;
+                case IWeaponGetter: patchMod.Weapons.Remove(fk); break;
+                case IAmmunitionGetter: patchMod.Ammunitions.Remove(fk); break;
+                case IBookGetter: patchMod.Books.Remove(fk); break;
+                case IIngredientGetter: patchMod.Ingredients.Remove(fk); break;
+                case IIngestibleGetter: patchMod.Ingestibles.Remove(fk); break;
+                case IMiscItemGetter: patchMod.MiscItems.Remove(fk); break;
+                case IScrollGetter: patchMod.Scrolls.Remove(fk); break;
+                case IKeyGetter: patchMod.Keys.Remove(fk); break;
+                case ISoulGemGetter: patchMod.SoulGems.Remove(fk); break;
+                // Actors & AI
+                case INpcGetter: patchMod.Npcs.Remove(fk); break;
+                case IFactionGetter: patchMod.Factions.Remove(fk); break;
+                case IPackageGetter: patchMod.Packages.Remove(fk); break;
+                case IOutfitGetter: patchMod.Outfits.Remove(fk); break;
+                case ICombatStyleGetter: patchMod.CombatStyles.Remove(fk); break;
+                case IClassGetter: patchMod.Classes.Remove(fk); break;
+                case IRaceGetter: patchMod.Races.Remove(fk); break;
+                // Leveled lists
+                case ILeveledItemGetter: patchMod.LeveledItems.Remove(fk); break;
+                case ILeveledNpcGetter: patchMod.LeveledNpcs.Remove(fk); break;
+                case ILeveledSpellGetter: patchMod.LeveledSpells.Remove(fk); break;
+                // Magic
+                case ISpellGetter: patchMod.Spells.Remove(fk); break;
+                case IPerkGetter: patchMod.Perks.Remove(fk); break;
+                case IMagicEffectGetter: patchMod.MagicEffects.Remove(fk); break;
+                case IShoutGetter: patchMod.Shouts.Remove(fk); break;
+                case IWordOfPowerGetter: patchMod.WordsOfPower.Remove(fk); break;
+                case IObjectEffectGetter: patchMod.ObjectEffects.Remove(fk); break;
+                // World & cells
+                case IActivatorGetter: patchMod.Activators.Remove(fk); break;
+                case IContainerGetter: patchMod.Containers.Remove(fk); break;
+                case IDoorGetter: patchMod.Doors.Remove(fk); break;
+                case IFloraGetter: patchMod.Florae.Remove(fk); break;
+                case IFurnitureGetter: patchMod.Furniture.Remove(fk); break;
+                case ILightGetter: patchMod.Lights.Remove(fk); break;
+                case ITreeGetter: patchMod.Trees.Remove(fk); break;
+                // Quests & dialogue
+                case IQuestGetter: patchMod.Quests.Remove(fk); break;
+                case IDialogTopicGetter: patchMod.DialogTopics.Remove(fk); break;
+                // Data records
+                case IKeywordGetter: patchMod.Keywords.Remove(fk); break;
+                case IGlobalGetter: patchMod.Globals.Remove(fk); break;
+                case IFormListGetter: patchMod.FormLists.Remove(fk); break;
+                case IEncounterZoneGetter: patchMod.EncounterZones.Remove(fk); break;
+                case ILocationGetter: patchMod.Locations.Remove(fk); break;
+                case IConstructibleObjectGetter: patchMod.ConstructibleObjects.Remove(fk); break;
+                // Hazards, explosions, projectiles
+                case IExplosionGetter: patchMod.Explosions.Remove(fk); break;
+                case IHazardGetter: patchMod.Hazards.Remove(fk); break;
+                case IProjectileGetter: patchMod.Projectiles.Remove(fk); break;
+                // Misc
+                case IRelationshipGetter: patchMod.Relationships.Remove(fk); break;
+                case IMessageGetter: patchMod.Messages.Remove(fk); break;
+                case IWeatherGetter: patchMod.Weathers.Remove(fk); break;
+                case IImageSpaceGetter: patchMod.ImageSpaces.Remove(fk); break;
+                case IImageSpaceAdapterGetter: patchMod.ImageSpaceAdapters.Remove(fk); break;
+                case IMusicTypeGetter: patchMod.MusicTypes.Remove(fk); break;
+                // Unknown type — leave it; the outer ApplyModifications exception
+                // is what surfaces to the caller, and the no-op override is
+                // strictly less misleading than silently swallowing the failure.
+            }
+        }
+        catch
+        {
+            // Removal failure is non-fatal — the original ApplyModifications
+            // exception is what the caller needs to see.
+        }
+    }
 
     private static void AddMasterIfMissing(SkyrimMod patchMod, ModKey master)
     {

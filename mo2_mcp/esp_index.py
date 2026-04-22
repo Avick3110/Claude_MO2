@@ -44,7 +44,14 @@ class RecordRef:
 
 @dataclass
 class PluginInfo:
-    """Metadata for one plugin in the load order."""
+    """Metadata for one plugin in the load order.
+
+    `enabled` reflects the plugin's plugins.txt state (checkbox in MO2's
+    right pane) at the time of the last build() call. It is mutated in
+    place by LoadOrderIndex.set_plugin_enabled() in response to MO2's
+    onPluginStateChanged event, so queries reflect the current state
+    without requiring a full rebuild.
+    """
     name: str
     path: str
     load_order: int
@@ -53,6 +60,7 @@ class PluginInfo:
     is_light: bool
     is_localized: bool
     record_count: int
+    enabled: bool
 
 
 @dataclass
@@ -168,6 +176,52 @@ def read_active_plugins(profile_dir: str | Path) -> set[str]:
     return active
 
 
+# Base-game masters Skyrim always loads regardless of plugins.txt.
+IMPLICIT_MASTERS = frozenset([
+    'skyrim.esm',
+    'update.esm',
+    'dawnguard.esm',
+    'hearthfires.esm',
+    'dragonborn.esm',
+])
+
+
+def read_ccc_plugins(game_root: str | Path) -> set[str]:
+    """Read Skyrim.ccc for Creation Club plugins Skyrim loads implicitly.
+
+    Skyrim.ccc sits at the game root (alongside SkyrimSE.exe), not inside
+    Data. Returns an empty set if the file is missing or unreadable.
+    """
+    ccc_path = Path(game_root) / 'Skyrim.ccc'
+    if not ccc_path.exists():
+        return set()
+    try:
+        names: set[str] = set()
+        with open(ccc_path, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    names.add(line)
+        return names
+    except Exception:
+        return set()
+
+
+def read_implicit_plugins(game_root: str | Path | None) -> set[str]:
+    """Plugins the game auto-loads regardless of plugins.txt state.
+
+    Combines the hardcoded base masters (Skyrim / Update / DLC ESMs) with
+    Creation Club content listed in ``<game_root>/Skyrim.ccc``. These
+    plugins typically aren't starred in plugins.txt because Skyrim loads
+    them automatically; classifying them as "disabled" hides vanilla and
+    CC records from default conflict analysis.
+    """
+    result = set(IMPLICIT_MASTERS)
+    if game_root:
+        result |= read_ccc_plugins(game_root)
+    return result
+
+
 # ── Main Index ──────────────────────────────────────────────────────────
 
 class LoadOrderIndex:
@@ -232,9 +286,12 @@ class LoadOrderIndex:
             return {'built': False}
         unique_records = len(self._records)
         conflicts = sum(1 for refs in self._records.values() if len(refs) > 1)
+        enabled_count = sum(1 for p in self._plugins.values() if p.enabled)
         return {
             'built': True,
             'plugins': len(self._plugins),
+            'plugins_enabled': enabled_count,
+            'plugins_disabled': len(self._plugins) - enabled_count,
             'unique_records': unique_records,
             'edids': len(self._edids),
             'conflicts': conflicts,
@@ -245,6 +302,7 @@ class LoadOrderIndex:
     def build(
         self,
         load_order: list[str] | None = None,
+        active_plugins: set[str] | None = None,
         progress_cb=None,
     ) -> dict:
         """Scan all plugins and build the index.
@@ -252,6 +310,11 @@ class LoadOrderIndex:
         Args:
             load_order: Plugin names in load order.  If None, reads
                         from the profile's loadorder.txt.
+            active_plugins: Set of plugin filenames currently enabled
+                        (checkbox on). If None, reads from the
+                        profile's plugins.txt. Plugins not in this set
+                        are indexed but flagged ``enabled=False`` and
+                        filtered out of query results by default.
             progress_cb: Optional callback(plugin_name, index, total).
 
         Returns:
@@ -264,6 +327,14 @@ class LoadOrderIndex:
                 load_order = read_load_order(self._profile)
             else:
                 raise ValueError('No load_order provided and no profile_dir set')
+
+        if active_plugins is None:
+            active_plugins = read_active_plugins(self._profile) if self._profile else set()
+
+        game_root = self._root / 'Stock Game'
+        implicit = read_implicit_plugins(game_root if game_root.is_dir() else None)
+
+        active_lower = {n.lower() for n in active_plugins} | {n.lower() for n in implicit}
 
         self._load_order = load_order
 
@@ -314,7 +385,8 @@ class LoadOrderIndex:
                     continue
 
             # Merge into index
-            self._merge_plugin(pdata, lo_idx)
+            enabled = plugin_name.lower() in active_lower
+            self._merge_plugin(pdata, lo_idx, enabled)
 
         self._built = True
         self._build_time = time.perf_counter() - t0
@@ -329,11 +401,52 @@ class LoadOrderIndex:
         return result
 
     def rebuild(self, **kwargs) -> dict:
-        """Force a full rebuild, ignoring cache."""
+        """Force a full rebuild, ignoring cache.
+
+        Clears the in-memory cache AND deletes the on-disk pickle, so
+        ``build()`` can't resurrect the stale cache via ``_load_cache()``.
+        """
         self._plugin_cache.clear()
+        try:
+            self._cache_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         return self.build(**kwargs)
 
+    def set_plugin_enabled(self, plugin_name: str, enabled: bool) -> bool:
+        """Flip the ``enabled`` flag on an existing ``PluginInfo`` in place.
+
+        Called by the ``onPluginStateChanged`` event hook so a checkbox
+        toggle in MO2's right pane updates query filtering without
+        requiring a full index rebuild (~10-15s on a large modlist).
+
+        Returns:
+            True if the plugin was known (its flag was set, possibly to
+            the same value). False if the plugin is not in the index —
+            caller should trigger a rebuild to pick up the new plugin.
+        """
+        pinfo = self._plugins.get(plugin_name.lower())
+        if pinfo is None:
+            return False
+        pinfo.enabled = enabled
+        return True
+
     # ── Scanning ─────────────────────────────────────────────────────
+
+    def _is_ref_live(self, ref: RecordRef) -> bool:
+        """True if the ref's plugin is currently enabled (checkbox on in
+        MO2's right pane). Used to filter chains/winners when
+        ``include_disabled`` is False."""
+        pinfo = self._plugins.get(ref.plugin.lower())
+        return pinfo is not None and pinfo.enabled
+
+    def _filter_refs(
+        self, refs: list[RecordRef], include_disabled: bool,
+    ) -> list[RecordRef]:
+        """Drop refs whose plugin is disabled unless ``include_disabled``."""
+        if include_disabled:
+            return refs
+        return [r for r in refs if self._is_ref_live(r)]
 
     def _scan_plugin(
         self, name: str, path: Path, mtime: float,
@@ -361,7 +474,7 @@ class LoadOrderIndex:
             records=records,
         )
 
-    def _merge_plugin(self, pdata: _PluginCache, lo_idx: int) -> None:
+    def _merge_plugin(self, pdata: _PluginCache, lo_idx: int, enabled: bool) -> None:
         """Merge a plugin's scanned records into the merged index."""
         name = pdata.name
         name_lower = name.lower()
@@ -375,6 +488,7 @@ class LoadOrderIndex:
             is_light=pdata.is_light,
             is_localized=pdata.is_localized,
             record_count=len(pdata.records),
+            enabled=enabled,
         )
 
         for rec_tuple in pdata.records:
@@ -434,48 +548,72 @@ class LoadOrderIndex:
 
     def get_conflict_chain(
         self, origin_plugin: str, local_id: int,
+        include_disabled: bool = False,
     ) -> list[RecordRef]:
         """Return all plugins that modify a record, sorted by load order.
 
         Args:
             origin_plugin: The plugin where the record was first defined.
             local_id: The 24-bit local FormID.
+            include_disabled: If True, include refs from plugins whose
+                checkbox is off in MO2's right pane. Default False.
         """
         key = (origin_plugin.lower(), local_id)
-        refs = self._records.get(key, [])
+        refs = self._filter_refs(self._records.get(key, []), include_disabled)
         return sorted(refs, key=lambda r: r.load_order)
 
-    def get_conflict_chain_by_edid(self, edid: str) -> list[RecordRef]:
+    def get_conflict_chain_by_edid(
+        self, edid: str, include_disabled: bool = False,
+    ) -> list[RecordRef]:
         """Return the conflict chain for a record by its Editor ID."""
         key = self._edids.get(edid)
         if key is None:
             return []
-        return self.get_conflict_chain(key[0], key[1])
+        return self.get_conflict_chain(key[0], key[1], include_disabled)
 
     def get_winning_record(
         self, origin_plugin: str, local_id: int,
+        include_disabled: bool = False,
     ) -> RecordRef | None:
-        """Return the winning (last in load order) version of a record."""
-        chain = self.get_conflict_chain(origin_plugin, local_id)
+        """Return the winning (last in load order) version of a record.
+
+        With ``include_disabled=False`` (default), returns None if every
+        plugin touching this record is currently disabled — prevents
+        callers from reporting a "winner" that isn't actually loading
+        in-game.
+        """
+        chain = self.get_conflict_chain(origin_plugin, local_id, include_disabled)
         return chain[-1] if chain else None
 
-    def get_winning_record_by_edid(self, edid: str) -> RecordRef | None:
+    def get_winning_record_by_edid(
+        self, edid: str, include_disabled: bool = False,
+    ) -> RecordRef | None:
         """Return the winning version of a record by its Editor ID."""
-        chain = self.get_conflict_chain_by_edid(edid)
+        chain = self.get_conflict_chain_by_edid(edid, include_disabled)
         return chain[-1] if chain else None
 
     # ── Query: Lookups ───────────────────────────────────────────────
 
     def lookup_edid(self, edid: str) -> tuple[str, int] | None:
-        """Return (origin_plugin, local_id) for an Editor ID, or None."""
+        """Return (origin_plugin, local_id) for an Editor ID, or None.
+
+        Not filtered by enable state — this is a raw index lookup.
+        Callers that care about enable state should use the filtered
+        chain/winner methods afterwards.
+        """
         return self._edids.get(edid)
 
     def lookup_formid(
         self, origin_plugin: str, local_id: int,
+        include_disabled: bool = False,
     ) -> list[RecordRef] | None:
-        """Return all refs for a resolved FormID, or None."""
+        """Return refs for a resolved FormID, or None if unknown/all-disabled."""
         key = (origin_plugin.lower(), local_id)
-        return self._records.get(key)
+        refs = self._records.get(key)
+        if refs is None:
+            return None
+        filtered = self._filter_refs(refs, include_disabled)
+        return filtered or None
 
     # ── Query: By Plugin ─────────────────────────────────────────────
 
@@ -483,16 +621,24 @@ class LoadOrderIndex:
         return self._plugins.get(plugin_name.lower())
 
     def get_plugin_conflicts(
-        self, plugin_name: str,
+        self, plugin_name: str, include_disabled: bool = False,
     ) -> dict[str, list[tuple[str, int, list[RecordRef]]]]:
         """Return all records a plugin overrides from its masters.
 
         Returns a dict grouped by record type:
             {record_type: [(origin, local_id, full_chain), ...]}
+
+        With ``include_disabled=False`` (default): if the target plugin
+        itself is disabled, returns {}. For each included record, the
+        chain is filtered to enabled plugins only; if the plugin is no
+        longer in the filtered chain or the chain collapses below 2,
+        the record drops out.
         """
         name_lower = plugin_name.lower()
         pinfo = self._plugins.get(name_lower)
         if pinfo is None:
+            return {}
+        if not include_disabled and not pinfo.enabled:
             return {}
 
         result: dict[str, list[tuple[str, int, list[RecordRef]]]] = {}
@@ -511,8 +657,14 @@ class LoadOrderIndex:
             if origin == name_lower:
                 continue  # This plugin defined it — not an override
 
-            rec_type = refs[0].record_type
-            sorted_refs = sorted(refs, key=lambda r: r.load_order)
+            filtered = self._filter_refs(refs, include_disabled)
+            if len(filtered) < 2:
+                continue
+            if not any(r.plugin.lower() == name_lower for r in filtered):
+                continue
+
+            rec_type = filtered[0].record_type
+            sorted_refs = sorted(filtered, key=lambda r: r.load_order)
             if rec_type not in result:
                 result[rec_type] = []
             result[rec_type].append((key[0], key[1], sorted_refs))
@@ -522,37 +674,46 @@ class LoadOrderIndex:
     # ── Query: Conflicts ─────────────────────────────────────────────
 
     def get_all_conflicts(
-        self, record_type: str | None = None,
+        self, record_type: str | None = None, include_disabled: bool = False,
     ) -> Iterator[tuple[tuple[str, int], list[RecordRef]]]:
         """Yield all records modified by more than one plugin.
 
         Each yield is ((origin, local_id), sorted_refs).
-        Optionally filter by record type.
+        Optionally filter by record type. With ``include_disabled=False``
+        (default), the chain is pre-filtered to enabled plugins and
+        records whose filtered chain drops below 2 are skipped.
         """
         for key, refs in self._records.items():
-            if len(refs) < 2:
+            filtered = self._filter_refs(refs, include_disabled)
+            if len(filtered) < 2:
                 continue
             if record_type:
-                if not any(r.record_type == record_type for r in refs):
+                if not any(r.record_type == record_type for r in filtered):
                     continue
-            yield key, sorted(refs, key=lambda r: r.load_order)
+            yield key, sorted(filtered, key=lambda r: r.load_order)
 
-    def get_conflict_summary(self) -> dict:
-        """High-level overview of conflicts across the load order."""
+    def get_conflict_summary(self, include_disabled: bool = False) -> dict:
+        """High-level overview of conflicts across the load order.
+
+        With ``include_disabled=False`` (default), counts reflect only
+        conflicts among enabled plugins — matches what the game
+        actually sees at runtime.
+        """
         type_counts: dict[str, int] = {}
         total = 0
         plugin_overrides: dict[str, int] = {}
 
         for key, refs in self._records.items():
-            if len(refs) < 2:
+            filtered = self._filter_refs(refs, include_disabled)
+            if len(filtered) < 2:
                 continue
             total += 1
-            rtype = refs[0].record_type
+            rtype = filtered[0].record_type
             type_counts[rtype] = type_counts.get(rtype, 0) + 1
 
             # Count overrides per plugin (exclude originator)
             origin = key[0]
-            for r in refs:
+            for r in filtered:
                 if r.plugin.lower() != origin:
                     pname = r.plugin
                     plugin_overrides[pname] = plugin_overrides.get(pname, 0) + 1
@@ -575,19 +736,27 @@ class LoadOrderIndex:
         edid_filter: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        include_disabled: bool = False,
     ) -> list[dict]:
-        """Search records with optional filters. Returns dicts."""
+        """Search records with optional filters. Returns dicts.
+
+        With ``include_disabled=False`` (default), records are filtered
+        to their enabled-plugin refs before the winner/count fields are
+        computed. Records with no enabled refs drop out entirely, so a
+        ``plugin_name`` filter pointed at a disabled plugin returns an
+        empty list unless ``include_disabled=True``.
+        """
         results: list[dict] = []
         count = 0
 
         for key, refs in self._records.items():
-            # Filter by record type
+            # Filter by record type (on raw refs -- type is stable)
             if record_type and not any(
                 r.record_type == record_type for r in refs
             ):
                 continue
 
-            # Filter by plugin
+            # Filter by plugin (on raw refs -- check if plugin touches this record at all)
             if plugin_name:
                 pn_lower = plugin_name.lower()
                 if not any(r.plugin.lower() == pn_lower for r in refs):
@@ -600,6 +769,19 @@ class LoadOrderIndex:
                 if edid is None or edid_filter.lower() not in edid.lower():
                     continue
 
+            # Apply enable-state filter
+            live_refs = self._filter_refs(refs, include_disabled)
+            if not live_refs:
+                continue
+
+            # If a plugin_name filter was provided but it's disabled, drop
+            # this record -- the caller asked for records from this plugin
+            # and the plugin isn't currently live.
+            if plugin_name:
+                pn_lower = plugin_name.lower()
+                if not any(r.plugin.lower() == pn_lower for r in live_refs):
+                    continue
+
             # Pagination
             if count < offset:
                 count += 1
@@ -607,7 +789,7 @@ class LoadOrderIndex:
             if len(results) >= limit:
                 break
 
-            winner = sorted(refs, key=lambda r: r.load_order)[-1]
+            winner = sorted(live_refs, key=lambda r: r.load_order)[-1]
             results.append({
                 'origin': key[0],
                 'local_id': f'{key[1]:06X}',
@@ -615,7 +797,7 @@ class LoadOrderIndex:
                 'record_type': winner.record_type,
                 'editor_id': edid,
                 'winning_plugin': winner.plugin,
-                'override_count': len(refs),
+                'override_count': len(live_refs),
             })
             count += 1
 

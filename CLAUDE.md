@@ -111,6 +111,9 @@ When analyzing a mod's conflicts, work outward from the mod's own records:
 
 Do NOT call `mo2_plugin_conflicts` for plugins that touch CELL/WRLD records heavily — the output can be enormous. Use targeted queries instead.
 
+### External filesystem changes require a manual MO2 refresh
+MO2 does not auto-detect `rm` / `cp` / `mv` of plugin files made outside its API. After ANY external change to plugin/mod files (via Bash, another tool, or manual intervention), ask the user to refresh MO2 (F5 or the Refresh button) before calling `mo2_create_patch`, `mo2_build_record_index`, or any read-back against the affected plugin. Skipping this leaves orphans in `loadorder.txt` and new plugins can be missing from the index entirely — symptoms include read-back returning empty even with `include_disabled: true`. Prefer `mo2_write_file` over Bash for plugin-adjacent file writes; it routes through MO2's output mod and is noticed immediately.
+
 ### Nexus Research
 Nexus page research is useful when you're about to build a patcher and need to catch compatibility gotchas or known issues. For conflict analysis, the plugin data itself is the documentation — the MCP tools show you exactly what every plugin does. Don't spend tokens on web searches when the record data already tells the story.
 

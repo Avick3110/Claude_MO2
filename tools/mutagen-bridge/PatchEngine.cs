@@ -20,6 +20,26 @@ public class PatchEngine
 {
     public PatchResponse Process(PatchRequest request)
     {
+        // v2.6.0 Phase 2: the write path is now load-order-aware so
+        // FormLinks to ESL/Light-flagged masters compact correctly in
+        // the output ESP. The Python caller must supply load_order —
+        // without it, Mutagen's MasterFlagsLookup is empty and we'd
+        // reproduce the v2.5.x bug where xEdit cannot resolve the
+        // patch's own FormLinks.
+        if (request.LoadOrder == null)
+        {
+            return new PatchResponse
+            {
+                Success = false,
+                Error =
+                    "load_order context is required. The Python caller " +
+                    "(mo2_mcp.tools_patching) must populate it from MO2's " +
+                    "profile. Calls from pre-v2.6 clients will hit this path.",
+            };
+        }
+
+        var masterStyled = LoadOrderContextResolver.BuildMasterStyledListings(request.LoadOrder);
+
         var outputModKey = ModKey.FromFileName(Path.GetFileName(request.OutputPath));
         var patchMod = new SkyrimMod(outputModKey, SkyrimRelease.SkyrimSE);
 
@@ -27,7 +47,7 @@ public class PatchEngine
             patchMod.ModHeader.Author = request.Author;
 
         if (request.EslFlag)
-            patchMod.ModHeader.Flags |= (SkyrimModHeader.HeaderFlag)0x200;
+            patchMod.ModHeader.Flags |= SkyrimModHeader.HeaderFlag.Small;
 
         var details = new List<RecordDetail>();
 
@@ -75,10 +95,35 @@ public class PatchEngine
         if (!string.IsNullOrEmpty(outputDir) && !Directory.Exists(outputDir))
             Directory.CreateDirectory(outputDir);
 
-        patchMod.WriteToBinary(request.OutputPath);
+        // BeginWrite.WithLoadOrder: Mutagen consults the styled
+        // listings' MasterStyle during the write to decide whether
+        // each referenced master is ESL / Medium / Full, and encodes
+        // FormLinks pointing at them correspondingly. Mutagen also
+        // recomputes the patch's MasterReferences from the actual
+        // referenced FormKeys at write time — AddMasterIfMissing is
+        // no longer needed.
+        //
+        // Phase 2 verification (2026-04-22) showed WithLoadOrder is
+        // *defensive* rather than load-bearing for the specific bug
+        // that motivated v2.6.0: once PluginResolver reads the right
+        // plugin variant, Mutagen's in-memory FormKey is already
+        // ESL-compacted and WithNoLoadOrder also produces a correct
+        // patch. WithLoadOrder stays in shipped code — it remains
+        // correct for MasterFlagsLookup-dependent encoding edge cases
+        // (medium masters, non-compacted-on-read variants) and is
+        // the forward-compatible call shape Mutagen's write API
+        // wants. See PHASE_2_HANDOFF.md for the ablation details.
+        patchMod.BeginWrite
+            .ToPath(request.OutputPath)
+            .WithLoadOrder(masterStyled)
+            .Write();
 
-        // Read masters from the written file — Mutagen auto-adds
-        // referenced masters during WriteToBinary
+        // Read the masters list back from the written file. BeginWrite
+        // recomputes masters into its write pipeline but does not
+        // mutate the in-memory patchMod's ModHeader, so reading from
+        // patchMod.ModHeader.MasterReferences here returns empty even
+        // when the file on disk has the correct masters. Mirror v2.5.x
+        // behaviour and open the written file.
         using var written = SkyrimMod.CreateFromBinaryOverlay(
             request.OutputPath, SkyrimRelease.SkyrimSE);
         var masters = written.ModHeader.MasterReferences
@@ -118,13 +163,9 @@ public class PatchEngine
         using var sourceMod = SkyrimMod.CreateFromBinaryOverlay(
             op.SourcePath, SkyrimRelease.SkyrimSE);
 
-        // Only add the record's origin plugin and the source plugin as masters.
-        // Mutagen handles transitive dependencies during WriteToBinary.
-        // Adding ALL source plugin masters would exceed the 255 master limit
-        // for deeply-patched plugins.
-        AddMasterIfMissing(patchMod, targetFormKey.ModKey);
-        if (sourceMod.ModKey != targetFormKey.ModKey)
-            AddMasterIfMissing(patchMod, sourceMod.ModKey);
+        // v2.6.0 Phase 2: BeginWrite.WithLoadOrder recomputes
+        // MasterReferences from the actual referenced FormKeys at
+        // write time. No pre-seeding required.
 
         var sourceRecord = FindRecord(sourceMod, targetFormKey);
         if (sourceRecord == null)
@@ -176,8 +217,7 @@ public class PatchEngine
         using var baseMod = SkyrimMod.CreateFromBinaryOverlay(
             op.BasePath, SkyrimRelease.SkyrimSE);
 
-        AddMasterIfMissing(patchMod, targetFormKey.ModKey);
-        AddMasterIfMissing(patchMod, baseMod.ModKey);
+        // v2.6.0 Phase 2: masters recomputed at write time (see Process).
 
         // Try LVLI, then LVLN, then LVSP
         var lvli = baseMod.LeveledItems.FirstOrDefault(r => r.FormKey == targetFormKey);
@@ -213,7 +253,6 @@ public class PatchEngine
         {
             if (!File.Exists(overridePath)) continue;
             using var overrideMod = SkyrimMod.CreateFromBinaryOverlay(overridePath, SkyrimRelease.SkyrimSE);
-            AddMasterIfMissing(patchMod, overrideMod.ModKey);
 
             var overrideRecord = overrideMod.LeveledItems.FirstOrDefault(r => r.FormKey == targetFormKey);
             if (overrideRecord?.Entries == null) continue;
@@ -264,7 +303,6 @@ public class PatchEngine
         {
             if (!File.Exists(overridePath)) continue;
             using var overrideMod = SkyrimMod.CreateFromBinaryOverlay(overridePath, SkyrimRelease.SkyrimSE);
-            AddMasterIfMissing(patchMod, overrideMod.ModKey);
 
             var overrideRecord = overrideMod.LeveledNpcs.FirstOrDefault(r => r.FormKey == targetFormKey);
             if (overrideRecord?.Entries == null) continue;
@@ -315,7 +353,6 @@ public class PatchEngine
         {
             if (!File.Exists(overridePath)) continue;
             using var overrideMod = SkyrimMod.CreateFromBinaryOverlay(overridePath, SkyrimRelease.SkyrimSE);
-            AddMasterIfMissing(patchMod, overrideMod.ModKey);
 
             var overrideRecord = overrideMod.LeveledSpells.FirstOrDefault(r => r.FormKey == targetFormKey);
             if (overrideRecord?.Entries == null) continue;
@@ -1369,10 +1406,4 @@ public class PatchEngine
         }
     }
 
-    private static void AddMasterIfMissing(SkyrimMod patchMod, ModKey master)
-    {
-        if (master == patchMod.ModKey) return;
-        if (!patchMod.ModHeader.MasterReferences.Any(m => m.Master == master))
-            patchMod.ModHeader.MasterReferences.Add(new MasterReference { Master = master });
-    }
 }

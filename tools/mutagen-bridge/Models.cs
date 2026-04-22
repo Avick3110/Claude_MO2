@@ -35,6 +35,52 @@ public class PatchRequest
 
     [JsonPropertyName("records")]
     public List<RecordOperation> Records { get; set; } = new();
+
+    [JsonPropertyName("load_order")]
+    public LoadOrderContext? LoadOrder { get; set; }
+}
+
+// ── Load-Order Context ──────────────────────────────────────────────
+//
+// Populated by Python from MO2's profile (loadorder.txt + plugins.txt
+// + Skyrim.ccc) plus the per-plugin disk paths already cached in the
+// record index. The bridge uses this to drive Mutagen's write-path
+// master-style lookup — BeginWrite.WithLoadOrder(styledGetters) — so
+// FormLinks pointing at ESL/Light-flagged masters compact correctly
+// (the v2.5.x write bug that motivated v2.6.0). Required for "patch"
+// command; optional for read commands, where CreateFromBinaryOverlay
+// already returns FormKey-correct results (per Phase 0 verification).
+
+public class LoadOrderContext
+{
+    [JsonPropertyName("game_release")]
+    public string GameRelease { get; set; } = "SkyrimSE";
+
+    [JsonPropertyName("listings")]
+    public List<LoadOrderListingEntry> Listings { get; set; } = new();
+
+    // Forward-compat for Phase 3 (env-aware reads). Phase 2's
+    // LoadOrderContextResolver reads master-style headers directly
+    // from each listing's path and does not consult these fields.
+    // Populated by the Python caller so Phase 3 / later phases don't
+    // need to revise both sides of the JSON contract.
+    [JsonPropertyName("data_folder")]
+    public string? DataFolder { get; set; }
+
+    [JsonPropertyName("ccc_path")]
+    public string? CccPath { get; set; }
+}
+
+public class LoadOrderListingEntry
+{
+    [JsonPropertyName("mod_key")]
+    public string ModKey { get; set; } = "";
+
+    [JsonPropertyName("path")]
+    public string Path { get; set; } = "";
+
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; } = true;
 }
 
 // ── FUZ Audio Request / Response ────────────────────────────────────
@@ -133,6 +179,12 @@ public class ReadRequest
 
     [JsonPropertyName("max_depth")]
     public int MaxDepth { get; set; } = 6;
+
+    // Optional in Phase 2 — RecordReader falls through to its
+    // CreateFromBinaryOverlay-per-plugin path when null. Phase 3 can
+    // switch reads to an env-aware path when this is supplied.
+    [JsonPropertyName("load_order")]
+    public LoadOrderContext? LoadOrder { get; set; }
 }
 
 public class ReadResponse
@@ -183,6 +235,10 @@ public class ReadBatchRequest
 
     [JsonPropertyName("max_depth")]
     public int MaxDepth { get; set; } = 6;
+
+    // Optional in Phase 2 — same semantics as ReadRequest.LoadOrder.
+    [JsonPropertyName("load_order")]
+    public LoadOrderContext? LoadOrder { get; set; }
 }
 
 public class ReadBatchResponse

@@ -242,13 +242,33 @@ class LoadOrderIndex:
         modlist_root: str | Path,
         profile_dir: str | Path | None = None,
         cache_path: str | Path | None = None,
+        resolve_fn=None,
     ):
+        """
+        Args:
+            modlist_root: MO2 base path. Used for the legacy
+                ``PluginResolver`` fallback and for cache placement.
+            profile_dir: MO2 profile directory (holds plugins.txt /
+                loadorder.txt).
+            cache_path: Override for the on-disk pickle location.
+            resolve_fn: Optional callable ``(plugin_name) -> Path | None``
+                that resolves a plugin filename to its disk path using
+                MO2's VFS priority order (i.e. ``organizer.resolvePath``).
+                When supplied, overrides the alphabetical-walk
+                ``PluginResolver`` — which was the v2.5.x PluginResolver
+                bug that caused NyghtfallMM.esp to resolve to the wrong
+                mod folder (Replacer - Nyghtfall - Music/ "won" over the
+                actual ESPFE variant because 'R' > 'N'). The legacy walk
+                is retained as a fallback so the test suite and any
+                organizer-less caller still work.
+        """
         self._root = Path(modlist_root)
         self._profile = Path(profile_dir) if profile_dir else None
         self._cache_path = Path(cache_path) if cache_path else (
             self._root / 'plugins' / 'mo2_mcp' / '.record_index.pkl'
         )
-        self._resolver = PluginResolver(modlist_root)
+        self._resolve_fn = resolve_fn
+        self._resolver = PluginResolver(modlist_root) if resolve_fn is None else None
 
         # Per-plugin cached scan data
         self._plugin_cache: dict[str, _PluginCache] = {}
@@ -357,7 +377,11 @@ class LoadOrderIndex:
             if progress_cb:
                 progress_cb(plugin_name, lo_idx, total)
 
-            path = self._resolver.resolve(plugin_name)
+            if self._resolve_fn is not None:
+                resolved = self._resolve_fn(plugin_name)
+                path = Path(resolved) if resolved else None
+            else:
+                path = self._resolver.resolve(plugin_name)
             if path is None:
                 errors.append(f'Not found: {plugin_name}')
                 continue

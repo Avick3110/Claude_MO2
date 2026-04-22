@@ -31,6 +31,7 @@ from .config import PLUGIN_NAME
 from .tools_records import (
     _get_index,
     _parse_formid_str,
+    build_bridge_load_order_context,
     trigger_refresh_and_wait_for_index,
 )
 
@@ -238,6 +239,11 @@ def _handle_create_patch(organizer, plugin_dir: Path, args: dict) -> str:
         "esl_flag": esl_flag,
         "author": author,
         "records": bridge_records,
+        # v2.6.0 Phase 2: load-order context drives Mutagen's write-path
+        # master-style lookup so FormLinks to ESL/Light masters compact
+        # correctly in the output ESP. Bridge rejects the request without
+        # this field — patching genuinely needs it for correctness.
+        "load_order": build_bridge_load_order_context(organizer, idx),
     }
 
     # Call the bridge

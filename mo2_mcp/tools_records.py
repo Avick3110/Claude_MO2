@@ -51,6 +51,12 @@ _build_complete.set()
 # because _register_record_tools re-runs on every server start/stop cycle.
 _refresh_hook_registered = False
 
+# Module-level organizer reference stashed during register_record_tools so
+# the debounced-rebuild timer callbacks (which are invoked from threads
+# without captured closures over `organizer`) can still route through MO2's
+# VFS resolver. v2.6.0 Phase 2.
+_organizer = None
+
 # Populated by the onRefreshed callback; surfaced via mo2_record_index_status
 # so Claude can see whether the latest rebuild was auto-triggered.
 _last_auto_refresh: dict[str, Any] | None = None
@@ -121,6 +127,9 @@ def _find_bridge_for_read(plugin_dir: Path) -> Path | None:
 def register_record_tools(registry, organizer) -> None:
     """Register all record-level query tools with the MCP tool registry."""
 
+    global _organizer
+    _organizer = organizer
+
     plugin_dir = Path(__file__).resolve().parent
     base_path = organizer.basePath()
     profile_path = organizer.profile().absolutePath()
@@ -168,6 +177,7 @@ def register_record_tools(registry, organizer) -> None:
         },
         handler=lambda args: _handle_build_index(
             args, base_path, profile_path, plugin_list,
+            organizer=organizer,
         ),
     )
 
@@ -430,8 +440,15 @@ def _handle_index_status(plugin_list) -> str:
 
 def _handle_build_index(
     args: dict, base_path: str, profile_path: str, plugin_list,
+    organizer=None,
 ) -> str:
     global _index, _build_status
+
+    # Fall back to the module-level organizer so event-driven rebuild
+    # paths (which lack a captured organizer closure) still use MO2's
+    # VFS resolver.
+    if organizer is None:
+        organizer = _organizer
 
     force = args.get('force_rebuild', False)
     if isinstance(force, str):
@@ -455,7 +472,27 @@ def _handle_build_index(
         global _index, _build_status, _rebuild_pending_during_build
         _build_complete.clear()
         try:
-            idx = LoadOrderIndex(base_path, profile_path)
+            # v2.6.0 Phase 2: resolve plugin names via MO2's VFS instead
+            # of the legacy PluginResolver's alphabetical mods/ walk.
+            # The old walk let a later-alphabetical mod folder clobber
+            # the actual winning variant for any plugin filename present
+            # in multiple mods — NyghtfallMM.esp resolved to a non-ESL
+            # "Replacer - Nyghtfall - Music/" variant instead of the
+            # active "Nyghtfall - ESPFE (Replacer)/" ESL variant, which
+            # was the root cause of the 2026-04-21 broken-FormLink bug
+            # that motivated v2.6.0. Using organizer.resolvePath routes
+            # through MO2's mod priority, matching what xEdit and the
+            # game actually see at runtime.
+            resolve_fn = None
+            if organizer is not None:
+                def _resolve_via_mo2(name):
+                    real = organizer.resolvePath(name)
+                    return real if real else None
+                resolve_fn = _resolve_via_mo2
+
+            idx = LoadOrderIndex(
+                base_path, profile_path, resolve_fn=resolve_fn,
+            )
 
             def progress(name, i, total):
                 _build_status['current_plugin'] = name
@@ -1317,6 +1354,75 @@ def trigger_refresh_and_wait_for_index(
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────
+
+def build_bridge_load_order_context(
+    organizer,
+    idx: LoadOrderIndex,
+    game_release: str = 'SkyrimSE',
+) -> dict:
+    """Build the ``load_order`` context dict that mutagen-bridge's
+    PatchEngine expects (v2.6.0 / Phase 2).
+
+    Mutagen's write-path needs per-master MasterStyle (ESL / Light / Full)
+    to encode FormLinks correctly — pointing at an ESL-flagged master
+    without telling Mutagen the master IS ESL is the v2.5.x bug that
+    produced the unresolved-FormLink patches the migration fixes.
+
+    Returns a JSON-ready dict with:
+
+      * ``game_release``  — hardcoded "SkyrimSE" for now; Phase 6-ish can
+        make this multi-game if the plugin ever targets FO4.
+      * ``listings``       — every plugin in the profile's load order,
+        with its on-disk path, in order. The bridge reads each path's
+        ModHeader (via KeyedMasterStyle.FromPath) to derive MasterStyle.
+      * ``data_folder``    — game data folder (Qt API). Forward-compat
+        for Phase 3 env-aware reads; not consumed by Phase 2.
+      * ``ccc_path``       — <game_root>/Skyrim.ccc path when present.
+        Also forward-compat; Phase 2 doesn't need CC filenames because
+        loadorder.txt already enumerates CC plugins that are loaded.
+
+    Plugins listed in loadorder.txt but whose disk path the index doesn't
+    know (or whose file is missing) are silently skipped — orphans in
+    loadorder.txt shouldn't block patches whose records don't touch
+    them. Plugins the index does know get pinfo.enabled from the index's
+    classification (which already accounts for implicit-load masters).
+    """
+    listings: list[dict] = []
+    for plugin_name in idx._load_order:
+        pinfo = idx.get_plugin_info(plugin_name)
+        if pinfo is None:
+            continue
+        disk_path = pinfo.path
+        if not disk_path or not os.path.exists(disk_path):
+            continue
+        listings.append({
+            'mod_key': plugin_name,
+            'path': disk_path.replace('\\', '/'),
+            'enabled': pinfo.enabled,
+        })
+
+    ctx: dict = {
+        'game_release': game_release,
+        'listings': listings,
+    }
+
+    # Optional data-folder / ccc-path forward-compat fields. Derive via
+    # MO2's managedGame() so we pick up the right directory for the
+    # current profile's Stock Game / Data layout. Failures here are
+    # non-fatal — the bridge's Phase 2 resolver ignores these anyway.
+    try:
+        data_dir = organizer.managedGame().dataDirectory().absolutePath()
+    except Exception:
+        data_dir = None
+    if data_dir:
+        ctx['data_folder'] = str(data_dir).replace('\\', '/')
+        game_root = os.path.dirname(str(data_dir))
+        ccc = os.path.join(game_root, 'Skyrim.ccc')
+        if os.path.isfile(ccc):
+            ctx['ccc_path'] = ccc.replace('\\', '/')
+
+    return ctx
+
 
 def _parse_formid_str(s: str) -> tuple[str | None, int]:
     """Parse 'PluginName:LocalID' → (plugin, local_id)."""

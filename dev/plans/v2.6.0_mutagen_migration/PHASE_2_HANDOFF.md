@@ -4,7 +4,7 @@
 **Status:** Complete
 **Date:** 2026-04-22
 **Session length:** ~5h (includes diagnostic excursion that reframed the bug)
-**Commits made:** see "Commits" at the bottom (single `[v2.6 P2]` commit, hash filled in post-commit).
+**Commits made:** `b57d5d3` — `[v2.6 P2] Fix PluginResolver path resolution; add Mutagen load-order write path`.
 **Live install synced:** Yes — `E:\Skyrim Modding\Authoria - Requiem Reforged\plugins\mo2_mcp\`. Smoke-tested end-to-end after the final bridge + Python sync.
 
 ---
@@ -188,6 +188,6 @@ Four changes to `Claude_MO2/dev/plans/v2.6.0_mutagen_migration/PLAN.md`:
 
 ## Commits
 
-- `[v2.6 P2] Fix PluginResolver path resolution; add Mutagen load-order write path; PLAN.md revisions` — single commit absorbs the bridge/Python changes and the plan revisions. Hash recorded post-commit.
+- `b57d5d3` — `[v2.6 P2] Fix PluginResolver path resolution; add Mutagen load-order write path`. Single commit absorbs the bridge/Python changes and the plan revisions. PLAN.md and this handoff were force-added despite the `dev/` gitignore rule, per explicit session instruction; the other phase handoffs (Phase 0, Phase 1, smoke-test doc) remain untracked per their original phase decisions.
 
 Working tree at Phase 3 start: clean. No stray files.

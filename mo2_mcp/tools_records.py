@@ -16,7 +16,6 @@ import json
 import os
 import re
 import subprocess
-import threading
 import time
 import traceback
 from pathlib import Path
@@ -234,9 +233,14 @@ def register_record_tools(registry, organizer) -> None:
         description=(
             "Build or rebuild the record index by scanning all plugins in "
             "the active load order. This indexes every record's FormID, "
-            "EditorID, and type, and detects conflicts. Takes ~10-15 seconds "
-            "for the full load order. Runs in the background; poll "
-            "mo2_record_index_status to check progress."
+            "EditorID, and type, and detects conflicts. Blocking — returns "
+            "when the build completes. Typical timing: ~6-15s on cache-hit "
+            "reload, ~30-80s on force_rebuild for a large modlist. Note: "
+            "Claude Code's default MCP tool timeout is 60s. Force_rebuild "
+            "on large modlists can exceed that; if the client reports a "
+            "timeout, the server-side build still completes — check "
+            "mo2_record_index_status. For routine force_rebuild use, set "
+            "MCP_TIMEOUT=120000 before launching Claude Code."
         ),
         input_schema={
             "type": "object",
@@ -638,40 +642,42 @@ def _ensure_index_ready() -> tuple[LoadOrderIndex | None, str | None]:
 def _handle_build_index(args: dict) -> str:
     """Handler for the explicit mo2_build_record_index tool call.
 
-    v2.6.0 Phase 4: async (thread + poll via mo2_record_index_status) for
-    now — Phase 4b converts to synchronous/blocking so callers don't have
-    to implement polling. The in-flight guard prevents concurrent builds;
-    the `_build_status` dict carries progress for status queries.
-    """
-    global _build_status
+    v2.6.0 Phase 4b: synchronous / blocking. Runs the build inline in the
+    tool-call handler and returns the final stats dict when done. Replaces
+    the v2.5.x–v2.6.P4a async pattern (start thread → poll status) because:
 
+      * Post-P4a, explicit builds are rare. The lazy build in
+        `_ensure_index_ready` covers first-query warm-up; `ensure_fresh`
+        covers mid-session drift. Force_rebuild is the remaining reason
+        to call this tool directly, and it's not worth a polling
+        protocol.
+      * The polling protocol was bug-bait — the Phase 3 session tripped
+        on a Monitor grep that missed MCP-wrapped JSON with escaped
+        quotes, silently spinning the wait loop without ever matching.
+        Every caller reimplementing the poll had the same hazard.
+
+    Timeout caveat: Claude Code's default MCP tool timeout is 60s (see
+    https://code.claude.com/docs/en/mcp). Force_rebuild on a large
+    (~3000-plugin) modlist runs ~76s — the server-side build completes
+    regardless, but the client sees a 60s timeout. Recovery: call
+    mo2_record_index_status and read `state == 'done'`. Preempt: set
+    MCP_TIMEOUT=120000 before launching Claude Code. The tool description
+    documents both paths.
+    """
     force = args.get('force_rebuild', False)
     if isinstance(force, str):
         force = force.lower() in ('true', '1', 'yes')
 
-    if _build_status.get('state') == 'building':
+    try:
+        _build_index_sync(force=force)
+    except Exception as exc:
         return json.dumps({
-            'status': 'already_building',
-            'message': 'Index build is already in progress. Poll mo2_record_index_status.',
+            'status': 'error',
+            'error': str(exc),
             **_build_status,
         }, indent=2)
 
-    def do_build():
-        try:
-            _build_index_sync(force=force)
-        except Exception:
-            # _build_index_sync already populated _build_status['error']
-            # and logged. Swallowing here keeps the thread from bubbling
-            # into the daemon-thread "unraisable exception" handler.
-            pass
-
-    thread = threading.Thread(target=do_build, daemon=True, name='record-index-build')
-    thread.start()
-
-    return json.dumps({
-        'status': 'building',
-        'message': 'Index build started in background. Poll mo2_record_index_status for progress.',
-    }, indent=2)
+    return json.dumps(_build_status, indent=2)
 
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:

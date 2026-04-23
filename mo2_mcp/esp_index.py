@@ -327,13 +327,27 @@ class LoadOrderIndex:
         # disabled entries. See PHASE_3_HANDOFF for the bug write-up.
         profile_dir = Path(self._organizer.profile().absolutePath())
         load_order_raw = _read_loadorder_txt(profile_dir)
+        plugin_names = list(self._plugin_list.pluginNames())
 
         # Filter to plugins MO2 still knows about — drops orphans that
         # remain in loadorder.txt after their backing files were
         # removed (MO2 cleans these on its next refresh, but they can
         # linger between runs).
-        known_lower = {n.lower() for n in self._plugin_list.pluginNames()}
+        known_lower = {n.lower() for n in plugin_names}
         load_order = [n for n in load_order_raw if n.lower() in known_lower]
+
+        # Reconcile with pluginList: append any plugins MO2 knows about
+        # in memory that aren't yet in the on-disk loadorder.txt. MO2
+        # doesn't flush loadorder.txt on every in-memory state mutation
+        # (writes happen on profile switch / shutdown), so freshly-
+        # written or freshly-installed plugins can be in pluginList but
+        # not in loadorder.txt. Without this reconciliation, a rebuild
+        # triggered soon after an organizer.refresh() would silently
+        # omit new plugins — see Phase 4a gate findings. v2.6.0 / Phase 4.
+        load_order_names_lower = {n.lower() for n in load_order_raw}
+        for name in plugin_names:
+            if name.lower() not in load_order_names_lower:
+                load_order.append(name)
 
         # Active set (lowercased) — every plugin that pluginList classifies
         # as ACTIVE. Implicit-load plugins (base ESMs, installed CC masters)
@@ -344,7 +358,7 @@ class LoadOrderIndex:
         # queries skip them — same semantics as v2.5.x but driven by
         # MO2's API instead of plugins.txt + Skyrim.ccc parsing.
         active_lower = {
-            n.lower() for n in self._plugin_list.pluginNames()
+            n.lower() for n in plugin_names
             if self._plugin_list.state(n) == mobase.PluginState.ACTIVE
         }
 
@@ -490,6 +504,194 @@ class LoadOrderIndex:
         except OSError:
             pass
         return self.build(**kwargs)
+
+    def ensure_fresh(
+        self,
+        scan_fn: Callable[[list[str]], list[dict]],
+    ) -> list[str]:
+        """Refresh the index against current on-disk + MO2-API state.
+
+        Called at the start of every read-query handler (v2.6.0 Phase 4,
+        replacing the v2.5.x event-driven invalidation machinery). Compares
+        cached per-plugin mtime against the live filesystem and the cached
+        load-order / enabled set against MO2's pluginList; reconciles any
+        drift by re-scanning the affected plugins through `scan_fn` and
+        rebuilding the merged index from updated per-plugin caches.
+
+        Fast path (no changes detected): ~50–100ms stat walk on a ~3000-
+        plugin modlist. Returns an empty list. The common case.
+
+        Structural change (new/removed/mtime-bumped plugins): re-scans
+        only the affected plugins via one `scan_fn` call, rebuilds the
+        merged index (O(total_records) — ~1-3s on Aaron's modlist),
+        persists the updated pickle. Returns the list of rescanned plugin
+        names for telemetry.
+
+        Enable-only change (pluginList().state() disagrees with the
+        cached PluginInfo.enabled bits but no file mtimes shifted):
+        in-place flips the enabled flags on the existing _plugins
+        entries — no merged-index rebuild. Returns an empty list
+        (nothing was rescanned).
+
+        Raises RuntimeError if called before the index has been built —
+        the caller is expected to auto-build in that case rather than
+        conjure an index out of ensure_fresh.
+        """
+        if not self._built:
+            raise RuntimeError(
+                'ensure_fresh called on unbuilt index — caller must '
+                'auto-build via LoadOrderIndex.build() first'
+            )
+
+        import mobase  # lazy — see module docstring
+
+        profile_dir = Path(self._organizer.profile().absolutePath())
+        load_order_raw = _read_loadorder_txt(profile_dir)
+        plugin_names = list(self._plugin_list.pluginNames())
+        known_lower = {n.lower() for n in plugin_names}
+
+        # Start with loadorder.txt intersected with pluginList — preserves
+        # MO2's canonical ordering for the vast majority of plugins.
+        current_load_order = [n for n in load_order_raw if n.lower() in known_lower]
+        load_order_names_lower = {n.lower() for n in load_order_raw}
+
+        # Reconcile with pluginList: any plugins MO2 knows about in memory
+        # that aren't yet in the on-disk loadorder.txt are freshly-written
+        # or freshly-installed plugins MO2 has picked up via organizer.refresh
+        # but hasn't flushed to disk yet. MO2 flushes loadorder.txt on profile
+        # changes / shutdown, not on every in-memory state mutation, so the
+        # "in pluginList but not in loadorder.txt" set is the freshly-added
+        # plugin set. Append them at the end of current_load_order so they
+        # get the highest priority indices (matching MO2's convention for
+        # new plugins). Phase 4 / v2.6.0.
+        for name in plugin_names:
+            if name.lower() not in load_order_names_lower:
+                current_load_order.append(name)
+        current_names_lower = {n.lower() for n in current_load_order}
+
+        active_lower = {
+            n.lower() for n in plugin_names
+            if self._plugin_list.state(n) == mobase.PluginState.ACTIVE
+        }
+
+        # Detect file-level changes: new plugins, mtime drift.
+        to_rescan: list[tuple[int, str, str, float]] = []  # (lo_idx, name, path, mtime)
+
+        for lo_idx, plugin_name in enumerate(current_load_order):
+            name_lower = plugin_name.lower()
+            try:
+                resolved = self._organizer.resolvePath(plugin_name)
+            except Exception:
+                continue
+            if not resolved:
+                continue
+            path = Path(resolved)
+            if not path.is_file():
+                continue
+            try:
+                current_mtime = path.stat().st_mtime
+            except OSError:
+                continue
+
+            cached = self._plugin_cache.get(name_lower)
+            if (
+                cached is None
+                or cached.mtime != current_mtime
+                or cached.path != str(path)
+            ):
+                to_rescan.append((lo_idx, plugin_name, str(path), current_mtime))
+
+        # Detect removed plugins (in cache but not in current load order).
+        removed_lower = [
+            n for n in self._plugin_cache
+            if n not in current_names_lower
+        ]
+
+        load_order_changed = current_load_order != self._load_order
+
+        # Enable-state drift: does MO2's current ACTIVE set match what the
+        # cached PluginInfo entries claim? Only compare against plugins
+        # actually in the current load order — plugins removed from
+        # loadorder.txt wouldn't be in active_lower anyway.
+        cached_active_lower = {
+            p.name.lower() for p in self._plugins.values() if p.enabled
+        }
+        effective_active_lower = active_lower & current_names_lower
+        enabled_changed = cached_active_lower != effective_active_lower
+
+        # Fast path — nothing drifted.
+        if (
+            not to_rescan
+            and not removed_lower
+            and not load_order_changed
+            and not enabled_changed
+        ):
+            return []
+
+        # Enable-only change (no file / structural drift) — flip bits in
+        # place without paying for a merged-index rebuild.
+        if (
+            not to_rescan
+            and not removed_lower
+            and not load_order_changed
+            and enabled_changed
+        ):
+            for name_lower, pinfo in self._plugins.items():
+                pinfo.enabled = name_lower in active_lower
+            return []
+
+        # Structural change — rescan affected plugins + rebuild merged index.
+        rescanned_names: list[str] = []
+        if to_rescan:
+            scan_paths = [t[2] for t in to_rescan]
+            try:
+                scan_results = scan_fn(scan_paths) or []
+            except Exception as exc:
+                log.warning('ensure_fresh: scan_fn raised %s: %s', type(exc).__name__, exc)
+                scan_results = []
+            scan_by_path: dict[str, dict] = {}
+            for entry in scan_results:
+                p = entry.get('plugin_path')
+                if p:
+                    scan_by_path[p] = entry
+            for lo_idx, name, path_str, mtime in to_rescan:
+                entry = scan_by_path.get(path_str)
+                if entry is None or entry.get('error'):
+                    continue
+                pdata = self._cache_from_scan_entry(name, path_str, mtime, entry)
+                if pdata is None:
+                    continue
+                self._plugin_cache[name.lower()] = pdata
+                rescanned_names.append(name)
+
+        for name_lower in removed_lower:
+            self._plugin_cache.pop(name_lower, None)
+
+        # Rebuild merged index from the (possibly updated) per-plugin cache.
+        # Full rebuild rather than surgical patch — the latter is brittle
+        # across enable flips + load-order shifts + record-set changes, and
+        # the full rebuild is ~1-3s on a cached set, well within per-query
+        # budget when drift is actually detected.
+        self._records.clear()
+        self._edids.clear()
+        self._key_to_edid.clear()
+        self._by_type.clear()
+        self._plugins.clear()
+        self._load_order = current_load_order
+
+        for lo_idx, plugin_name in enumerate(current_load_order):
+            pdata = self._plugin_cache.get(plugin_name.lower())
+            if pdata is None:
+                continue
+            enabled = plugin_name.lower() in active_lower
+            self._merge_plugin(pdata, lo_idx, enabled)
+
+        # Persist the updated cache so next-session loads skip the re-scan.
+        # Enable-only changes skipped above; this only fires when plugin
+        # content or the load-order composition actually changed.
+        self.save_cache()
+
+        return rescanned_names
 
     def set_plugin_enabled(self, plugin_name: str, enabled: bool) -> bool:
         """Flip the `enabled` flag on an existing PluginInfo in place.

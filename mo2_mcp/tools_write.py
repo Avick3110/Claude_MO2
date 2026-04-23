@@ -4,9 +4,9 @@ import json
 import os
 
 import mobase
+from PyQt6.QtCore import qWarning
 
 from .config import PLUGIN_NAME
-from .tools_records import trigger_refresh_and_wait_for_index
 
 # Disallowed extensions — never write executable or plugin files
 BLOCKED_EXTENSIONS = {
@@ -115,14 +115,19 @@ def _write_file(organizer, args: dict) -> str:
 
     size = os.path.getsize(full_path)
 
+    # Fire a single MO2 refresh so the new file lands in the VFS; fire-and-
+    # forget — Phase 4 retired the wait-for-index-rebuild coordination since
+    # file writes don't affect the record index anyway.
+    try:
+        organizer.refresh(save_changes=True)
+    except Exception as exc:
+        qWarning(f"{PLUGIN_NAME}: organizer.refresh() failed after file write: {exc}")
+
     result = {
         "written_to": full_path,
         "output_mod": output_mod,
         "path": path,
         "size": size,
-        # Refresh MO2 + reindex so subsequent mo2_list_files / mo2_read_file
-        # calls see the new file via the VFS without manual F5.
-        "mo2_refresh": trigger_refresh_and_wait_for_index(organizer),
         "next_step": (
             f"File written and visible to mo2_list_files / mo2_read_file "
             f"via MO2's VFS (as long as '{output_mod}' is enabled in "

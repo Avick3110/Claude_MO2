@@ -32,7 +32,6 @@ from .tools_records import (
     _get_index,
     _parse_formid_str,
     build_bridge_load_order_context,
-    trigger_refresh_and_wait_for_index,
 )
 
 
@@ -292,31 +291,31 @@ def _handle_create_patch(organizer, plugin_dir: Path, args: dict) -> str:
         f"{output_name}"
     )
 
-    # Refresh MO2 and wait for the record index to rebuild so read-back
-    # tools see the new patch without the user having to press F5. The
-    # plugin lands in the load order as DISABLED -- surface that to the
-    # caller via next_step so Claude can tell the user to tick the
-    # checkbox when they want to load the patch in-game. Skip when
-    # nothing was actually written (full-failure or pre-bridge error).
+    # Fire a single MO2 refresh so the new file lands in loadorder.txt / the
+    # VFS; skip when nothing was actually written (full-failure or pre-bridge
+    # error). v2.6.0 Phase 4: the wait-for-index-rebuild coordination is gone
+    # — the per-query ensure_fresh() path picks up the new plugin on the next
+    # read-back without explicit coordination. Phase 4d extends this so read-
+    # back works before the user ticks the checkbox; until 4d lands, the
+    # next_step below still asks the user to enable before chaining reads.
     wrote_anything = (
         response.get('success')
         or response.get('successful_count', 0) > 0
         or (response.get('records_written') or 0) > 0
     )
     if wrote_anything:
-        response['mo2_refresh'] = trigger_refresh_and_wait_for_index(
-            organizer,
-        )
+        try:
+            organizer.refresh(save_changes=True)
+        except Exception as exc:
+            qWarning(f"{PLUGIN_NAME}: organizer.refresh() failed after patch write: {exc}")
         response['next_step'] = (
-            f"Plugin written to the load order as DISABLED. Tell the "
-            f"user to tick the checkbox next to '{output_name}' in "
-            f"MO2's right pane before attempting read-back or loading "
-            f"the patch in-game. Once they enable it, MO2's "
-            f"plugin-state-change event auto-triggers a record-index "
-            f"rebuild and mo2_record_detail / mo2_query_records will "
-            f"see the new records -- no manual mo2_build_record_index "
-            f"needed. Do NOT chain read-back calls in the same turn as "
-            f"the write; wait for the user's confirmation."
+            f"Plugin written to the load order as DISABLED. Tell the user "
+            f"to tick the checkbox next to '{output_name}' in MO2's right "
+            f"pane before attempting read-back or loading the patch in-"
+            f"game. Once they enable it, the next read-back query will "
+            f"pick up the new records automatically (ensure_fresh detects "
+            f"the change). Do NOT chain read-back calls in the same turn "
+            f"as the write; wait for the user's confirmation."
         )
 
     return json.dumps(response, indent=2)

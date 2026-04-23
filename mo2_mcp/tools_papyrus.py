@@ -30,12 +30,11 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from PyQt6.QtCore import qInfo
+from PyQt6.QtCore import qInfo, qWarning
 
 import mobase
 
 from .config import PLUGIN_NAME
-from .tools_records import trigger_refresh_and_wait_for_index
 
 
 # PapyrusCompiler discovery
@@ -402,15 +401,20 @@ def _handle_compile(organizer, args: dict) -> str:
 
     qInfo(f"{PLUGIN_NAME}: compiled {script_name} -> {final_pex_path}")
 
+    # Fire-and-forget MO2 refresh so the compiled .pex lands in the VFS.
+    # Phase 4 retired the wait-for-index-rebuild coordination — .pex writes
+    # don't affect the record index.
+    try:
+        organizer.refresh(save_changes=True)
+    except Exception as exc:
+        qWarning(f"{PLUGIN_NAME}: organizer.refresh() failed after script compile: {exc}")
+
     return json.dumps({
         "success": True,
         "script_name": script_name,
         "output_path": final_pex_path.replace("\\", "/"),
         "headers_used": headers_disk.replace("\\", "/"),
         "optimize": optimize,
-        # Refresh MO2 + reindex so the new .pex is visible to subsequent
-        # mo2_list_files / mo2_read_file calls without manual F5.
-        "mo2_refresh": trigger_refresh_and_wait_for_index(organizer),
         "next_step": (
             f"Compiled .pex is visible to mo2_list_files / mo2_read_file "
             f"via MO2's VFS (as long as '{output_mod}' is enabled in "

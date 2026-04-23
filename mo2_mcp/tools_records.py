@@ -26,7 +26,7 @@ import mobase
 from PyQt6.QtCore import qInfo, qWarning
 
 from .config import PLUGIN_NAME
-from .esp_index import LoadOrderIndex, make_formid_key
+from .esp_index import LoadOrderIndex
 from .tools_modlist import scan_missing_masters
 
 # Bridge `scan` command batch size (Phase 3). 100 plugins per subprocess
@@ -49,80 +49,37 @@ _SCAN_BATCH_SIZE = 100
 # ── Shared State ────────────────────────────────────────────────────────
 
 _index: LoadOrderIndex | None = None
-_build_lock = threading.Lock()
 _build_status: dict[str, Any] = {'state': 'idle'}
 
-# Cleared while a build is in progress, set when idle. Record-query handlers
-# wait on this so they never serve stale data between an MO2 refresh and the
-# subsequent re-index completing.
-_build_complete = threading.Event()
-_build_complete.set()
-
-# onRefreshed hook is registered exactly once per server process. Guarded
-# because _register_record_tools re-runs on every server start/stop cycle.
-_refresh_hook_registered = False
+# onPluginStateChanged hook is registered exactly once per server process.
+# Guarded because register_record_tools re-runs on every server start/stop
+# cycle. v2.6.0 Phase 4 retired the onRefreshed + onModMoved hooks — the
+# per-query ensure_fresh() freshness check covers those paths.
+_plugin_state_hook_registered = False
 
 # Module-level organizer reference stashed during register_record_tools so
-# the debounced-rebuild timer callbacks (which are invoked from threads
-# without captured closures over `organizer`) can still route through MO2's
-# VFS resolver. v2.6.0 Phase 2.
+# auto-build paths (invoked from query handlers without a captured closure
+# over `organizer`) can route through MO2's VFS resolver. v2.6.0 Phase 2.
 _organizer = None
 
 # v2.6.0 Phase 3: plugin directory + bridge scan_fn closure stashed at
-# register time so debounced-rebuild paths (which run on timer threads
-# with no closure over the registration scope) can rebuild the index
-# via the bridge without re-resolving the bridge binary path each time.
-# Same pattern as `_organizer`.
+# register time so any ensure_fresh() / auto-build path can invoke the
+# bridge without re-resolving its path each call. Same pattern as
+# `_organizer`.
 _plugin_dir: Path | None = None
 _index_scan_fn: Any = None
 
-# Populated by the onRefreshed callback; surfaced via mo2_record_index_status
-# so Claude can see whether the latest rebuild was auto-triggered.
+# Populated by the onPluginStateChanged hook and by ensure_fresh() when it
+# detects drift; surfaced via mo2_record_index_status so Claude can see
+# whether the last interaction picked up any state changes.
 _last_auto_refresh: dict[str, Any] | None = None
-
-# How long a record query blocks waiting for an in-progress rebuild before
-# returning an error. Single-threaded HTTPServer means one slow handler stalls
-# every request, so don't exceed typical MCP client timeouts.
-_BUILD_WAIT_TIMEOUT_S = 30.0
-
-# How long trigger_refresh_and_wait_for_index blocks for the post-write
-# refresh + rebuild to complete. One MO2 refresh cycle on a large modlist
-# (~3300 plugins) is ~17-25s, plus a ~0.5s debounce and a ~10-15s rebuild.
-# 60s gives headroom for modlists up to roughly 5000 plugins. Kept separate
-# from _BUILD_WAIT_TIMEOUT_S so read-query blocking stays snappy.
-_WRITE_REFRESH_TIMEOUT_S = 60.0
-
-# MO2 holds plugin/mod state mutations in memory; plugins.txt and loadorder.txt
-# are not flushed synchronously. Event callbacks (onPluginStateChanged,
-# onModMoved) fire before disk flush, so rebuilding immediately would re-read
-# the pre-change state. A short debounce gives MO2 time to flush, AND
-# coalesces bursts (multi-select drag -> N onModMoved fires) into one rebuild.
-_STATE_FLUSH_DELAY_S = 0.5
-
-# Debounce timer: fresh events cancel-and-replace this, so the rebuild fires
-# _STATE_FLUSH_DELAY_S after the LAST event in a burst, not after the first.
-_rebuild_timer: threading.Timer | None = None
-_rebuild_timer_lock = threading.Lock()
-
-# Flag set when a state-change event fires during an active rebuild. The
-# active rebuild can't include those new changes, so the build thread chains
-# a fresh rebuild in its finally block. Queries stay blocked across the
-# chain -- no stale data released between builds.
-_rebuild_pending_during_build = False
 
 
 def _get_index() -> LoadOrderIndex | None:
     """Return the current index without waiting. Used by status/diagnostic
-    handlers that should report live state even mid-build."""
+    handlers that should report live state even mid-build, and by tools_patching
+    which calls this directly for its pre-patch index-availability check."""
     return _index
-
-
-def _get_index_fresh(timeout_s: float = _BUILD_WAIT_TIMEOUT_S) -> tuple[LoadOrderIndex | None, bool]:
-    """Return (index, timed_out). If a build is in progress, blocks up to
-    timeout_s for it to complete so callers never see a stale index after an
-    auto-triggered rebuild. `timed_out` is True only if the wait expired."""
-    completed = _build_complete.wait(timeout=timeout_s)
-    return _index, not completed
 
 
 def _find_bridge_for_read(plugin_dir: Path) -> Path | None:
@@ -244,10 +201,7 @@ def register_record_tools(registry, organizer) -> None:
 
     plugin_dir = Path(__file__).resolve().parent
     _plugin_dir = plugin_dir
-    base_path = organizer.basePath()
-    profile_path = organizer.profile().absolutePath()
     plugin_list = organizer.pluginList()
-    mod_list = organizer.modList()
 
     # Resolve the bridge once at register time. If it's missing now, we
     # surface that on the first build attempt rather than at every event
@@ -294,10 +248,7 @@ def register_record_tools(registry, organizer) -> None:
                 },
             },
         },
-        handler=lambda args: _handle_build_index(
-            args, base_path, profile_path, plugin_list,
-            organizer=organizer,
-        ),
+        handler=lambda args: _handle_build_index(args),
     )
 
     # ── mo2_query_records ───────────────────────────────────────────
@@ -523,11 +474,11 @@ def register_record_tools(registry, organizer) -> None:
         handler=lambda args: _handle_conflict_summary(args),
     )
 
-    # Hook MO2 state-change events so the index stays live. Three hooks cover
-    # the observed gap (Refresh / plugin toggle / mod toggle / priority drag /
-    # install). Record queries block on _build_complete while a rebuild runs,
-    # so Claude never serves data from the pre-change load order.
-    _register_event_hooks(base_path, profile_path, plugin_list, mod_list)
+    # Hook onPluginStateChanged so checkbox toggles flip PluginInfo.enabled
+    # bits in place without waiting for the next read query's ensure_fresh.
+    # onRefreshed + onModMoved were retired in Phase 4 — ensure_fresh covers
+    # those drift paths.
+    _register_plugin_state_hook(plugin_list)
 
 
 # ── Handlers ────────────────────────────────────────────────────────────
@@ -557,17 +508,142 @@ def _handle_index_status(plugin_list) -> str:
     return json.dumps(result, indent=2)
 
 
-def _handle_build_index(
-    args: dict, base_path: str, profile_path: str, plugin_list,
-    organizer=None,
-) -> str:
-    global _index, _build_status
+def _build_index_sync(force: bool = False) -> dict:
+    """Synchronously build (or rebuild) the record index.
 
-    # Fall back to the module-level organizer so event-driven rebuild
-    # paths (which lack a captured organizer closure) still use MO2's
-    # VFS resolver.
-    if organizer is None:
-        organizer = _organizer
+    Used by both the explicit `mo2_build_record_index` handler and the
+    auto-build-on-first-query path inside `_ensure_index_ready`. Updates
+    `_index` and `_build_status` as side effects; returns the stats dict.
+
+    Raises on catastrophic failure (missing bridge, MO2 API error) — the
+    caller wraps in try/except and converts to a JSON error envelope.
+
+    Not safe to call while another `_build_index_sync` is running. The
+    explicit handler's `_build_status` guard and the single-threaded
+    HTTPServer covers the contention window.
+    """
+    global _index, _build_status
+    if _organizer is None:
+        raise RuntimeError('_organizer not set — register_record_tools must run first')
+    if _index_scan_fn is None:
+        raise RuntimeError(
+            'mutagen-bridge.exe not found under plugins/mo2_mcp/tools/. '
+            'Re-run the installer or sync the bridge before building the '
+            'record index.'
+        )
+
+    _build_status = {
+        'state': 'building',
+        'started_at': time.time(),
+        'current_plugin': '',
+        'progress': 0,
+    }
+
+    try:
+        idx = LoadOrderIndex(_organizer)
+
+        def progress(name, i, total):
+            _build_status['current_plugin'] = name
+            _build_status['progress'] = i + 1
+            _build_status['total'] = total
+            if i % 200 == 0:
+                safe_name = name.encode('ascii', 'replace').decode('ascii')
+                qInfo(f'{PLUGIN_NAME}: indexing [{i+1}/{total}] {safe_name}')
+
+        if force:
+            result = idx.rebuild(scan_fn=_index_scan_fn, progress_cb=progress)
+        else:
+            result = idx.build(scan_fn=_index_scan_fn, progress_cb=progress)
+
+        idx.save_cache()
+        _index = idx
+
+        plugin_list = _organizer.pluginList()
+        missing = scan_missing_masters(plugin_list)
+
+        _build_status = {
+            'state': 'done',
+            'finished_at': time.time(),
+            'missing_masters': missing,
+            'missing_masters_count': len(missing),
+            **result,
+        }
+
+        qInfo(f'{PLUGIN_NAME}: index build complete - '
+              f'{result["unique_records"]:,} records, '
+              f'{result["conflicts"]:,} conflicts in '
+              f'{result["build_time_s"]:.1f}s '
+              f'({len(missing)} plugin(s) with missing masters)')
+
+        return result
+
+    except Exception as exc:
+        _build_status = {'state': 'error', 'error': str(exc)}
+        qWarning(f'{PLUGIN_NAME}: index build failed: {exc}')
+        raise
+
+
+def _ensure_index_ready() -> tuple[LoadOrderIndex | None, str | None]:
+    """Prepare the index for a read query. Returns (index, error_message).
+
+    First query after server start (or after force_rebuild): auto-builds
+    synchronously — the query handler blocks for the duration. Subsequent
+    queries: calls `ensure_fresh()` which stats changed plugins + updates
+    the enabled set in place; ~50-100ms in the no-drift case.
+
+    Returns `(index, None)` on success, or `(None, error)` if the auto-
+    build failed. `(index, error)` is used for ensure_fresh failures
+    where the old index is still serviceable — the caller decides
+    whether to return an error or proceed with stale data.
+    """
+    global _last_auto_refresh
+    idx = _index
+    if idx is None or not idx.is_built:
+        qInfo(
+            f'{PLUGIN_NAME}: auto-building record index on first query '
+            f'(~30-80s on a large modlist)'
+        )
+        try:
+            _build_index_sync(force=False)
+        except Exception as exc:
+            return None, f'Auto-build failed: {exc}'
+        _last_auto_refresh = {
+            'at': time.time(),
+            'source': 'auto_build_on_first_query',
+            'triggered_build': True,
+        }
+        return _index, None
+
+    try:
+        rescanned = idx.ensure_fresh(_index_scan_fn)
+    except Exception as exc:
+        return idx, f'ensure_fresh failed: {exc}'
+
+    if rescanned:
+        safe_names = [n.encode('ascii', 'replace').decode('ascii') for n in rescanned[:5]]
+        qInfo(
+            f'{PLUGIN_NAME}: ensure_fresh rescanned {len(rescanned)} '
+            f'plugin(s): {safe_names}'
+        )
+        _last_auto_refresh = {
+            'at': time.time(),
+            'source': 'ensure_fresh',
+            'rescanned_plugins': safe_names,
+            'rescanned_count': len(rescanned),
+        }
+
+    return idx, None
+
+
+def _handle_build_index(args: dict) -> str:
+    """Handler for the explicit mo2_build_record_index tool call.
+
+    v2.6.0 Phase 4: async (thread + poll via mo2_record_index_status) for
+    now — Phase 4b converts to synchronous/blocking so callers don't have
+    to implement polling. The in-flight guard prevents concurrent builds;
+    the `_build_status` dict carries progress for status queries.
+    """
+    global _build_status
 
     force = args.get('force_rebuild', False)
     if isinstance(force, str):
@@ -580,83 +656,14 @@ def _handle_build_index(
             **_build_status,
         }, indent=2)
 
-    _build_status = {
-        'state': 'building',
-        'started_at': time.time(),
-        'current_plugin': '',
-        'progress': 0,
-    }
-
     def do_build():
-        global _index, _build_status, _rebuild_pending_during_build
-        _build_complete.clear()
         try:
-            # v2.6.0 Phase 3: index is bridge-fed. LoadOrderIndex consults
-            # organizer.pluginList() / .resolvePath() directly for load
-            # order and per-plugin paths; record content comes from the
-            # bridge's `scan` command, batched ~30 plugins per call.
-            #
-            # Phase 2's `_resolve_via_mo2` injection is gone — the new
-            # LoadOrderIndex constructor takes the organizer and uses
-            # resolvePath internally. (The PluginResolver class it was
-            # working around is also gone.)
-            scan_fn = _index_scan_fn
-            if scan_fn is None:
-                raise RuntimeError(
-                    'mutagen-bridge.exe not found under plugins/mo2_mcp/tools/. '
-                    'Re-run the installer or sync the bridge before building '
-                    'the record index.'
-                )
-
-            idx = LoadOrderIndex(organizer)
-
-            def progress(name, i, total):
-                _build_status['current_plugin'] = name
-                _build_status['progress'] = i + 1
-                _build_status['total'] = total
-                if i % 200 == 0:
-                    safe_name = name.encode('ascii', 'replace').decode('ascii')
-                    qInfo(f'{PLUGIN_NAME}: indexing [{i+1}/{total}] {safe_name}')
-
-            if force:
-                result = idx.rebuild(scan_fn=scan_fn, progress_cb=progress)
-            else:
-                result = idx.build(scan_fn=scan_fn, progress_cb=progress)
-
-            idx.save_cache()
-            _index = idx
-
-            missing = scan_missing_masters(plugin_list)
-
-            _build_status = {
-                'state': 'done',
-                'finished_at': time.time(),
-                'missing_masters': missing,
-                'missing_masters_count': len(missing),
-                **result,  # includes 'errors' (capped at 20) and 'error_count' if any
-            }
-
-            qInfo(f'{PLUGIN_NAME}: index build complete - '
-                  f'{result["unique_records"]:,} records, '
-                  f'{result["conflicts"]:,} conflicts in '
-                  f'{result["build_time_s"]:.1f}s '
-                  f'({len(missing)} plugin(s) with missing masters)')
-
-        except Exception as e:
-            _build_status = {'state': 'error', 'error': str(e)}
-            qWarning(f'{PLUGIN_NAME}: index build failed: {e}')
-        finally:
-            # If events came in during this build, chain a fresh rebuild
-            # instead of releasing queries with possibly-incomplete data.
-            if _rebuild_pending_during_build:
-                _rebuild_pending_during_build = False
-                qInfo(f'{PLUGIN_NAME}: state changes occurred during build '
-                      f'-- chaining another rebuild, queries remain blocked')
-                _schedule_debounced_rebuild(
-                    'post-build pending', base_path, profile_path, plugin_list,
-                )
-            else:
-                _build_complete.set()
+            _build_index_sync(force=force)
+        except Exception:
+            # _build_index_sync already populated _build_status['error']
+            # and logged. Swallowing here keeps the thread from bubbling
+            # into the daemon-thread "unraisable exception" handler.
+            pass
 
     thread = threading.Thread(target=do_build, daemon=True, name='record-index-build')
     thread.start()
@@ -680,11 +687,11 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
 
 
 def _handle_query_records(args: dict) -> str:
-    idx, timed_out = _get_index_fresh()
-    if timed_out:
-        return json.dumps({'error': f'Index rebuild still in progress after {_BUILD_WAIT_TIMEOUT_S:.0f}s. Poll mo2_record_index_status and retry.'})
+    idx, err = _ensure_index_ready()
+    if err:
+        return json.dumps({'error': err})
     if not idx or not idx.is_built:
-        return json.dumps({'error': 'Index not built. Call mo2_build_record_index first.'})
+        return json.dumps({'error': 'Index unavailable (auto-build did not succeed).'})
 
     include_disabled = _coerce_bool(args.get('include_disabled'))
 
@@ -828,11 +835,11 @@ def _resolve_plugin_ref(
 
 
 def _handle_record_detail(args: dict, plugin_dir: Path) -> str:
-    idx, timed_out = _get_index_fresh()
-    if timed_out:
-        return json.dumps({'error': f'Index rebuild still in progress after {_BUILD_WAIT_TIMEOUT_S:.0f}s. Poll mo2_record_index_status and retry.'})
+    idx, err = _ensure_index_ready()
+    if err:
+        return json.dumps({'error': err})
     if not idx or not idx.is_built:
-        return json.dumps({'error': 'Index not built. Call mo2_build_record_index first.'})
+        return json.dumps({'error': 'Index unavailable (auto-build did not succeed).'})
 
     plugin_names = args.get('plugin_names')
     plugin_name = args.get('plugin_name')
@@ -984,11 +991,11 @@ def _handle_record_detail(args: dict, plugin_dir: Path) -> str:
 
 
 def _handle_conflict_chain(args: dict) -> str:
-    idx, timed_out = _get_index_fresh()
-    if timed_out:
-        return json.dumps({'error': f'Index rebuild still in progress after {_BUILD_WAIT_TIMEOUT_S:.0f}s. Poll mo2_record_index_status and retry.'})
+    idx, err = _ensure_index_ready()
+    if err:
+        return json.dumps({'error': err})
     if not idx or not idx.is_built:
-        return json.dumps({'error': 'Index not built. Call mo2_build_record_index first.'})
+        return json.dumps({'error': 'Index unavailable (auto-build did not succeed).'})
 
     include_disabled = _coerce_bool(args.get('include_disabled'))
 
@@ -1030,11 +1037,11 @@ def _handle_conflict_chain(args: dict) -> str:
 
 
 def _handle_plugin_conflicts(args: dict) -> str:
-    idx, timed_out = _get_index_fresh()
-    if timed_out:
-        return json.dumps({'error': f'Index rebuild still in progress after {_BUILD_WAIT_TIMEOUT_S:.0f}s. Poll mo2_record_index_status and retry.'})
+    idx, err = _ensure_index_ready()
+    if err:
+        return json.dumps({'error': err})
     if not idx or not idx.is_built:
-        return json.dumps({'error': 'Index not built. Call mo2_build_record_index first.'})
+        return json.dumps({'error': 'Index unavailable (auto-build did not succeed).'})
 
     include_disabled = _coerce_bool(args.get('include_disabled'))
     plugin_name = args.get('plugin_name', '')
@@ -1085,11 +1092,11 @@ def _handle_plugin_conflicts(args: dict) -> str:
 
 
 def _handle_conflict_summary(args: dict) -> str:
-    idx, timed_out = _get_index_fresh()
-    if timed_out:
-        return json.dumps({'error': f'Index rebuild still in progress after {_BUILD_WAIT_TIMEOUT_S:.0f}s. Poll mo2_record_index_status and retry.'})
+    idx, err = _ensure_index_ready()
+    if err:
+        return json.dumps({'error': err})
     if not idx or not idx.is_built:
-        return json.dumps({'error': 'Index not built. Call mo2_build_record_index first.'})
+        return json.dumps({'error': 'Index unavailable (auto-build did not succeed).'})
 
     include_disabled = _coerce_bool(args.get('include_disabled'))
     summary = idx.get_conflict_summary(include_disabled=include_disabled)
@@ -1107,136 +1114,49 @@ def _ascii_safe(s: str) -> str:
     return s.encode('ascii', 'replace').decode('ascii')
 
 
-def _on_mo2_event(source: str, base_path: str, profile_path: str, plugin_list) -> None:
-    """Handler for MO2 events that require a full index rebuild.
+def _on_plugin_state_changed(state_dict: dict) -> None:
+    """Handler for MO2's onPluginStateChanged event.
 
-    Fed by onRefreshed and onModMoved -- the former covers mod install /
-    uninstall / plugin file appearance, the latter covers mod-priority
-    drags that can change which provider wins for a given plugin
-    filename. Both require re-scanning plugin files on disk.
+    v2.6.0 Phase 4 simplification: pure in-place enabled-bit flip for known
+    plugins. No rebuild fallbacks, no in-flight build coordination, no
+    post-build chaining. The per-query `ensure_fresh()` path covers the
+    previously-fallback cases:
 
-    onPluginStateChanged goes through `_on_plugin_state_changed` instead
-    -- a pure enable-state toggle doesn't change record data, so it can
-    update PluginInfo.enabled bits in place rather than paying for a
-    full rebuild.
+      * Unknown plugin in the event (newly-installed mod, freshly-written
+        patch being ticked for the first time): the next read query stats
+        its file mtime, sees it's not in `_plugin_cache`, and rescans it
+        via the bridge inside `ensure_fresh`. No event-driven rebuild.
+      * Event fires before any index exists: the next read query auto-
+        builds. No-op here.
+      * Event fires during an explicit `mo2_build_record_index` call:
+        the build reads pluginList state live, so any flips done mid-build
+        will be visible once the build lands. No rebuild-chain needed.
 
-    Query handlers block on `_build_complete` while the rebuild runs, so
-    Claude never sees stale data between a state change and the new
-    index landing.
-
-    Swallows exceptions with traceback logging -- a raise here would
-    propagate into MO2's Qt event loop and could destabilize other
+    Swallows exceptions with traceback logging — a raise here would
+    propagate into MO2's Qt event loop and could destabilise other
     plugins' callbacks.
     """
     global _last_auto_refresh
-    safe_source = _ascii_safe(source)
-    try:
-        fired_at = time.time()
-        try:
-            plugin_count = len(plugin_list.pluginNames())
-        except Exception:
-            plugin_count = -1
-
-        if _index is None or not _index.is_built:
-            qInfo(f'{PLUGIN_NAME}: {safe_source} fired before first index build '
-                  f'(plugin_count={plugin_count}) -- skipping auto-rebuild')
-            _last_auto_refresh = {
-                'at': fired_at,
-                'source': safe_source,
-                'plugin_count': plugin_count,
-                'triggered_rebuild': False,
-                'skip_reason': 'no_prior_index',
-            }
-            return
-
-        if _build_status.get('state') == 'building':
-            # Flag a post-build rebuild. The in-flight build started reading
-            # disk BEFORE this event, so its result won't reflect this change.
-            # Build thread's finally chains the next rebuild without releasing
-            # _build_complete -- queries stay blocked until the chained build
-            # completes.
-            global _rebuild_pending_during_build
-            _rebuild_pending_during_build = True
-            qInfo(f'{PLUGIN_NAME}: {safe_source} fired during active rebuild '
-                  f'(plugin_count={plugin_count}) -- flagged post-build rebuild')
-            _last_auto_refresh = {
-                'at': fired_at,
-                'source': safe_source,
-                'plugin_count': plugin_count,
-                'triggered_rebuild': False,
-                'skip_reason': 'build_in_progress_pending_rebuild',
-            }
-            return
-
-        qInfo(f'{PLUGIN_NAME}: {safe_source} fired (plugin_count={plugin_count}) '
-              f'-- scheduling rebuild in {_STATE_FLUSH_DELAY_S}s '
-              f'(debounced: further events cancel+replace this timer)')
-        _last_auto_refresh = {
-            'at': fired_at,
-            'source': safe_source,
-            'plugin_count': plugin_count,
-            'triggered_rebuild': True,
-            'delay_s': _STATE_FLUSH_DELAY_S,
-        }
-        _schedule_debounced_rebuild(safe_source, base_path, profile_path, plugin_list)
-
-    except Exception as e:
-        qWarning(f'{PLUGIN_NAME}: error in {safe_source} callback: {e}\n'
-                 f'{traceback.format_exc()}')
-
-
-def _on_plugin_state_changed(
-    state_dict: dict, base_path: str, profile_path: str, plugin_list,
-) -> None:
-    """Fast path for the onPluginStateChanged event.
-
-    When the user ticks or unticks a plugin in MO2's right pane, no
-    record data has changed -- only the enabled bit. Flip
-    PluginInfo.enabled in place for each toggled plugin; queries using
-    the default include_disabled=False filter will immediately see the
-    new state without waiting for a ~10-15s rebuild.
-
-    Falls back to a full rebuild when:
-      * No prior index exists (nothing to flip against).
-      * Any plugin in the event dict is unknown to the index -- e.g. a
-        freshly-written plugin is being enabled for the first time and
-        needs its records scanned in.
-      * Another rebuild is already running -- piggyback on the existing
-        build-pending mechanism so the new state lands in the chained
-        rebuild.
-    """
-    global _last_auto_refresh, _rebuild_pending_during_build
     safe_source = _ascii_safe(f"onPluginStateChanged({len(state_dict)})")
 
     try:
         fired_at = time.time()
 
         if _index is None or not _index.is_built:
-            qInfo(f'{PLUGIN_NAME}: {safe_source} fired before first index build '
-                  f'-- no-op (mo2_build_record_index will pick up current state)')
+            qInfo(
+                f'{PLUGIN_NAME}: {safe_source} fired before first index build '
+                f'-- no-op (next read query will auto-build)'
+            )
             _last_auto_refresh = {
                 'at': fired_at,
                 'source': safe_source,
-                'triggered_rebuild': False,
+                'in_place_flips': 0,
                 'skip_reason': 'no_prior_index',
             }
             return
 
-        if _build_status.get('state') == 'building':
-            _rebuild_pending_during_build = True
-            qInfo(f'{PLUGIN_NAME}: {safe_source} fired during active rebuild '
-                  f'-- flagged post-build rebuild so in-place flips land with fresh data')
-            _last_auto_refresh = {
-                'at': fired_at,
-                'source': safe_source,
-                'triggered_rebuild': False,
-                'skip_reason': 'build_in_progress_pending_rebuild',
-            }
-            return
-
-        # Walk the state dict, flip known plugins in place, collect unknowns.
+        flips = 0
         unknown: list[str] = []
-        flips: list[tuple[str, bool]] = []
         for plugin_name, new_state in state_dict.items():
             pinfo = _index.get_plugin_info(plugin_name)
             if pinfo is None:
@@ -1246,227 +1166,63 @@ def _on_plugin_state_changed(
                 is_active = bool(int(new_state) & int(mobase.PluginState.ACTIVE))
             except Exception:
                 is_active = (new_state == mobase.PluginState.ACTIVE)
-            flips.append((plugin_name, is_active))
+            _index.set_plugin_enabled(plugin_name, is_active)
+            flips += 1
 
         if unknown:
-            # Unknown plugin(s) in the event -- index needs to pick them up.
-            # Typical case: a write tool just created a new plugin and the
-            # user ticked its checkbox for the first time, triggering this
-            # event before any onRefreshed has added the plugin to the index.
             safe_unknown = [_ascii_safe(n) for n in unknown[:5]]
-            qInfo(f'{PLUGIN_NAME}: {safe_source} references {len(unknown)} '
-                  f'unknown plugin(s) {safe_unknown} -- falling back to full rebuild')
-            _last_auto_refresh = {
-                'at': fired_at,
-                'source': safe_source,
-                'triggered_rebuild': True,
-                'unknown_plugins': safe_unknown,
-                'delay_s': _STATE_FLUSH_DELAY_S,
-            }
-            _schedule_debounced_rebuild(
-                safe_source, base_path, profile_path, plugin_list,
+            qInfo(
+                f'{PLUGIN_NAME}: {safe_source} references {len(unknown)} '
+                f'unknown plugin(s) {safe_unknown} -- ensure_fresh() will '
+                f'pick them up on the next read query'
             )
-            return
 
-        # All known -- in-place flip, no rebuild.
-        for plugin_name, is_active in flips:
-            _index.set_plugin_enabled(plugin_name, is_active)
-
-        qInfo(f'{PLUGIN_NAME}: {safe_source} -- in-place flipped '
-              f'{len(flips)} plugin(s), no rebuild needed')
+        qInfo(
+            f'{PLUGIN_NAME}: {safe_source} -- in-place flipped {flips} '
+            f'plugin(s) ({len(unknown)} unknown, deferred to ensure_fresh)'
+        )
         _last_auto_refresh = {
             'at': fired_at,
             'source': safe_source,
-            'triggered_rebuild': False,
-            'in_place_flips': len(flips),
+            'in_place_flips': flips,
+            'deferred_unknown_plugins': len(unknown),
         }
 
-    except Exception as e:
-        qWarning(f'{PLUGIN_NAME}: error in {safe_source} callback: {e}\n'
-                 f'{traceback.format_exc()}')
-
-
-def _schedule_debounced_rebuild(
-    source: str, base_path: str, profile_path: str, plugin_list,
-) -> None:
-    """Cancel-and-replace any pending rebuild timer. Clears `_build_complete`
-    immediately so record queries block from this moment on -- not just once
-    the build starts -- closing the stale-read window through both the
-    debounce delay AND the subsequent build."""
-    global _rebuild_timer
-    with _rebuild_timer_lock:
-        if _rebuild_timer is not None:
-            _rebuild_timer.cancel()
-        _build_complete.clear()
-        _rebuild_timer = threading.Timer(
-            _STATE_FLUSH_DELAY_S,
-            _fire_debounced_rebuild,
-            args=(source, base_path, profile_path, plugin_list),
+    except Exception as exc:
+        qWarning(
+            f'{PLUGIN_NAME}: error in {safe_source} callback: {exc}\n'
+            f'{traceback.format_exc()}'
         )
-        _rebuild_timer.daemon = True
-        _rebuild_timer.name = 'record-index-debounce'
-        _rebuild_timer.start()
 
 
-def _fire_debounced_rebuild(
-    source: str, base_path: str, profile_path: str, plugin_list,
-) -> None:
-    """Runs on the timer thread after the debounce delay. Triggers the real
-    rebuild, or re-releases `_build_complete` if something prevents the build
-    from starting (otherwise queries would block until the 30s timeout)."""
-    try:
-        if _build_status.get('state') == 'building':
-            qInfo(f'{PLUGIN_NAME}: debounced rebuild ({source}) fired but a build '
-                  f'is already running -- the in-flight build will pick up final state')
-            return
-        qInfo(f'{PLUGIN_NAME}: debounced rebuild firing for {source} '
-              f'(flushed {_STATE_FLUSH_DELAY_S}s ago)')
-        _handle_build_index({}, base_path, profile_path, plugin_list)
-    except Exception as e:
-        qWarning(f'{PLUGIN_NAME}: error in debounced rebuild ({source}): {e}\n'
-                 f'{traceback.format_exc()}')
-        # If we cleared _build_complete but the build never started, unblock
-        # queries so they don't hang for the full 30s timeout.
-        _build_complete.set()
+def _register_plugin_state_hook(plugin_list) -> None:
+    """Register MO2's onPluginStateChanged hook exactly once per server
+    process. `register_record_tools` re-runs on every server start/stop
+    cycle, so this must be idempotent.
 
-
-def _register_event_hooks(
-    base_path: str, profile_path: str, plugin_list, mod_list,
-) -> None:
-    """Register all three MO2 event hooks exactly once. `register_record_tools`
-    re-runs on every server start/stop cycle, so this must be idempotent.
-
-    Discovered gap: onRefreshed alone does NOT fire for plugin-checkbox toggle
-    (right pane) or mod priority drag (left pane). Without the two extra hooks
-    below, Claude would serve stale answers after either of those actions.
+    v2.6.0 Phase 4: only onPluginStateChanged. onRefreshed and onModMoved
+    were retired — the per-query `ensure_fresh()` path reads pluginList /
+    loadorder.txt / plugin-file mtimes on every query and catches any
+    drift event-driven hooks would have caught, without the event-
+    coordination complexity (debounced timers, pending-rebuild chains,
+    in-flight-build guards) the v2.5.x architecture carried. The
+    onPluginStateChanged hook stays as an in-place fast path so a
+    checkbox toggle doesn't have to wait for the next query to be
+    reflected.
     """
-    global _refresh_hook_registered
-    if _refresh_hook_registered:
+    global _plugin_state_hook_registered
+    if _plugin_state_hook_registered:
         return
-    results = {}
     try:
-        results['onRefreshed'] = plugin_list.onRefreshed(
-            lambda: _on_mo2_event(
-                "onRefreshed", base_path, profile_path, plugin_list,
-            )
+        handle = plugin_list.onPluginStateChanged(
+            lambda state_dict: _on_plugin_state_changed(state_dict)
         )
-    except Exception as e:
-        qWarning(f'{PLUGIN_NAME}: failed to register onRefreshed: {e}')
-    try:
-        # Callback receives dict[plugin_filename -> new PluginState]. Single
-        # toggle sends one entry; batch/select-all sends many. Routed to the
-        # fast-path handler -- pure checkbox toggles flip PluginInfo.enabled
-        # in place rather than triggering a full rebuild.
-        results['onPluginStateChanged'] = plugin_list.onPluginStateChanged(
-            lambda state_dict: _on_plugin_state_changed(
-                state_dict, base_path, profile_path, plugin_list,
-            )
-        )
-    except Exception as e:
-        qWarning(f'{PLUGIN_NAME}: failed to register onPluginStateChanged: {e}')
-    try:
-        # Callback fires once per moved mod. Multi-select drag produces a burst
-        # of callbacks; the state=='building' guard coalesces them into a
-        # single rebuild that reads the final post-drag state.
-        results['onModMoved'] = mod_list.onModMoved(
-            lambda name, old_pri, new_pri: _on_mo2_event(
-                f"onModMoved({name}:{old_pri}->{new_pri})",
-                base_path, profile_path, plugin_list,
-            )
-        )
-    except Exception as e:
-        qWarning(f'{PLUGIN_NAME}: failed to register onModMoved: {e}')
+    except Exception as exc:
+        qWarning(f'{PLUGIN_NAME}: failed to register onPluginStateChanged: {exc}')
+        return
 
-    _refresh_hook_registered = True
-    qInfo(f'{PLUGIN_NAME}: registered MO2 event hooks {results}')
-
-
-# ── Write-side refresh + wait ───────────────────────────────────────────
-
-def trigger_refresh_and_wait_for_index(
-    organizer,
-    timeout: float = _WRITE_REFRESH_TIMEOUT_S,
-) -> dict:
-    """Trigger a single MO2 refresh after a write op, then block until the
-    auto-rebuild of the record index completes so the caller can
-    immediately read back what it just wrote.
-
-    Use case: Claude writes a file (ESP via mo2_create_patch, asset via
-    mo2_write_file, extracted BSA contents, compiled .pex) and wants to
-    verify or build on top of it in the same session. Without this helper
-    the caller would have to tell the user "press F5 in MO2 and rebuild
-    the index" before the next read-back query. With it, the tool returns
-    only after MO2 has discovered the file on disk, added it to the load
-    order, and our event hooks have kicked off + finished a background
-    index rebuild.
-
-    What this helper does NOT do: enable the new plugin's MO2 checkbox
-    or the parent mod folder's checkbox. Every v2.5.6 beta attempt to
-    drive those programmatically via the mobase API failed -- setState
-    silently no-ops for freshly-written plugins, organizer.refresh() can
-    revert in-memory setState during its plugin-list re-scan, and the
-    retry machinery we tried stacked 6+ refresh cycles per patch for no
-    reliable gain. Instead: the write response includes a next_step
-    field telling the user to tick the checkbox manually when they're
-    ready to load the content in-game. Read-back tools
-    (mo2_record_detail, mo2_query_records) return empty for the new
-    plugin's records until the user enables it (verified against live
-    v2.5.6 on 2026-04-20); once the user ticks the checkbox,
-    onPluginStateChanged fires an auto-rebuild and the records become
-    visible without a manual mo2_build_record_index call.
-
-    Why blocking: Claude's calling pattern is "write, then immediately
-    read back." Returning before the rebuild completes means the next
-    query sees the pre-write state. organizer.refresh() is async (fires
-    onRefreshed on the Qt thread when MO2 finishes), and the debounced
-    rebuild starts _STATE_FLUSH_DELAY_S after that -- so the natural
-    wait path is _build_complete, which the rebuild thread sets when
-    done and _schedule_debounced_rebuild/cancel-replace keep cleared
-    across the whole event burst.
-
-    Args:
-      organizer: the MO2 IOrganizer instance.
-      timeout: max seconds to wait for the refresh + rebuild. Defaults
-        to _WRITE_REFRESH_TIMEOUT_S.
-
-    Returns:
-      dict with:
-        refreshed: bool -- True if the rebuild completed within timeout.
-        elapsed_s: float -- wall-clock seconds spent in this call.
-        error: str | None -- populated if refresh() failed to start or
-          the rebuild did not complete in time.
-    """
-    start = time.monotonic()
-
-    # Take the block upfront. If we don't, a fast onRefreshed → debounce →
-    # rebuild → set() chain could complete before our wait() call, and we'd
-    # return immediately while MO2 is still mid-refresh.
-    _build_complete.clear()
-
-    try:
-        organizer.refresh(save_changes=True)
-    except Exception as e:
-        _build_complete.set()
-        return {
-            'refreshed': False,
-            'elapsed_s': round(time.monotonic() - start, 2),
-            'error': f'organizer.refresh() failed: {e}',
-        }
-
-    if not _build_complete.wait(timeout=timeout):
-        return {
-            'refreshed': False,
-            'elapsed_s': round(time.monotonic() - start, 2),
-            'error': (
-                f'Refresh+rebuild did not complete within {timeout}s'
-            ),
-        }
-
-    return {
-        'refreshed': True,
-        'elapsed_s': round(time.monotonic() - start, 2),
-        'error': None,
-    }
+    _plugin_state_hook_registered = True
+    qInfo(f'{PLUGIN_NAME}: registered onPluginStateChanged hook ({handle})')
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────

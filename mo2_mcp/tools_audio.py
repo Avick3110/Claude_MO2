@@ -19,14 +19,13 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from PyQt6.QtCore import qInfo
+from PyQt6.QtCore import qInfo, qWarning
 
 import mobase
 
 from .config import PLUGIN_NAME
 from .tools_papyrus import _find_spooky_cli, _invoke_cli
 from .tools_patching import _find_bridge
-from .tools_records import trigger_refresh_and_wait_for_index
 
 
 def register_audio_tools(registry, organizer: mobase.IOrganizer) -> None:
@@ -223,6 +222,14 @@ def _handle_extract_fuz(organizer, plugin_dir: Path, args: dict) -> str:
     produced = [f for f in os.listdir(out_dir) if f.lower().endswith((".xwm", ".lip"))]
     qInfo(f"{PLUGIN_NAME}: extracted FUZ '{basename}' -> {len(produced)} files")
 
+    # Fire-and-forget MO2 refresh so the extracted xwm/lip land in the VFS.
+    # Phase 4 retired the wait-for-index-rebuild coordination — extracted
+    # assets don't affect the record index.
+    try:
+        organizer.refresh(save_changes=True)
+    except Exception as exc:
+        qWarning(f"{PLUGIN_NAME}: organizer.refresh() failed after FUZ extract: {exc}")
+
     return json.dumps({
         "success": True,
         "fuz": disk.replace("\\", "/"),
@@ -232,9 +239,6 @@ def _handle_extract_fuz(organizer, plugin_dir: Path, args: dict) -> str:
         "xwm_path": resp.get("xwm_path"),
         "lip_size": resp.get("lip_size"),
         "xwm_size": resp.get("xwm_size"),
-        # Refresh MO2 + reindex so the extracted xwm/lip are visible to
-        # subsequent mo2_list_files / mo2_read_file calls without manual F5.
-        "mo2_refresh": trigger_refresh_and_wait_for_index(organizer),
         "next_step": (
             f"Extracted files are visible to mo2_list_files / "
             f"mo2_read_file via MO2's VFS (as long as '{output_mod}' is "

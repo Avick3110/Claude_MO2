@@ -50,9 +50,11 @@ Claude has 29 MCP tools. `kb/KB_Tools.md` covers the core tools used every sessi
 
 **Before doing anything else:** check whether `mo2_` tools appear in your available tool list. If they don't, the MCP server is not connected — inform the user immediately and stop. Do not load KB files, check for addon files, or run any other startup steps until the server is confirmed available. This check costs zero tool calls and prevents wasting tokens on a dead connection.
 
-On first launch, or if the record index hasn't been built yet:
-1. Call `mo2_build_record_index` to scan the load order. This takes ~18–20 seconds for a large modlist and caches the results to disk for future sessions (~6 seconds to reload from cache).
-2. The index must be built before any record queries will work. Claude should check `mo2_record_index_status` and build if needed.
+Once the server is connected:
+
+- **The record index builds itself.** You don't need to call `mo2_build_record_index` first. The first read query (`mo2_query_records`, `mo2_record_detail`, `mo2_conflict_chain`, `mo2_plugin_conflicts`, `mo2_conflict_summary`) builds the index synchronously if it isn't already built. Subsequent queries run a cheap mtime freshness check and re-scan only the plugins that changed since the last query.
+- **Cold build can exceed Claude Code's default MCP timeout on large modlists.** Cold rebuilds on ~3000+ plugin modlists take roughly 76 s — longer than the default 60 s MCP tool-call timeout. If a query appears to time out, call `mo2_record_index_status`: if `state: "done"`, the build finished server-side and your query can be retried; if `state: "building"`, wait a few seconds and retry. For routine work on large modlists, recommend the user set `MCP_TIMEOUT=120000` before launching Claude Code.
+- **Call `mo2_build_record_index` explicitly only when you need to.** Common cases: you want a fresh `force_rebuild=true`, you want the build's status dict returned directly, or you're about to run many queries and prefer to eat the cold-build cost up front.
 
 ## Knowledge Base
 

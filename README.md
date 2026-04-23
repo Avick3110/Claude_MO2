@@ -4,7 +4,7 @@ An MCP server plugin that connects AI assistants to [Mod Organizer 2](https://ww
 
 ## Quick Install (Recommended)
 
-**Download [claude-mo2-setup-v2.5.5.exe](https://github.com/Avick3110/Claude_MO2/releases/latest/download/claude-mo2-setup-v2.5.5.exe) and run it.**
+**Download [claude-mo2-setup-v2.6.0.exe](https://github.com/Avick3110/Claude_MO2/releases/latest/download/claude-mo2-setup-v2.6.0.exe) and run it.**
 
 The installer:
 - Detects whether .NET 8 Runtime is installed; guides you to Microsoft's download page if missing
@@ -28,7 +28,7 @@ See [Manual Install](#manual-install) below if you prefer to copy files yourself
 - **Full modlist access** — list mods, query plugins, resolve virtual file paths
 - **ESP/ESM/ESL record reading** — parse any record type with field-level detail via Mutagen (localized strings resolve, VMAD scripts and properties render correctly)
 - **Conflict detection** — field-by-field comparison across the full override chain
-- **ESP patch creation** — overrides with field/flag/keyword/spell/perk/faction/inventory/package/outfit/form-list/leveled-list/condition/script modifications; leveled list merging (LVLI/LVLN/LVSP). Built on [Mutagen](https://github.com/Mutagen-Modding/Mutagen).
+- **ESP patch creation** — overrides with field/flag/keyword/spell/perk/faction/inventory/package/outfit/form-list/leveled-list/condition/script modifications; leveled list merging (LVLI/LVLN/LVSP). Built on [Mutagen](https://github.com/Mutagen-Modding/Mutagen) via a direct NuGet reference. Writes route through `BeginWrite.WithLoadOrder` so ESL-flagged masters (ESPFE plugins like NyghtfallMM) get correctly-compacted FormLinks that resolve cleanly in xEdit and at runtime.
 - **Papyrus** — compile `.psc` scripts to `.pex` (requires the Creation Kit for `PapyrusCompiler.exe` + base-Skyrim script sources). Decompile is intentionally not included — no currently-available decompiler produces clean round-trip output.
 - **BSA/BA2 archives** — list, extract, and validate (requires BSArch.exe, ships with xEdit)
 - **NIF meshes** — read format metadata; list textures and inspect shader properties (requires nif-tool.exe for the last two)
@@ -56,7 +56,7 @@ See [Manual Install](#manual-install) below if you prefer to copy files yourself
 Alternative to the installer above. Use this if you prefer to copy files yourself, or if you're on a platform where the installer doesn't run.
 
 1. Copy the `mo2_mcp/` folder into your MO2 `plugins/` directory
-2. Copy `claude-mo2-setup-v2.5.5.exe` internals (specifically, the bundled `tools/mutagen-bridge/` and `tools/spooky-cli/`) into `plugins/mo2_mcp/tools/` — or run the installer once to populate those, then copy the result somewhere else
+2. Copy `claude-mo2-setup-v2.6.0.exe` internals (specifically, the bundled `tools/mutagen-bridge/` and `tools/spooky-cli/`) into `plugins/mo2_mcp/tools/` — or run the installer once to populate those, then copy the result somewhere else
 3. Restart MO2
 4. Start the server: **Tools > Start/Stop Claude Server**
 
@@ -68,17 +68,16 @@ If you're using a different MCP client, point it to `http://localhost:27015/mcp`
 
 1. Start the server in MO2
 2. Open Claude Code and set this folder as your project directory (or any folder — the server is registered user-scoped in `~/.claude.json`, so it's visible from any directory)
-3. Ask Claude to build the record index:
-   > "Build the record index so we can query plugin records."
-
-   This scans your load order (~18-20 seconds the first time, ~6 seconds from cache on subsequent sessions).
-
-4. Start exploring:
+3. Start exploring:
    > "List my active plugins."
    >
    > "Show me the NPC_ record for Lydia in Skyrim.esm."
    >
    > "What conflicts does Dawnguard.esm have with my other plugins?"
+
+The record index builds automatically on the first query that needs it (~75 seconds for a ~3000-plugin modlist from cold, ~8 seconds from cache on subsequent sessions). You can also kick off an explicit build with `mo2_build_record_index` at any time.
+
+**Large modlists:** set `MCP_TIMEOUT=120000` in your environment before launching Claude Code. Cold force-rebuilds on ~3000+ plugin modlists can exceed Claude Code's default 60 s MCP tool timeout; the server-side build completes regardless, but the client-side call will appear to time out.
 
 ## Tool Reference
 
@@ -100,7 +99,7 @@ The plugin provides 29 MCP tools. See `kb/KB_Tools.md` for the full reference wi
 
 The plugin runs a lightweight HTTP server inside MO2's process, exposing MO2's Python API through the [Model Context Protocol](https://modelcontextprotocol.io/). When an AI assistant calls a tool (e.g., `mo2_query_records`), the server executes the query using MO2's live data and returns structured JSON results.
 
-**Record indexing (Python, in-process):** A record index built on first use caches the location of every record across your load order. ~18-20 seconds for a large modlist on first scan, ~6 seconds from cache thereafter. Index queries (`mo2_query_records`, `mo2_conflict_chain`, `mo2_plugin_conflicts`) answer from the cache with no file I/O.
+**Record indexing (Python + bridge):** A record index built on first use caches every record location across your load order. The index is a thin cache over the bridge — Python no longer reads ESP binary directly. Build time scales with modlist size (~75 s on a 3000-plugin modlist from cold via the bridge's `scan` command; ~8 s from cache thereafter). Index queries answer from the cache with no file I/O; every query runs a cheap mtime freshness check and re-scans only the plugins that actually changed.
 
 **Field interpretation and ESP patching (Mutagen via mutagen-bridge):** When you need a record's actual field values (`mo2_record_detail`) or want to write an ESP patch (`mo2_create_patch`), the Python handler invokes `mutagen-bridge.exe` — a thin .NET 8 CLI that references [Mutagen](https://github.com/Mutagen-Modding/Mutagen) directly via NuGet for engine-correct parsing and writing.
 
@@ -143,7 +142,7 @@ Claude will offer to create these as it learns about your modlist. They allow Cl
 
 **Claude can't find the tools:** The plugin registers itself in `~/.claude.json` (under `mcpServers.mo2`) on first server start. Confirm that entry is present, then restart Claude Code so it picks up the new config. Claude Code caches the MCP tool list at session start, so adding a server mid-session has no effect until restart.
 
-**Record queries return nothing:** Build the record index first (`mo2_build_record_index`). This is required once per session.
+**Record queries return nothing:** The index builds lazily on the first query, so this is usually a transient "building in progress" state on a cold start. If queries continue to return empty, call `mo2_record_index_status` and look at `error_count` / `errors` — some plugins may be failing to scan. An explicit `mo2_build_record_index(force_rebuild=true)` forces a fresh rebuild from scratch.
 
 **Server disappeared after launching a program:** Normal behavior. The server auto-stops when MO2 launches executables and auto-restarts when they exit. If it doesn't come back, restart it manually.
 

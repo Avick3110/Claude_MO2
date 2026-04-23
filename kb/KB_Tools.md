@@ -25,7 +25,7 @@ Both steps are required. Deleting `__pycache__` alone does nothing — the old m
 
 ## Core Tools
 
-The 18 tools documented below cover modlist queries, VFS access, writes, record indexing, record queries, and conflict analysis — the operations used in nearly every session.
+The tools documented below cover modlist queries, VFS access, writes, record indexing, record queries, and conflict analysis — the operations used in nearly every session. Category-specific tools (ESP patching, Papyrus, BSA, NIF, audio) live in their own skills and load on demand when the task matches.
 
 ### Mod & Plugin Queries
 | Tool | Key Params | Returns |
@@ -52,26 +52,20 @@ The 18 tools documented below cover modlist queries, VFS access, writes, record 
 
 ### Index Management
 
-**`mo2_record_index_status`** — Check if the index is built, and surface any enabled plugins with missing masters.
-- Returns: `built`, `plugins`, `plugins_enabled`, `plugins_disabled`, `unique_records`, `conflicts`, `build_time_s`, `build_status`, `missing_masters` (map of plugin → [missing master filenames]), `missing_masters_count`, `errors` (plugin scan errors, capped at 20), `error_count`, `last_auto_refresh` (if MO2 has refreshed this session)
-- `plugins_enabled` counts starred `plugins.txt` entries plus implicit-load masters (Skyrim.esm, DLC ESMs, Creation Club masters in `Skyrim.ccc`). `plugins_disabled` is the complement.
-- `missing_masters` is computed fresh every call — never stale when the user toggles plugins between queries. Matches MO2's warning-triangle detection: a master is "missing" when declared but not ACTIVE (absent OR disabled, both crash the game).
-- `last_auto_refresh` reports the most recent MO2 `onRefreshed` event: `{at, plugin_count, triggered_rebuild, skip_reason?}`. `skip_reason` is `"no_prior_index"` (first build hasn't happened yet) or `"build_in_progress"` (an earlier rebuild was still running).
-- Does NOT block during a rebuild — its purpose is to report state. Query tools (below) do block.
-- If not built, tells Claude to call `mo2_build_record_index` first
+**`mo2_record_index_status`** — Check index health and surface any enabled plugins with missing masters.
+- Returns: `built`, `state` (`"idle" | "building" | "done"`), `plugins`, `plugins_enabled`, `plugins_disabled`, `unique_records`, `conflicts`, `build_time_s`, `cache_format_version`, `cache_memory_estimate_mb`, `missing_masters` (map of plugin → [missing master filenames]), `missing_masters_count`, `errors` (plugin scan errors, capped at 20), `error_count`, `last_auto_refresh`.
+- `plugins_enabled` counts MO2's ACTIVE plugins (starred `plugins.txt` entries plus implicit-load base ESMs and Creation Club masters in `Skyrim.ccc`, as classified by MO2's own `pluginList().state()`). `plugins_disabled` is the complement.
+- `missing_masters` is computed fresh every call — never stale when the user toggles plugins between queries. Matches MO2's warning-triangle detection: a master is "missing" when declared but not ACTIVE.
+- Does not block; its purpose is to report state.
 
 **`mo2_build_record_index`** — Scan all plugins in the active load order.
-- Params: `force_rebuild` (bool, default false)
-- Runs in background thread. Poll `mo2_record_index_status` for progress.
-- Performance: scales roughly linearly with plugin count — ~18–20s fresh / ~6s cached on a typical ~1,500-plugin modlist; ~30s fresh / ~10s cached on a 3,300+ plugin list
-- Cache: `.record_index.pkl` in the plugin directory (~91 MB for large lists)
-- **Auto-maintained on MO2 state change:** the plugin hooks three MO2 events to keep the index live across all observed state changes:
-  - `IPluginList.onRefreshed` — Refresh button (F5), mod toggle (left pane), install mod. Triggers a full rebuild.
-  - `IPluginList.onPluginStateChanged` — plugin toggle (right pane). Since v2.5.6, this flips the `enabled` bit in-place on the existing `PluginInfo` (no rebuild cost; queries pick up the new state immediately). Multi-select toggles resolve in one event dispatch. Falls back to a full rebuild only when the event references a plugin the index hasn't seen yet (e.g., first-time enable of a freshly-written patch).
-  - `IModList.onModMoved` — priority drag-drop (left pane); a multi-select drag fires once per mod. Triggers a full rebuild.
-- **Debounced scheduling (500ms):** each event that triggers a full rebuild cancels-and-replaces a pending rebuild timer. A burst of events coalesces into a single rebuild fired 500ms after the LAST event. The delay also lets MO2 flush in-memory state to plugins.txt/loadorder.txt before the rebuild reads disk — MO2 doesn't flush synchronously on state mutations.
-- **Chained post-build rebuild:** if a state change fires during an active rebuild, the build thread chains a fresh rebuild in its finally without releasing query blocks — queries stay blocked into the chained rebuild instead of briefly seeing data from an already-stale build.
-- **Stale-read prevention:** record query tools (`mo2_query_records`, `mo2_record_detail`, `mo2_conflict_chain`, `mo2_plugin_conflicts`, `mo2_conflict_summary`) block for up to 30s while any rebuild is pending or in progress. If the rebuild exceeds 30s, the query returns an error directing you to poll `mo2_record_index_status` and retry.
+- Params: `force_rebuild` (bool, default false).
+- **Blocking call.** Returns the full status dict when the build completes. No more fire-and-poll — every earlier version's polling protocol is retired.
+- Performance: cache-hit reloads in ~8 s on a ~3000-plugin modlist. Cold rebuild from scratch (`force_rebuild=true`) is ~76 s on the same list. The MCP tool-call timeout on the Claude Code client side defaults to 60 s, which force-rebuilds can exceed; the server-side build completes regardless and a follow-up `mo2_record_index_status` will report `state: "done"`. Set `MCP_TIMEOUT=120000` before launching Claude Code to avoid the timeout entirely.
+- Cache: `.record_index.pkl` in the plugin directory. Format v2 since v2.6.0 — old caches auto-invalidate and rebuild on first use, no manual cleanup.
+- **Usually you don't need to call it.** The index builds lazily on the first read query (see "Record Queries" below) and each subsequent query runs a cheap mtime freshness check that re-scans only changed plugins. Explicit `mo2_build_record_index` is for when you want `force_rebuild=true` or prefer to eat the cold-build cost up front.
+- **Plugin-state hook:** `onPluginStateChanged` (right-pane checkbox toggle) flips the `enabled` bit in-place on the existing `PluginInfo` — no rebuild cost; queries pick up the new state immediately. Multi-select toggles resolve in one event dispatch.
+- **Write-path refresh wait:** `mo2_create_patch` waits for MO2's `onRefreshed` signal before returning (up to 30 s). The patch is visible to read-back queries immediately on return — no need to tick the plugin's checkbox first, and no manual `mo2_build_record_index` call between the write and the read-back.
 
 ### Enabled/Disabled Filtering
 

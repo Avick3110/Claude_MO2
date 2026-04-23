@@ -1,6 +1,6 @@
 # Known Issues & Limitations
 
-Current as of v2.5.7. These are known limitations, not bugs — all reported bugs have been resolved. For the full version history see `mo2_mcp/CHANGELOG.md`.
+Current as of v2.6.0. These are known limitations, not bugs — all reported bugs have been resolved. For the full version history see `mo2_mcp/CHANGELOG.md`.
 
 ---
 
@@ -71,6 +71,8 @@ Implicit-load plugins (Skyrim.esm, DLC ESMs, Creation Club masters listed in `<g
 - **MO2 doesn't reload Python modules on server stop/start.** After editing any `.py` inside the plugin, delete `__pycache__/` AND fully restart MO2 (not just the Tools > Start/Stop Claude Server toggle).
 - **Losing the MCP server during MO2 restart breaks the Claude Code connection** for that session. Restart Claude Code to rediscover. Known Claude Code limitation, not fixable on our side.
 - **External filesystem changes require a manual MO2 refresh.** MO2 does not auto-detect `rm`/`cp`/`mv` of plugin files made outside its API. After any external change to plugin files (via Bash, another tool, or manual intervention), press F5 in MO2 (or use the Refresh button) before calling `mo2_create_patch`, `mo2_build_record_index`, or any read-back against the affected plugin. Skipping this leaves orphans in `loadorder.txt` and new plugins may be missing from the index entirely — symptoms include read-back returning empty even with `include_disabled: true`. Prefer `mo2_write_file` (routes through MO2's output mod, detected immediately) over Bash for plugin-adjacent writes.
+- **Large modlists can exceed Claude Code's default MCP timeout on cold force-rebuild.** Claude Code's default MCP tool-call timeout is 60 s; `mo2_build_record_index(force_rebuild=true)` on ~3000+ plugin modlists takes roughly 76 s on reference hardware. The server-side build completes regardless — a follow-up `mo2_record_index_status` call will show `state: "done"` — but the client call appears to time out. **Set `MCP_TIMEOUT=120000` in your environment before launching Claude Code** to avoid the timeout entirely. Normal queries and cache-hit rebuilds stay well under the default.
+- **Some plugins are rejected by Mutagen's strict parser.** The record index builds by handing every plugin to Mutagen for enumeration. Mutagen is stricter than xEdit about format conformance — plugins with malformed records (e.g. `DATA` subrecord length mismatches) can scan clean in xEdit but fail in Mutagen. Those plugins are absent from the record index; `mo2_record_index_status` lists them in the `errors` array. If a plugin you care about doesn't appear in query results, run xEdit's **Check for Errors** on it to confirm the state, then have the mod author fix it (or auto-clean via xEdit if feasible). Two plugins in the reference test modlist (`TasteOfDeath_Addon_Dialogue.esp`, `ksws03_quest.esp`) are known to hit this — ~0.06% scan loss on a 3,384-plugin load order.
 
 ---
 
@@ -119,3 +121,8 @@ These are reported or reportable to Spooky upstream; our wrappers already work a
 | Implicit-load plugins (base-game ESMs + Creation Club masters in `Skyrim.ccc`) misclassified as disabled, silently hiding their records from default queries (`total_conflicts` off by ~2×) | v2.5.7 |
 | `mo2_record_index_status` stripped the `errors` list from its response, only surfacing `error_count` | v2.5.7 |
 | `mo2_build_record_index(force_rebuild=true)` was a silent no-op because on-disk cache reloaded immediately after the in-memory clear | v2.5.7 |
+| ESL FormID compaction end-to-end: patches overriding records that reference ESL-flagged masters wrote unresolved FormLinks; `mo2_record_detail` returned non-compacted IDs that disagreed with xEdit | v2.6.0 (Mutagen-backed bridge + `PluginResolver` path-resolution fix) |
+| Bridge routed reads/writes at the wrong file for plugin filenames that existed in more than one mod folder (alphabetical `mods/` walk vs MO2's priority-ordered VFS) | v2.6.0 (`organizer.resolvePath` replaces the walk) |
+| Freshly-written patches couldn't be read back until the user ticked the MO2 checkbox — `mo2_record_detail` returned "Record not found" even with `include_disabled: true` | v2.6.0 (`mo2_create_patch` waits on MO2's `onRefreshed` signal before returning) |
+| `mo2_build_record_index` fire-and-poll protocol required every caller to implement a polling loop that was easy to misuse | v2.6.0 (now blocking; returns full status dict) |
+| Event-driven index invalidation (`onPluginStateChanged` full-rebuild fallback, debounced `onRefreshed` rebuild, `trigger_refresh_and_wait_for_index`) accumulated edge cases and silent stalls | v2.6.0 (replaced with lazy build + per-query mtime freshness check) |

@@ -4,6 +4,81 @@ All plugin changes are made in the Dev Build copy first. Once tested and stable,
 
 ---
 
+## v2.6.0 — 2026-04-23
+
+Upgrade path: v2.5.5 (last public) → v2.6.0. v2.5.6 and v2.5.7 were local-only builds whose content rolls into this release; their individual entries are preserved below as historical record.
+
+**Headline:** ESL FormID handling is correct end-to-end. Patches involving ESL-flagged masters (NyghtfallMM and other ESPFE plugins) now resolve FormLinks cleanly in xEdit and at runtime. Record queries against ESL plugins return xEdit-matching compacted FormIDs. Both sides of the bug are fixed — a Python path-resolution defect that routed the bridge at the wrong file on disk for plugins whose filename appeared in more than one mod folder, and Mutagen 0.52.0's lack of write-time master-flag recomputation.
+
+### Changed — architecture
+
+- **Mutagen-backed bridge with direct NuGet dependency.** The v2.5.x `spooky-bridge.exe` is renamed to `mutagen-bridge.exe` and now references `Mutagen.Bethesda.Skyrim 0.53.1` directly via NuGet PackageReference. The bridge no longer inherits Mutagen transitively through the Spooky toolkit submodule — the build graph is cleaner, version pinning is explicit, and ESL FormID correctness rides on Mutagen's own `BinaryWriteBuilder.WithLoadOrder` path rather than raw binary writes. The `mutagen-bridge-path` plugin setting replaces `spooky-bridge-path`; the old key is honored for one release as a backward-compat shim. Spooky's CLI (`spookys-automod.exe`) is unchanged and still ships for Papyrus / BSA / NIF / non-FUZ audio.
+- **Write path routes through `BeginWrite.WithLoadOrder`.** `mo2_create_patch` now calls `KeyedMasterStyle.FromPath` per loaded plugin to build a load-order context, then writes via `patchMod.BeginWrite.ToPath(path).WithLoadOrder(masterStyled).Write()`. Mutagen recomputes master references at write time, so the v2.5.x `AddMasterIfMissing` pre-seeding is gone.
+- **Bridge gains a `scan` command** used by the record-index rebuild path. `ScanRequest` / `ScanResponse` types in `Models.cs`, `IndexScanner.cs` enumerates major records via `SkyrimMod.CreateFromBinaryOverlay` + `mod.EnumerateMajorRecords()`, and FormIDs are emitted via `FormIdHelper.Format(record.FormKey)` — origin-resolved and ESL-compacted by Mutagen, matching xEdit by construction.
+
+### Changed — record index is now a thin cache over the bridge
+
+Every hand-rolled parallel implementation of MO2 or Mutagen domain logic has been deleted. The Python index stores what the bridge returns; it does not make its own FormID or plugin-state decisions.
+
+- **Deleted entirely:** `esp_reader.py` (hand-rolled binary ESP/ESM parser), `esp_index.PluginResolver` (alphabetical `mods/` walk that caused the original path-resolution bug), `esp_index.resolve_formid` (manual master-table FormID resolution), `esp_index.read_active_plugins` (parsed `plugins.txt` for `*` prefixes), `esp_index.read_implicit_plugins` / `read_ccc_plugins` / `IMPLICIT_MASTERS` (hand-rolled implicit-load classification), `_FMT_RECORD` / `_FMT_GRUP` / `_FMT_SUBREC` struct formats, and `test_esp_reader.py`.
+- **Replaced by:** direct use of MO2's `organizer.resolvePath(name)` for VFS-correct plugin paths, `organizer.pluginList().state(name) == ACTIVE` for plugin enable status (which correctly handles implicit-load base ESMs and Creation Club masters without our own parsing), and Mutagen's `FormKey` for FormID semantics.
+- **Result:** every FormID the index surfaces now matches xEdit's view. On a representative 3,384-plugin modlist, `mo2_conflict_summary(include_disabled=true).total_conflicts` matches Phase 2's post-fix baseline at 427,180 (the v2.5.7 number of 428,260 was inflated by the implicit-load classifier crediting Skyrim.ccc entries whose plugins were not actually installed).
+
+### Changed — index lifecycle
+
+Event-driven invalidation is retired. The index builds lazily on first query and checks per-query freshness via file mtimes.
+
+- **Lazy build on first query.** If the index isn't built when a read query arrives, it builds synchronously (auto-build-on-first-query). No more "you must call `mo2_build_record_index` first" friction for read tools.
+- **Freshness check.** Every read handler calls `LoadOrderIndex.ensure_fresh()` up front. Three paths: no drift (~50–100 ms stat walk, common case), enable-only drift (in-place bulk bit flip), structural drift (bridge-rescan only the changed plugins and rebuild the merged index). The freshness check also reconciles MO2's in-memory `pluginList()` against on-disk `loadorder.txt` — freshly-written plugins present only in pluginList are included, which `loadorder.txt`'s deferred flush would otherwise miss.
+- **`mo2_build_record_index` is now blocking.** Call returns only when the build completes and carries the full status dict. No more `{"status": "building"}` → poll protocol. Force-rebuild on ~3,000+ plugin modlists takes roughly 76 s on the reference machine and can exceed Claude Code's default 60 s MCP tool-call timeout (see Migration notes).
+- **`onPluginStateChanged` is now a pure in-place flip.** The unknown-plugin fallback rebuild is gone — `ensure_fresh` covers it on the next query.
+- **Retired:** `trigger_refresh_and_wait_for_index`, `_build_complete` event, `_rebuild_timer` + debounced rebuild machinery, `onRefreshed` and `onModMoved` rebuild hooks. `onRefreshed` is reinstated narrowly as a signal-only hook for the write-tool refresh wait described below.
+
+### Changed — patch write workflow
+
+- **Pre-enable read-back works.** After `mo2_create_patch` writes a plugin, the tool fires `organizer.refresh(save_changes=True)` and waits for MO2's `onRefreshed` signal (up to 30 s) before returning. The next `mo2_record_detail` / `mo2_query_records` call against records in the newly-written plugin resolves immediately — no need to tick the plugin's checkbox in MO2's right pane first. (Ticking the checkbox is still required to load the plugin in-game; it's just no longer a precondition for read-back.) Response carries `refresh_status: "complete" | "timeout"` and `refresh_elapsed_ms`. On timeout the call still succeeds; `next_step` tells the user to press F5 in MO2 to force the refresh.
+- **Response shape changes.** The `mo2_refresh` field is gone from every write tool's response. `next_step` wording is simplified — no more "do NOT chain read-back calls in the same turn" caveat, since chaining is now safe.
+- **`set_fields` on `ExtendedList<T>` collection fields works.** MUSC `Tracks`, FLST `Items`, OTFT `Items`, and every other `ExtendedList<IFormLinkGetter<T>>` property previously failed with "Cannot convert JSON Array to ExtendedList\`1" for every record, and the output ESP silently contained no overrides. A `JsonConverter<ExtendedList<T>>` in the bridge's Newtonsoft settings resolves FormID strings through the existing `FormLinkResolver` path and appends them into a freshly-constructed `ExtendedList<T>`. Array-of-FormID fields now round-trip correctly.
+- **Honest `success` and per-record counts.** Before: `success: true` and `records_written: N` came back even when every per-record operation failed. Now: top-level `success` is `false` whenever any `details[].error` is non-null, and `successful_count` / `failed_count` / `records_written` reflect what actually landed in the output ESP. Failed records are rolled back from the Mutagen mod before write so the ESP contains only successful overrides.
+- **Subprocess console windows are suppressed.** Every bridge and Spooky-CLI `subprocess.run` site uses `creationflags=subprocess.CREATE_NO_WINDOW`. Bulk operations (e.g. 40+ parallel `mo2_record_detail` calls) no longer strobe black CMD windows across the screen or steal focus.
+- **Post-write auto-enable machinery is gone.** Four attempts across v2.5.6 beta builds at programmatically ticking the MO2 plugin checkbox each surfaced a different MO2-integration quirk; the retry stack grew to ~7 refresh cycles per patch for no reliable gain. The replacement flow is deterministic: write, refresh, wait for MO2, return. The user ticks the checkbox when they're ready to load the patch in-game.
+
+### Changed — record queries default to enabled plugins only
+
+The five query tools (`mo2_query_records`, `mo2_record_detail`, `mo2_conflict_chain`, `mo2_plugin_conflicts`, `mo2_conflict_summary`) filter out plugins whose right-pane checkbox is unticked. "Winning plugin" claims and conflict chains reflect what the game actually loads at runtime, not every plugin that ever touched the record. Pass `include_disabled: true` for diagnostic queries. When a record only exists in disabled plugins, the error distinguishes "not found" from "found but disabled" and tells the caller how to recover. Implicit-load plugins (Skyrim.esm, DLC ESMs, Creation Club masters listed in `<game_root>/Skyrim.ccc`) are classified as enabled regardless of `plugins.txt` state — the engine auto-loads them. Classification is now answered by MO2's `pluginList()` directly, which correctly excludes Skyrim.ccc entries whose plugins are not installed.
+
+### Changed — smaller fixes (from v2.5.7)
+
+- **`mo2_record_index_status` surfaces the `errors` list alongside `error_count`.** Previously the `**{k: v for k, v in result.items() if k != 'errors'}` comprehension stripped the field; replaced with an unconditional `**result` spread. Users seeing `error_count: 1` can now see which plugin(s) failed to scan.
+- **`mo2_build_record_index(force_rebuild=true)` actually forces a re-scan.** `LoadOrderIndex.rebuild()` previously cleared only the in-memory cache; `build()`'s subsequent `_load_cache()` reloaded the on-disk pickle and every plugin came back as `cached_hits`. The pickle is now unlinked in `rebuild()` before the build runs.
+
+### Changed — operational warnings routed through `qWarning`
+
+Six `log.warning` call sites in `esp_index.py` (cache corruption, format-version mismatch, unexpected top-level type, disk I/O errors, freshness-check scan-fn failures) are now routed through a `_warn()` shim that uses `qWarning` when PyQt6 is importable and falls back to stdlib `logging` for organizer-less consumers like the test suite. Operational events are visible in MO2's log panel for forensic investigation.
+
+### Changed — skill and doc updates
+
+- The `esp-patching` skill's post-write workflow section is rewritten to reflect pre-enable read-back, the new `refresh_status` / `refresh_elapsed_ms` response fields, and the simplified `next_step` wording.
+- `CLAUDE.md` drops the "you must call `mo2_build_record_index` first" instruction from First Session Setup — lazy auto-build covers it. The standing rule about external filesystem changes requiring a manual MO2 refresh is kept; MO2 still doesn't detect outside-API file changes on its own.
+- `KNOWN_ISSUES.md` adds entries for the MCP timeout on force-rebuild, the two plugins Mutagen rejects that xEdit's lenient parser accepts, and the ESL FormID fix in the resolved-bugs table.
+- `THIRD_PARTY_NOTICES.md` attributes Mutagen as a direct NuGet reference rather than a transitive dependency of the Spooky toolkit.
+
+### Not changed
+
+- MCP tool count, surface, or interface — 29 tools, same shape (the one response-field removal aside).
+- The Spooky CLI (`spookys-automod.exe`) — still used for Papyrus, BSA, NIF, and non-FUZ audio. Papyrus compile requires Creation Kit; BSA tools require user-provided BSArch.exe; NIF extras require nif-tool.exe. All three gated tools behave the same as v2.5.5.
+
+### Migration
+
+- **Cache format v1 → v2.** The on-disk record-index pickle bumps to v2. Old caches are auto-invalidated and rebuilt on first use — no manual cleanup. Expect one ~75 s force-rebuild-equivalent on first session after upgrade; subsequent sessions hit the cache in ~8 s.
+- **Plugin setting rename.** `spooky-bridge-path` → `mutagen-bridge-path`. The old key is honored for one release as a backward-compat shim. If you set `spooky-bridge-path` in MO2's plugin settings, rename it to `mutagen-bridge-path` at your convenience; it'll keep working until v2.7.
+- **Write-tool response shape.** `mo2_refresh` is gone from every write tool's response. `next_step` wording is simplified. Callers that branched on `mo2_refresh` should switch to `refresh_status` (on `mo2_create_patch` specifically) or drop the branch — the new flow doesn't need it.
+- **Record query default.** Queries default to enabled-only since v2.5.6. If you're upgrading from v2.5.5, analyses that relied on seeing the full "ever-touched" history now need `include_disabled: true`.
+- **MCP timeout on force-rebuild.** Claude Code's default MCP tool-call timeout is 60 s. `mo2_build_record_index(force_rebuild=true)` on large modlists (~3,000+ plugins) takes roughly 76 s and will hit the timeout client-side. The server-side build completes regardless; a follow-up `mo2_record_index_status` call confirms `state: "done"`. **To avoid the timeout entirely, set `MCP_TIMEOUT=120000` in your environment before launching Claude Code.** Normal queries and cache-hit rebuilds stay under the limit.
+- **Known plugin scan failures.** Two plugins in the reference test modlist (`TasteOfDeath_Addon_Dialogue.esp`, `ksws03_quest.esp`) are rejected by Mutagen's strict parser that xEdit's lenient parser accepts. Their records are absent from the index; everything else scans normally. If a plugin you care about doesn't appear in query results, run xEdit's "Check for Errors" on it — genuine corruption is on the mod author to fix, and `mo2_record_index_status`'s `errors` list names the affected plugins.
+
+---
+
 ## v2.5.7 — 2026-04-21
 
 Correctness fixes for v2.5.6's enabled/disabled filtering. Surfaced by live verification on 2026-04-21 (see `Live Reported Bugs/mo2_v256_enabled_disabled_filtering_RETEST_CLEAN_LOADORDER_2026-04-21.md`): the filter was classifying implicit-load plugins (base-game ESMs + Creation Club masters) as disabled, which silently hid their records from default conflict analysis. A large modlist saw default `mo2_conflict_summary.total_conflicts` reporting 229,609 vs. the true 428,260 — off by nearly 2× because every conflict involving `Skyrim.esm` / `Update.esm` / any CC master as origin was dropped from the chain.

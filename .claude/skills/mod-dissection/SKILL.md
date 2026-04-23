@@ -77,7 +77,7 @@ When analyzing a mod's scripts for performance issues (persistent load, polling,
 
 ### Prerequisites
 - MO2 MCP server must be running
-- If the record index isn't built, start `mo2_build_record_index` immediately. With a warm cache (~6s) this completes during Step 1-2. A cold first-ever scan takes ~18–20s. Don't look for workarounds while it builds; just proceed with script file analysis.
+- The record index builds itself on the first query that needs it (lazy auto-build, ~8 s cache-hit on a ~3000-plugin modlist, ~76 s cold). You don't need to pre-build it; just proceed with Step 1 and the first query will trigger the build. On cold rebuilds from scratch, consider `MCP_TIMEOUT=120000` in your environment so the client-side call doesn't time out.
 
 ### Step 1: List the mod's scripts (1 call)
 

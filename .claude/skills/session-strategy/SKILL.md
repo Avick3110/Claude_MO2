@@ -79,8 +79,9 @@ After completing each analysis phase, write a brief summary of findings before s
 ## Tool-Specific Session Notes
 
 ### Record index
-- Check `mo2_record_index_status` at session start. Build if needed (~18-20 seconds for a large modlist, ~6 seconds from cache).
-- The index must be built before any record queries work.
+- The index builds lazily on the first read query. No preflight `mo2_build_record_index` call is required.
+- Cache-hit reload is ~8 s on a ~3000-plugin modlist; cold force-rebuild (`force_rebuild=true`) is ~76 s on the same list. Force-rebuilds can exceed Claude Code's default 60 s MCP timeout — set `MCP_TIMEOUT=120000` before launching Claude Code to avoid it, or recover via `mo2_record_index_status` if the client-side call appears to time out (server-side build completes regardless).
+- After writes via `mo2_create_patch`, read-back queries just work — the tool waits on MO2's `onRefreshed` signal before returning, so chaining a read in the same turn is safe.
 
 ### Large plugin conflicts
 - Do NOT call `mo2_plugin_conflicts` for plugins that touch CELL/WRLD records heavily — the output can be enormous.

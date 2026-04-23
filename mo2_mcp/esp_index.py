@@ -51,7 +51,29 @@ from typing import Any, Callable, Iterator
 # (test_esp_index.py) and any organizer-less consumers can import this
 # module without an MO2 environment present. Consumers running inside
 # MO2's Python process pay the import cost once on first build().
-log = logging.getLogger(__name__)
+
+# Operational warnings (stale-cache invalidation, scan failures,
+# save-cache I/O errors) route through MO2's Qt log panel when we're
+# running inside MO2 so the user can see them in the log UI. Outside
+# MO2 — test_esp_index.py on a dev box without PyQt6, or any other
+# organizer-less consumer — fall back to stdlib logging so the module
+# stays importable. v2.6.0 Phase 4c. Previously used Python's `log.
+# warning` uniformly, which was silent in MO2's panel because MO2's
+# Qt logger doesn't pick up the Python logging module by default.
+try:
+    from PyQt6.QtCore import qWarning as _qt_warning  # type: ignore[import-not-found]
+
+    def _warn(fmt: str, *args: object) -> None:
+        """printf-style warning → MO2's Qt log panel (qWarning level)."""
+        msg = (fmt % args) if args else fmt
+        _qt_warning(f'mo2_mcp.esp_index: {msg}')
+
+except ImportError:
+    _logger = logging.getLogger(__name__)
+
+    def _warn(fmt: str, *args: object) -> None:
+        """Fallback for organizer-less callers (tests, diagnostics)."""
+        _logger.warning(fmt, *args)
 
 
 # ── Cache format version ────────────────────────────────────────────────
@@ -647,7 +669,7 @@ class LoadOrderIndex:
             try:
                 scan_results = scan_fn(scan_paths) or []
             except Exception as exc:
-                log.warning('ensure_fresh: scan_fn raised %s: %s', type(exc).__name__, exc)
+                _warn('ensure_fresh: scan_fn raised %s: %s', type(exc).__name__, exc)
                 scan_results = []
             scan_by_path: dict[str, dict] = {}
             for entry in scan_results:
@@ -1054,12 +1076,12 @@ class LoadOrderIndex:
             with open(self._cache_path, 'rb') as f:
                 data = pickle.load(f)
         except Exception as exc:
-            log.warning('Failed to load index cache: %s — deleting stale pickle', exc)
+            _warn('Failed to load index cache: %s — deleting stale pickle', exc)
             self._safe_unlink_cache()
             return
 
         if not isinstance(data, dict):
-            log.warning(
+            _warn(
                 'Index cache has unexpected top-level type %s '
                 '(expected dict with cache_format_version) — deleting stale pickle',
                 type(data).__name__,
@@ -1069,7 +1091,7 @@ class LoadOrderIndex:
 
         version = data.get('cache_format_version')
         if version != _CACHE_FORMAT_VERSION:
-            log.warning(
+            _warn(
                 'Index cache format version %r != %r (current) — '
                 'deleting stale pickle and rebuilding from scratch',
                 version, _CACHE_FORMAT_VERSION,
@@ -1081,7 +1103,7 @@ class LoadOrderIndex:
         if isinstance(plugins, dict):
             self._plugin_cache = plugins
         else:
-            log.warning('Index cache "plugins" entry is not a dict — ignoring cache')
+            _warn('Index cache "plugins" entry is not a dict — ignoring cache')
 
     def _safe_unlink_cache(self) -> None:
         try:
@@ -1101,4 +1123,4 @@ class LoadOrderIndex:
             with open(self._cache_path, 'wb') as f:
                 pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
         except Exception as exc:
-            log.warning('Failed to save index cache: %s', exc)
+            _warn('Failed to save index cache: %s', exc)

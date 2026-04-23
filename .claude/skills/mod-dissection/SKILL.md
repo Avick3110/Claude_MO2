@@ -116,7 +116,7 @@ For each flagged script, check:
 - Does it iterate large arrays in `OnUpdate`?
 - Does it register for global events (`OnCombatStateChanged`, `OnHit`, etc.) across many aliases?
 
-### Step 4: Query quest records via MCP (index must be built)
+### Step 4: Query quest records via MCP
 
 ```
 mo2_query_records(plugin_name="ModName.esp", record_type="QUST")

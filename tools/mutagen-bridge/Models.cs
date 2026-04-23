@@ -256,6 +256,89 @@ public class ReadBatchResponse
     public string? ErrorDetail { get; set; }
 }
 
+// ── Scan Request / Response ─────────────────────────────────────────
+//
+// v2.6.0 Phase 3: bridge-fed record index. Python sends a list of plugin
+// file paths; bridge opens each via CreateFromBinaryOverlay, reads
+// the header + every Major record, and returns origin-resolved FormKeys
+// (which match xEdit by construction for ESL plugins — Mutagen's FormKey
+// already encodes the compacted slot ID).
+//
+// Per-plugin failures surface inline on `ScannedPlugin.Error` so a single
+// bad file doesn't abort the batch. Top-level `Error` is set only when
+// every plugin in the batch failed (or the request was malformed).
+//
+// `ScannedRecord` is deliberately minimal — type, formid, edid only. The
+// aggregate response for a 3000+ plugin Skyrim modlist is ~2.9M records,
+// so every extra field per record bloats the JSON envelope significantly.
+// Add fields when a Python consumer explicitly needs them.
+
+public class ScanRequest
+{
+    [JsonPropertyName("command")]
+    public string Command { get; set; } = "scan";
+
+    [JsonPropertyName("plugins")]
+    public List<string> Plugins { get; set; } = new();
+}
+
+public class ScanResponse
+{
+    [JsonPropertyName("success")]
+    public bool Success { get; set; }
+
+    [JsonPropertyName("plugins")]
+    public List<ScannedPlugin> Plugins { get; set; } = new();
+
+    [JsonPropertyName("error")]
+    public string? Error { get; set; }
+
+    [JsonPropertyName("error_detail")]
+    public string? ErrorDetail { get; set; }
+}
+
+public class ScannedPlugin
+{
+    [JsonPropertyName("plugin_name")]
+    public string PluginName { get; set; } = "";
+
+    [JsonPropertyName("plugin_path")]
+    public string PluginPath { get; set; } = "";
+
+    [JsonPropertyName("masters")]
+    public List<string> Masters { get; set; } = new();
+
+    [JsonPropertyName("is_master")]
+    public bool IsMaster { get; set; }
+
+    [JsonPropertyName("is_light")]
+    public bool IsLight { get; set; }
+
+    [JsonPropertyName("is_localized")]
+    public bool IsLocalized { get; set; }
+
+    [JsonPropertyName("record_count")]
+    public int RecordCount { get; set; }
+
+    [JsonPropertyName("records")]
+    public List<ScannedRecord> Records { get; set; } = new();
+
+    [JsonPropertyName("error")]
+    public string? Error { get; set; }
+}
+
+public class ScannedRecord
+{
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = "";
+
+    [JsonPropertyName("formid")]
+    public string FormId { get; set; } = "";
+
+    [JsonPropertyName("edid")]
+    public string? EditorId { get; set; }
+}
+
 public class RecordOperation
 {
     [JsonPropertyName("op")]

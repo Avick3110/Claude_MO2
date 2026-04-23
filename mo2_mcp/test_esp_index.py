@@ -1,271 +1,178 @@
 """
-test_esp_index.py - Test the load order indexer and conflict detector.
+test_esp_index.py — Format-contract test for v2.6.0 Phase 3.
 
-Usage:
-    python test_esp_index.py                    # scan first 20 plugins
-    python test_esp_index.py --count 50         # scan first 50 plugins
-    python test_esp_index.py --full             # scan ALL plugins (slow)
-    python test_esp_index.py --cache-test       # test cache round-trip
+Locks in the invariant that the receive-side normaliser
+(``_canonicalise_bridge_formid``, called when a bridge ScannedRecord lands
+in the cache) and the lookup-side builder (``make_formid_key``, called
+when a public-API caller asks `lookup_formid(plugin, local_id)`) produce
+**byte-identical** strings.
+
+If those two ever diverge — different hex casing, different separator,
+different plugin-name normalisation — every cache lookup on a freshly-
+scanned plugin would silently return None. The test catches drift before
+the rebuild lands instead of surfacing as "every record I just scanned
+is invisible to my queries".
+
+This file is the only Python test that ships with v2.6.0 Phase 3. The
+v2.5.x tests (``test_esp_reader.py``, the old ``test_esp_index.py``) are
+archived to ``dev/archive/v2.6_retired/``; they tested the deleted
+ESPReader and PluginResolver code paths. Future phases that want broader
+test coverage should write fresh fixtures against the new shape — see
+PHASE_3_HANDOFF.md.
+
+Standalone runnable: ``python test_esp_index.py``. No MO2 / Mutagen
+dependencies — pure-Python contract assertions.
 """
 
 from __future__ import annotations
 
-import os
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from esp_index import (
-    LoadOrderIndex,
-    PluginResolver,
-    read_load_order,
-    read_active_plugins,
-)
+from esp_index import make_formid_key, _canonicalise_bridge_formid
 
 
-MODLIST_ROOT = Path(os.environ.get('MO2_MODLIST_ROOT', r'.'))
-PROFILE_DIR = Path(os.environ.get('MO2_PROFILE_DIR', str(MODLIST_ROOT / 'profiles' / 'Default')))
+# Sample bridge ScannedRecord FormIDs that exercise the casing /
+# extension / range cases the cache will see in production. Cribbed
+# from PHASE_3_HARNESS_OUTPUT.md (NyghtfallMM ESL records that
+# motivated the migration), plus a handful of plain ESM/ESP examples.
+_BRIDGE_FORMID_SAMPLES = [
+    # ESL with compacted slot ID — the v2.6.0 bug-target shape
+    ('NyghtfallMM.esp', 0x000884, 'NyghtfallMM.esp:000884'),
+    ('NyghtfallMM.esp', 0x000885, 'NyghtfallMM.esp:000885'),
+    ('NyghtfallMM.esp', 0x000889, 'NyghtfallMM.esp:000889'),
+    # NyghtfallMM's overrides of vanilla records — origin resolves to Skyrim.esm
+    ('Skyrim.esm', 0x013686, 'Skyrim.esm:013686'),
+    ('Skyrim.esm', 0x017035, 'Skyrim.esm:017035'),
+    ('Skyrim.esm', 0x05221E, 'Skyrim.esm:05221E'),  # MUSReveal — the bug-target
+    # Plain ESM
+    ('Update.esm', 0x012345, 'Update.esm:012345'),
+    ('Dawnguard.esm', 0x000ABC, 'Dawnguard.esm:000ABC'),
+    # Plain ESP at high local IDs
+    ('Requiem.esp', 0xABCDEF, 'Requiem.esp:ABCDEF'),
+    ('Requiem.esp', 0xFFFFFF, 'Requiem.esp:FFFFFF'),
+    # Names with characters allowed in plugin filenames
+    ("Cleaner's Bag.esp", 0x000001, "Cleaner's Bag.esp:000001"),
+    ('Mod-With-Hyphen.esp', 0x000002, 'Mod-With-Hyphen.esp:000002'),
+    ('Mod_With_Underscore.esp', 0x000003, 'Mod_With_Underscore.esp:000003'),
+    # Mixed-case plugin name from a non-canonical source — both
+    # normalisers must agree on the lowercase form
+    ('NYGHTFALLMM.esp', 0x000884, 'NYGHTFALLMM.esp:000884'),
+    ('nyghtfallmm.ESP', 0x000884, 'nyghtfallmm.ESP:000884'),
+]
 
 
-def print_header(title: str) -> None:
-    print(f'\n{"=" * 60}')
-    print(f'  {title}')
-    print(f'{"=" * 60}')
+def test_make_formid_key_basic_shape() -> None:
+    """Smoke check: lowercase plugin + 6-digit uppercase hex, joined by ':'."""
+    assert make_formid_key('Skyrim.esm', 0x012E49) == 'skyrim.esm:012E49'
+    assert make_formid_key('SKYRIM.ESM', 0x012E49) == 'skyrim.esm:012E49'
+    assert make_formid_key('NyghtfallMM.esp', 0x000884) == 'nyghtfallmm.esp:000884'
+    # Hex padding for small IDs.
+    assert make_formid_key('Skyrim.esm', 0x1) == 'skyrim.esm:000001'
+    # Hex casing — uppercase, no 0x prefix.
+    assert make_formid_key('Skyrim.esm', 0xABCDEF) == 'skyrim.esm:ABCDEF'
+    print('  test_make_formid_key_basic_shape passed')
 
 
-def test_resolver() -> None:
-    print_header('Plugin Resolver')
-    resolver = PluginResolver(MODLIST_ROOT)
+def test_canonicalise_bridge_formid_inverse() -> None:
+    """The bridge-receive normaliser must produce the same string the
+    lookup-side builder produces from the same (plugin, local_id) inputs.
 
-    test_names = [
-        'Skyrim.esm', 'Update.esm', 'Dawnguard.esm',
-        'SkyUI_SE.esp', 'nonexistent_plugin.esp',
+    This is the load-bearing assertion: if these two ever diverge for
+    any input, every lookup on freshly-scanned records misses silently.
+    """
+    failures = []
+    for plugin, local_id, bridge_str in _BRIDGE_FORMID_SAMPLES:
+        canonical_via_make = make_formid_key(plugin, local_id)
+        result = _canonicalise_bridge_formid(bridge_str)
+        if result is None:
+            failures.append(
+                f'_canonicalise_bridge_formid({bridge_str!r}) returned None'
+            )
+            continue
+        canonical_via_bridge, returned_local = result
+        if canonical_via_bridge != canonical_via_make:
+            failures.append(
+                f'mismatch for {plugin!r}+{local_id:#x}:\n'
+                f'  make_formid_key            -> {canonical_via_make!r}\n'
+                f'  _canonicalise_bridge_formid -> {canonical_via_bridge!r}'
+            )
+        if returned_local != local_id:
+            failures.append(
+                f'local_id mismatch for {bridge_str!r}: '
+                f'sent {local_id:#x}, got {returned_local:#x}'
+            )
+
+    if failures:
+        msg = '\n'.join(failures)
+        raise AssertionError(
+            f'Format-contract violations ({len(failures)}):\n{msg}'
+        )
+    print(f'  test_canonicalise_bridge_formid_inverse passed '
+          f'({len(_BRIDGE_FORMID_SAMPLES)} samples)')
+
+
+def test_canonicalise_bridge_formid_malformed() -> None:
+    """Malformed bridge inputs return None rather than raising."""
+    bad_inputs = [
+        '',
+        'NoColonHere',
+        ':missingPlugin',
+        'plugin.esp:',
+        'plugin.esp:NotHex',
+        'plugin.esp:GHIJKL',  # invalid hex chars
     ]
-    for name in test_names:
-        path = resolver.resolve(name)
-        if path:
-            size_mb = path.stat().st_size / 1024 / 1024
-            print(f'  {name:40s} -> {size_mb:.1f} MB')
-        else:
-            print(f'  {name:40s} -> NOT FOUND')
+    for bad in bad_inputs:
+        assert _canonicalise_bridge_formid(bad) is None, (
+            f'_canonicalise_bridge_formid({bad!r}) should have returned None, '
+            f'got {_canonicalise_bridge_formid(bad)!r}'
+        )
+    print(f'  test_canonicalise_bridge_formid_malformed passed '
+          f'({len(bad_inputs)} bad inputs)')
 
 
-def test_load_order() -> None:
-    print_header('Load Order')
-    lo = read_load_order(PROFILE_DIR)
-    active = read_active_plugins(PROFILE_DIR)
-    print(f'  Plugins in loadorder.txt: {len(lo)}')
-    print(f'  Active in plugins.txt:    {len(active)}')
-    print(f'  First 10:')
-    for i, name in enumerate(lo[:10]):
-        marker = '*' if name.lower() in {a.lower() for a in active} else ' '
-        print(f'    [{i:4d}] {marker} {name}')
+def test_round_trip_through_make_formid_key() -> None:
+    """For every sample, parse the bridge string and rebuild via
+    make_formid_key — the resulting string must equal the canonical form."""
+    for _plugin, _local_id, bridge_str in _BRIDGE_FORMID_SAMPLES:
+        canonical_a = _canonicalise_bridge_formid(bridge_str)[0]
+        # Pretend we're a public-API caller who got (origin_lower, local_id)
+        # from somewhere and wants to rebuild the canonical key.
+        plugin_lower, local_hex = canonical_a.rsplit(':', 1)
+        local_id = int(local_hex, 16)
+        canonical_b = make_formid_key(plugin_lower, local_id)
+        assert canonical_a == canonical_b, (
+            f'round-trip mismatch: {bridge_str!r} -> {canonical_a!r} '
+            f'-> rebuild via ({plugin_lower!r}, {local_id:#x}) -> {canonical_b!r}'
+        )
+    print('  test_round_trip_through_make_formid_key passed')
 
 
-def test_build(count: int) -> LoadOrderIndex:
-    lo = read_load_order(PROFILE_DIR)
-    subset = lo[:count]
-    print_header(f'Index Build ({len(subset)} plugins)')
-
-    idx = LoadOrderIndex(MODLIST_ROOT, PROFILE_DIR)
-
-    def progress(name, i, total):
-        if i % 50 == 0 or i == total - 1:
-            print(f'  [{i+1:4d}/{total}] {name}')
-
-    result = idx.build(load_order=subset, progress_cb=progress)
-
-    print()
-    for k, v in result.items():
-        if k == 'errors':
-            print(f'  errors ({len(v)}):')
-            for e in v[:10]:
-                print(f'    - {e}')
-        else:
-            print(f'  {k}: {v}')
-
-    return idx
-
-
-def test_edid_lookup(idx: LoadOrderIndex) -> None:
-    print_header('EditorID Lookup')
-
-    test_edids = [
-        'IronSword', 'DragonbornFrostResist50',
-        'ArmorIronCuirass', 'HideBoots',
-        'DA14DremoraGreatswordFire03', 'DremoraBoots',
-        'EncVampire00BretonF', 'nonexistent_edid_xyz',
+def main() -> int:
+    print('test_esp_index.py — v2.6.0 Phase 3 format-contract tests')
+    print('=' * 60)
+    tests = [
+        test_make_formid_key_basic_shape,
+        test_canonicalise_bridge_formid_inverse,
+        test_canonicalise_bridge_formid_malformed,
+        test_round_trip_through_make_formid_key,
     ]
-    for edid in test_edids:
-        key = idx.lookup_edid(edid)
-        if key:
-            origin, local_id = key
-            chain = idx.get_conflict_chain(origin, local_id)
-            winner = chain[-1] if chain else None
-            plugins = [r.plugin for r in chain]
-            print(f'  {edid}:')
-            print(f'    FormID: {origin}:{local_id:06X}')
-            print(f'    Chain ({len(chain)}): {" -> ".join(plugins)}')
-            if winner:
-                print(f'    Winner: {winner.plugin}')
-        else:
-            print(f'  {edid}: not found')
-
-
-def test_conflict_chain(idx: LoadOrderIndex) -> None:
-    print_header('Conflict Chains (first 10 multi-plugin conflicts)')
-
-    count = 0
-    for key, refs in idx.get_all_conflicts():
-        if count >= 10:
-            break
-        origin, local_id = key
-        # Find editor ID
-        edid = None
-        for eid, ekey in idx._edids.items():
-            if ekey == key:
-                edid = eid
-                break
-
-        print(f'\n  {origin}:{local_id:06X} ({refs[0].record_type})'
-              f'{f" [{edid}]" if edid else ""}')
-        for r in refs:
-            marker = '<-- winner' if r == refs[-1] else ''
-            print(f'    [{r.load_order:4d}] {r.plugin:40s} {marker}')
-        count += 1
-
-    if count == 0:
-        print('  No conflicts found')
-
-
-def test_plugin_conflicts(idx: LoadOrderIndex) -> None:
-    print_header('Plugin Conflict Report')
-
-    # Find a plugin that has overrides
-    for pname, pinfo in sorted(
-        idx._plugins.items(), key=lambda x: x[1].load_order,
-    ):
-        conflicts = idx.get_plugin_conflicts(pinfo.name)
-        if conflicts:
-            total = sum(len(v) for v in conflicts.values())
-            print(f'  Plugin: {pinfo.name} (load order {pinfo.load_order})')
-            print(f'  Total overrides: {total}')
-            print()
-            for rtype, entries in sorted(
-                conflicts.items(), key=lambda x: -len(x[1]),
-            )[:10]:
-                print(f'    {rtype}: {len(entries)} overrides')
-                for origin, local_id, chain in entries[:3]:
-                    plugins = [r.plugin for r in chain]
-                    # Find edid
-                    edid = None
-                    for eid, ekey in idx._edids.items():
-                        if ekey == (origin, local_id):
-                            edid = eid
-                            break
-                    print(f'      {origin}:{local_id:06X}'
-                          f'{f" [{edid}]" if edid else ""}'
-                          f'  chain: {" -> ".join(plugins)}')
-                if len(entries) > 3:
-                    print(f'      ... and {len(entries) - 3} more')
-            break
-    else:
-        print('  No plugin with overrides found')
-
-
-def test_conflict_summary(idx: LoadOrderIndex) -> None:
-    print_header('Conflict Summary')
-    summary = idx.get_conflict_summary()
-    print(f'  Total conflicted records: {summary["total_conflicts"]:,}')
-
-    print(f'\n  By record type:')
-    for rtype, count in list(summary['by_type'].items())[:15]:
-        print(f'    {rtype:<8} {count:>8,}')
-
-    print(f'\n  Top overriding plugins:')
-    for pname, count in list(summary['top_overriding_plugins'].items())[:10]:
-        print(f'    {pname:50s} {count:>6,}')
-
-
-def test_query(idx: LoadOrderIndex) -> None:
-    print_header('Record Query')
-
-    print('  Query: record_type=ARMO, limit=5')
-    for rec in idx.query_records(record_type='ARMO', limit=5):
-        print(f'    {rec["formid"]:30s} {rec.get("editor_id",""):30s} '
-              f'winner={rec["winning_plugin"]}')
-
-    print()
-    print('  Query: edid_filter="Iron", limit=5')
-    for rec in idx.query_records(edid_filter='Iron', limit=5):
-        print(f'    {rec["formid"]:30s} {rec.get("editor_id",""):30s} '
-              f'type={rec["record_type"]}')
-
-
-def test_cache(idx: LoadOrderIndex) -> None:
-    print_header('Cache Round-Trip')
-
-    idx.save_cache()
-    cache_path = idx._cache_path
-    cache_size = cache_path.stat().st_size / 1024 / 1024
-    print(f'  Cache file: {cache_path}')
-    print(f'  Cache size: {cache_size:.1f} MB')
-
-    # Rebuild using cache
-    print(f'\n  Rebuilding from cache...')
-    lo = idx._load_order
-    idx2 = LoadOrderIndex(MODLIST_ROOT, PROFILE_DIR)
-    t0 = time.perf_counter()
-    result = idx2.build(load_order=lo)
-    elapsed = time.perf_counter() - t0
-    print(f'  Cache rebuild: {elapsed:.2f}s')
-    print(f'  Scanned (cache misses): {result.get("scanned", "?")}')
-    print(f'  Cache hits: {result.get("cached_hits", "?")}')
-    print(f'  Stats match: {idx.stats == idx2.stats}')
-
-
-def main() -> None:
-    args = sys.argv[1:]
-    count = 20
-    full = False
-    cache_test = False
-
-    while args:
-        if args[0] == '--count' and len(args) > 1:
-            count = int(args[1])
-            args = args[2:]
-        elif args[0] == '--full':
-            full = True
-            args = args[1:]
-        elif args[0] == '--cache-test':
-            cache_test = True
-            args = args[1:]
-        else:
-            print(f'Unknown arg: {args[0]}')
-            sys.exit(1)
-
-    if full:
-        lo = read_load_order(PROFILE_DIR)
-        count = len(lo)
-
-    test_resolver()
-    test_load_order()
-    idx = test_build(count)
-    test_edid_lookup(idx)
-    test_conflict_chain(idx)
-    test_plugin_conflicts(idx)
-    test_conflict_summary(idx)
-    test_query(idx)
-
-    if cache_test:
-        test_cache(idx)
-
-    print(f'\n{"=" * 60}')
-    print(f'  Done')
-    print(f'{"=" * 60}')
+    failed = 0
+    for t in tests:
+        try:
+            t()
+        except AssertionError as exc:
+            print(f'FAIL  {t.__name__}: {exc}')
+            failed += 1
+        except Exception as exc:
+            print(f'ERROR {t.__name__}: {type(exc).__name__}: {exc}')
+            failed += 1
+    print('=' * 60)
+    print(f'{"FAIL" if failed else "PASS"}: {len(tests) - failed}/{len(tests)} tests passed')
+    return 1 if failed else 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

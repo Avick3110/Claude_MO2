@@ -63,6 +63,20 @@ try
         return batchResponse.Success ? 0 : 1;
     }
 
+    if (string.Equals(command, "scan", StringComparison.OrdinalIgnoreCase))
+    {
+        var scanRequest = JsonSerializer.Deserialize<ScanRequest>(input, parseOptions);
+        if (scanRequest == null)
+        {
+            WriteError("Failed to parse ScanRequest JSON.");
+            return 1;
+        }
+        var scanner = new IndexScanner();
+        var scanResponse = scanner.Scan(scanRequest);
+        Console.Write(JsonSerializer.Serialize(scanResponse, outputOptions));
+        return scanResponse.Success ? 0 : 1;
+    }
+
     if (string.Equals(command, "fuz_info", StringComparison.OrdinalIgnoreCase))
     {
         var req = JsonSerializer.Deserialize<FuzInfoRequest>(input, parseOptions);

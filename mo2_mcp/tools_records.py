@@ -26,13 +26,24 @@ import mobase
 from PyQt6.QtCore import qInfo, qWarning
 
 from .config import PLUGIN_NAME
-from .esp_index import (
-    LoadOrderIndex,
-    PluginResolver,
-    read_load_order,
-    resolve_formid,
-)
+from .esp_index import LoadOrderIndex, make_formid_key
 from .tools_modlist import scan_missing_masters
+
+# Bridge `scan` command batch size (Phase 3). 100 plugins per subprocess
+# call amortises the ~1.3s .NET CLR + Mutagen JIT startup cost across
+# more work — at 30/batch the initial Phase 3 force_rebuild on Aaron's
+# 3350-plugin modlist took 154s of which ~143s was subprocess overhead
+# (112 invocations × ~1.27s). 100/batch cuts invocations to ~34 and
+# brings the total estimate to ~68s for force_rebuild. Phase 4's
+# freshness-check incremental rebuilds will scan 0-5 plugins per
+# event, well under one batch.
+#
+# Future iteration (Phase 4+): batches are currently random-by-load-order,
+# so a batch that happens to contain Skyrim.esm + Update.esm + DLCs
+# produces a much larger response than one of small ESPs. Variable-sized
+# batches targeting a fixed *record count* (rather than fixed *plugin
+# count*) would balance better. Not urgent — current shape works.
+_SCAN_BATCH_SIZE = 100
 
 
 # ── Shared State ────────────────────────────────────────────────────────
@@ -56,6 +67,14 @@ _refresh_hook_registered = False
 # without captured closures over `organizer`) can still route through MO2's
 # VFS resolver. v2.6.0 Phase 2.
 _organizer = None
+
+# v2.6.0 Phase 3: plugin directory + bridge scan_fn closure stashed at
+# register time so debounced-rebuild paths (which run on timer threads
+# with no closure over the registration scope) can rebuild the index
+# via the bridge without re-resolving the bridge binary path each time.
+# Same pattern as `_organizer`.
+_plugin_dir: Path | None = None
+_index_scan_fn: Any = None
 
 # Populated by the onRefreshed callback; surfaced via mo2_record_index_status
 # so Claude can see whether the latest rebuild was auto-triggered.
@@ -122,19 +141,119 @@ def _find_bridge_for_read(plugin_dir: Path) -> Path | None:
     return None
 
 
+# ── Bridge-scan plumbing for the record index (Phase 3) ────────────────
+
+def _run_bridge_scan(bridge: Path, plugin_paths: list[str], timeout: int = 120) -> dict:
+    """Invoke the bridge's `scan` command with one batch of plugin paths.
+
+    Returns the parsed JSON response dict (`{'success': bool, 'plugins':
+    [...], 'error': str | None}`). On subprocess failure, synthesises an
+    error response so callers don't have to special-case exceptions.
+
+    UTF-8 forced on stdin/stdout — verified clean end-to-end through the
+    bridge in PHASE_3_HARNESS_OUTPUT (Unicode-path round-trip section).
+    """
+    request = {'command': 'scan', 'plugins': plugin_paths}
+    try:
+        proc = subprocess.run(
+            [str(bridge)],
+            input=json.dumps(request),
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            timeout=timeout,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            'success': False,
+            'error': f'mutagen-bridge scan timed out after {timeout}s',
+            'plugins': [],
+        }
+    except FileNotFoundError:
+        return {
+            'success': False,
+            'error': f'Bridge exe not found: {bridge}',
+            'plugins': [],
+        }
+    except Exception as exc:
+        return {
+            'success': False,
+            'error': f'Failed to run bridge scan: {type(exc).__name__}: {exc}',
+            'plugins': [],
+        }
+
+    out = (proc.stdout or '').strip()
+    if not out:
+        return {
+            'success': False,
+            'error': f'Bridge returned no output (exit {proc.returncode})',
+            'plugins': [],
+            'stderr': (proc.stderr or '').strip()[:500],
+        }
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError as exc:
+        return {
+            'success': False,
+            'error': f'Bridge returned invalid JSON: {exc}',
+            'plugins': [],
+            'raw_output': out[:500],
+        }
+
+
+def _make_index_scan_fn(bridge: Path, batch_size: int = _SCAN_BATCH_SIZE):
+    """Build the scan_fn closure passed into LoadOrderIndex.build().
+
+    Batches `plugin_paths` into chunks of `batch_size`, invokes the bridge
+    once per chunk, and concatenates the per-plugin results. Each
+    ScannedPlugin dict carries its own `error` field, so per-plugin
+    failures don't void the whole batch.
+    """
+    def scan(plugin_paths: list[str]) -> list[dict]:
+        results: list[dict] = []
+        if not plugin_paths:
+            return results
+        for i in range(0, len(plugin_paths), batch_size):
+            batch = plugin_paths[i:i + batch_size]
+            response = _run_bridge_scan(bridge, batch)
+            batch_plugins = response.get('plugins') or []
+            if not batch_plugins and response.get('error'):
+                # Synthesise per-plugin error entries so the caller can
+                # surface them in its `errors` list. Without this, a
+                # subprocess-level failure would silently drop a whole
+                # batch with no per-plugin trace.
+                err = response['error']
+                batch_plugins = [
+                    {'plugin_path': p, 'error': f'batch failure: {err}'}
+                    for p in batch
+                ]
+            results.extend(batch_plugins)
+        return results
+
+    return scan
+
+
 # ── Tool Registration ──────────────────────────────────────────────────
 
 def register_record_tools(registry, organizer) -> None:
     """Register all record-level query tools with the MCP tool registry."""
 
-    global _organizer
+    global _organizer, _plugin_dir, _index_scan_fn
     _organizer = organizer
 
     plugin_dir = Path(__file__).resolve().parent
+    _plugin_dir = plugin_dir
     base_path = organizer.basePath()
     profile_path = organizer.profile().absolutePath()
     plugin_list = organizer.pluginList()
     mod_list = organizer.modList()
+
+    # Resolve the bridge once at register time. If it's missing now, we
+    # surface that on the first build attempt rather than at every event
+    # callback. The closure caches the (bridge, batch_size) binding.
+    bridge = _find_bridge_for_read(plugin_dir)
+    _index_scan_fn = _make_index_scan_fn(bridge) if bridge else None
 
     # ── mo2_record_index_status ─────────────────────────────────────
 
@@ -472,27 +591,24 @@ def _handle_build_index(
         global _index, _build_status, _rebuild_pending_during_build
         _build_complete.clear()
         try:
-            # v2.6.0 Phase 2: resolve plugin names via MO2's VFS instead
-            # of the legacy PluginResolver's alphabetical mods/ walk.
-            # The old walk let a later-alphabetical mod folder clobber
-            # the actual winning variant for any plugin filename present
-            # in multiple mods — NyghtfallMM.esp resolved to a non-ESL
-            # "Replacer - Nyghtfall - Music/" variant instead of the
-            # active "Nyghtfall - ESPFE (Replacer)/" ESL variant, which
-            # was the root cause of the 2026-04-21 broken-FormLink bug
-            # that motivated v2.6.0. Using organizer.resolvePath routes
-            # through MO2's mod priority, matching what xEdit and the
-            # game actually see at runtime.
-            resolve_fn = None
-            if organizer is not None:
-                def _resolve_via_mo2(name):
-                    real = organizer.resolvePath(name)
-                    return real if real else None
-                resolve_fn = _resolve_via_mo2
+            # v2.6.0 Phase 3: index is bridge-fed. LoadOrderIndex consults
+            # organizer.pluginList() / .resolvePath() directly for load
+            # order and per-plugin paths; record content comes from the
+            # bridge's `scan` command, batched ~30 plugins per call.
+            #
+            # Phase 2's `_resolve_via_mo2` injection is gone — the new
+            # LoadOrderIndex constructor takes the organizer and uses
+            # resolvePath internally. (The PluginResolver class it was
+            # working around is also gone.)
+            scan_fn = _index_scan_fn
+            if scan_fn is None:
+                raise RuntimeError(
+                    'mutagen-bridge.exe not found under plugins/mo2_mcp/tools/. '
+                    'Re-run the installer or sync the bridge before building '
+                    'the record index.'
+                )
 
-            idx = LoadOrderIndex(
-                base_path, profile_path, resolve_fn=resolve_fn,
-            )
+            idx = LoadOrderIndex(organizer)
 
             def progress(name, i, total):
                 _build_status['current_plugin'] = name
@@ -503,9 +619,9 @@ def _handle_build_index(
                     qInfo(f'{PLUGIN_NAME}: indexing [{i+1}/{total}] {safe_name}')
 
             if force:
-                result = idx.rebuild(progress_cb=progress)
+                result = idx.rebuild(scan_fn=scan_fn, progress_cb=progress)
             else:
-                result = idx.build(progress_cb=progress)
+                result = idx.build(scan_fn=scan_fn, progress_cb=progress)
 
             idx.save_cache()
             _index = idx
@@ -657,7 +773,7 @@ def _enrich_formids(value: Any, idx: LoadOrderIndex) -> Any:
                 local_id = int(local_hex, 16)
             except ValueError:
                 return value
-            edid = idx._key_to_edid.get((plugin.lower(), local_id & 0x00FFFFFF))
+            edid = idx.get_edid(plugin, local_id & 0x00FFFFFF)
             if edid:
                 return f"{value} ({edid})"
     return value
@@ -1437,8 +1553,10 @@ def _parse_formid_str(s: str) -> tuple[str | None, int]:
 
 
 def _find_edid(idx: LoadOrderIndex, origin: str, local_id: int) -> str | None:
-    """Reverse-lookup EditorID for a resolved FormID key."""
-    return idx._key_to_edid.get((origin.lower(), local_id))
+    """Reverse-lookup EditorID for a resolved FormID key. Public-API
+    accessor on LoadOrderIndex; takes the same (plugin, local_id) shape
+    the rest of this file uses."""
+    return idx.get_edid(origin, local_id)
 
 
 def _resolve_target(

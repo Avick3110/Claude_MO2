@@ -16,6 +16,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -72,6 +73,25 @@ _index_scan_fn: Any = None
 # detects drift; surfaced via mo2_record_index_status so Claude can see
 # whether the last interaction picked up any state changes.
 _last_auto_refresh: dict[str, Any] | None = None
+
+# Signalled by the onRefreshed hook when MO2's directory refresh
+# completes. Used by _refresh_and_wait() on the write path so
+# mo2_create_patch can return only after MO2's pluginList / VFS has
+# picked up the newly-written plugin — needed because organizer.refresh()
+# is async and the next read-back would otherwise race with MO2's own
+# rebuild. v2.6.0 Phase 4d.
+#
+# Starts set() so a stray wait() from boot time doesn't block the first
+# caller; write paths re-clear it right before calling organizer.refresh.
+_refresh_event = threading.Event()
+_refresh_event.set()
+
+# How long _refresh_and_wait blocks for onRefreshed after calling
+# organizer.refresh(save_changes=True). 30s covers Aaron's modlist
+# baseline (~10-15s refresh on 3300+ plugins) with 2× headroom. On
+# timeout, the caller proceeds with a warning — the file is already
+# on disk; pluginList visibility catches up asynchronously.
+_REFRESH_WAIT_TIMEOUT_S = 30.0
 
 
 def _get_index() -> LoadOrderIndex | None:
@@ -478,11 +498,11 @@ def register_record_tools(registry, organizer) -> None:
         handler=lambda args: _handle_conflict_summary(args),
     )
 
-    # Hook onPluginStateChanged so checkbox toggles flip PluginInfo.enabled
-    # bits in place without waiting for the next read query's ensure_fresh.
-    # onRefreshed + onModMoved were retired in Phase 4 — ensure_fresh covers
-    # those drift paths.
-    _register_plugin_state_hook(plugin_list)
+    # Hook onPluginStateChanged (checkbox toggle → in-place enabled bit
+    # flip) and onRefreshed (signal-only, for write-path _refresh_and_wait).
+    # onModMoved stays retired — ensure_fresh covers mod-priority drift
+    # via its per-query mtime/loadorder walk.
+    _register_hooks(plugin_list)
 
 
 # ── Handlers ────────────────────────────────────────────────────────────
@@ -1201,34 +1221,121 @@ def _on_plugin_state_changed(state_dict: dict) -> None:
         )
 
 
-def _register_plugin_state_hook(plugin_list) -> None:
-    """Register MO2's onPluginStateChanged hook exactly once per server
-    process. `register_record_tools` re-runs on every server start/stop
-    cycle, so this must be idempotent.
+def _register_hooks(plugin_list) -> None:
+    """Register MO2's event hooks exactly once per server process.
+    `register_record_tools` re-runs on every server start/stop cycle,
+    so this must be idempotent.
 
-    v2.6.0 Phase 4: only onPluginStateChanged. onRefreshed and onModMoved
-    were retired — the per-query `ensure_fresh()` path reads pluginList /
-    loadorder.txt / plugin-file mtimes on every query and catches any
-    drift event-driven hooks would have caught, without the event-
-    coordination complexity (debounced timers, pending-rebuild chains,
-    in-flight-build guards) the v2.5.x architecture carried. The
-    onPluginStateChanged hook stays as an in-place fast path so a
-    checkbox toggle doesn't have to wait for the next query to be
-    reflected.
+    Two hooks, each with a narrow purpose:
+
+      * onPluginStateChanged → `_on_plugin_state_changed`. Flips
+        PluginInfo.enabled bits in place for known plugins. Unknown
+        plugins are deferred to the next query's ensure_fresh.
+      * onRefreshed → sets `_refresh_event`. Pure signal for write
+        paths (_refresh_and_wait) so mo2_create_patch can wait for
+        MO2's directory refresh to land before returning, enabling
+        pre-enable read-back. Added in Phase 4d; decoupled from any
+        index-rebuild machinery, which ensure_fresh covers.
+
+    Retired from the v2.5.x equivalent: onModMoved — ensure_fresh's
+    per-query mtime/loadorder walk on reads covers mod-priority shifts
+    without needing the coordination machinery Phase 3/4a dropped.
     """
     global _plugin_state_hook_registered
     if _plugin_state_hook_registered:
         return
+
+    results: dict[str, Any] = {}
     try:
-        handle = plugin_list.onPluginStateChanged(
+        results['onPluginStateChanged'] = plugin_list.onPluginStateChanged(
             lambda state_dict: _on_plugin_state_changed(state_dict)
         )
     except Exception as exc:
         qWarning(f'{PLUGIN_NAME}: failed to register onPluginStateChanged: {exc}')
-        return
+        # Without the plugin-state hook the fast path for checkbox toggles
+        # is lost but queries still work via ensure_fresh. Continue.
+
+    try:
+        results['onRefreshed'] = plugin_list.onRefreshed(
+            lambda: _refresh_event.set()
+        )
+    except Exception as exc:
+        qWarning(f'{PLUGIN_NAME}: failed to register onRefreshed: {exc}')
+        # Without the refresh hook, _refresh_and_wait will always time out
+        # and the write path degrades to fire-and-forget semantics.
+        # Non-fatal.
 
     _plugin_state_hook_registered = True
-    qInfo(f'{PLUGIN_NAME}: registered onPluginStateChanged hook ({handle})')
+    qInfo(f'{PLUGIN_NAME}: registered MO2 hooks {results}')
+
+
+# ── Write-path refresh helper (Phase 4d) ────────────────────────────────
+
+def _refresh_and_wait(
+    organizer,
+    timeout_s: float = _REFRESH_WAIT_TIMEOUT_S,
+) -> tuple[bool, float]:
+    """Fire MO2's directory refresh and block until onRefreshed signals.
+
+    Write callers (primarily mo2_create_patch) use this so the next
+    read-back query sees the newly-written plugin in MO2's pluginList —
+    `organizer.refresh(save_changes=True)` is async and the next-query
+    ensure_fresh races with MO2's internal refresh otherwise.
+
+    Returns (completed, elapsed_ms). `completed` is True if onRefreshed
+    fired within the timeout; False on timeout or if organizer.refresh()
+    itself raised. `elapsed_ms` is wall-clock time from the clear+refresh
+    call site to the signal (or timeout).
+
+    Race-free ordering is load-bearing — `_refresh_event.clear()` MUST
+    run BEFORE `organizer.refresh()` is called. If MO2's refresh were
+    to complete synchronously from a warm cache and fire onRefreshed
+    before we cleared the event, a subsequent wait() would return
+    instantly with the stale signal. Same concern applies if another
+    refresh fired between the previous wait()'s timeout and our next
+    clear. DO NOT REFACTOR THIS SEQUENCE without preserving the
+    clear-then-call-then-wait order.
+
+    Best-effort: on timeout the caller should proceed, not error. The
+    user's file is already on disk; MO2 will finish the refresh on its
+    own. The caller surfaces `refresh_status: 'timeout'` in the tool
+    response so Claude can tell the user to press F5 manually.
+
+    Acceptable known risk (see Phase 4d handoff): a concurrent refresh
+    (user F5, other plugin's trigger) can fire onRefreshed before ours
+    completes, unblocking the wait early. Probability low; consequence
+    bounded by the downstream read-back which would still work if the
+    race-winning refresh also covered our write, or hit the same
+    "pluginList not yet reflected" state we'd hit on timeout otherwise.
+    """
+    _refresh_event.clear()  # Load-bearing — see docstring.
+    t0 = time.monotonic()
+    try:
+        organizer.refresh(save_changes=True)
+    except Exception as exc:
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        qWarning(
+            f'{PLUGIN_NAME}: organizer.refresh() raised {type(exc).__name__}: '
+            f'{exc} (after {elapsed_ms:.0f}ms)'
+        )
+        return False, round(elapsed_ms, 1)
+
+    completed = _refresh_event.wait(timeout=timeout_s)
+    elapsed_ms = (time.monotonic() - t0) * 1000
+
+    if completed:
+        qInfo(
+            f'{PLUGIN_NAME}: MO2 directory refresh completed in '
+            f'{elapsed_ms:.0f}ms'
+        )
+    else:
+        qWarning(
+            f'{PLUGIN_NAME}: MO2 directory refresh did not signal within '
+            f'{timeout_s:.0f}s; write is on disk but pluginList / VFS may '
+            f'not yet reflect it'
+        )
+
+    return completed, round(elapsed_ms, 1)
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────

@@ -31,6 +31,7 @@ from .config import PLUGIN_NAME
 from .tools_records import (
     _get_index,
     _parse_formid_str,
+    _refresh_and_wait,
     build_bridge_load_order_context,
 )
 
@@ -291,32 +292,45 @@ def _handle_create_patch(organizer, plugin_dir: Path, args: dict) -> str:
         f"{output_name}"
     )
 
-    # Fire a single MO2 refresh so the new file lands in loadorder.txt / the
-    # VFS; skip when nothing was actually written (full-failure or pre-bridge
-    # error). v2.6.0 Phase 4: the wait-for-index-rebuild coordination is gone
-    # — the per-query ensure_fresh() path picks up the new plugin on the next
-    # read-back without explicit coordination. Phase 4d extends this so read-
-    # back works before the user ticks the checkbox; until 4d lands, the
-    # next_step below still asks the user to enable before chaining reads.
+    # Fire MO2's directory refresh and block until onRefreshed signals,
+    # so the next read-back query sees the newly-written plugin in
+    # pluginList — organizer.refresh() is async and ensure_fresh would
+    # otherwise race with MO2's internal rebuild. Phase 4d.
+    #
+    # Skipped when nothing was actually written (full-failure or pre-
+    # bridge error). On timeout, the tool call still succeeds — the
+    # patch is already on disk, and MO2 will finish refreshing
+    # asynchronously. The response surfaces refresh_status so Claude
+    # can tell the user to press F5 manually if needed.
     wrote_anything = (
         response.get('success')
         or response.get('successful_count', 0) > 0
         or (response.get('records_written') or 0) > 0
     )
     if wrote_anything:
-        try:
-            organizer.refresh(save_changes=True)
-        except Exception as exc:
-            qWarning(f"{PLUGIN_NAME}: organizer.refresh() failed after patch write: {exc}")
-        response['next_step'] = (
-            f"Plugin written to the load order as DISABLED. Tell the user "
-            f"to tick the checkbox next to '{output_name}' in MO2's right "
-            f"pane before attempting read-back or loading the patch in-"
-            f"game. Once they enable it, the next read-back query will "
-            f"pick up the new records automatically (ensure_fresh detects "
-            f"the change). Do NOT chain read-back calls in the same turn "
-            f"as the write; wait for the user's confirmation."
-        )
+        refresh_completed, refresh_elapsed_ms = _refresh_and_wait(organizer)
+        response['refresh_status'] = 'complete' if refresh_completed else 'timeout'
+        response['refresh_elapsed_ms'] = refresh_elapsed_ms
+        if refresh_completed:
+            response['next_step'] = (
+                f"Patch written. Tell the user to tick the checkbox next "
+                f"to '{output_name}' in MO2's right pane when they want "
+                f"to load the patch in-game. Read-back queries "
+                f"(mo2_record_detail, mo2_query_records) see the new "
+                f"records immediately — no need to wait for user "
+                f"confirmation before chaining reads."
+            )
+        else:
+            response['next_step'] = (
+                f"Patch written successfully, but MO2's directory refresh "
+                f"did not signal within 30s. The patch is on disk but may "
+                f"not appear in the load order or be read-back-able until "
+                f"MO2 finishes refreshing. Tell the user to press F5 in "
+                f"MO2 to force the refresh, then read-back queries will "
+                f"see the new records. They should tick the checkbox next "
+                f"to '{output_name}' in MO2's right pane when they want "
+                f"to load the patch in-game."
+            )
 
     return json.dumps(response, indent=2)
 

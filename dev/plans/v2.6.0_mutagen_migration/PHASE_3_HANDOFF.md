@@ -4,7 +4,7 @@
 **Status:** Complete
 **Date:** 2026-04-23
 **Session length:** ~6h (includes the bug-fix iteration after the initial force_rebuild surfaced 3 issues)
-**Commits made:** TBD — populated below after `[v2.6 P3]` lands.
+**Commits made:** `c968eff` — `[v2.6 P3] Bridge-fed record index; delete esp_reader.py + parallel implementations of MO2/Mutagen domain logic` (plus this fixup recording the hash).
 **Live install synced:** Yes — `E:\Skyrim Modding\Authoria - Requiem Reforged\plugins\mo2_mcp\`. Bridge + Python both synced; force_rebuild succeeded end-to-end.
 
 ---
@@ -181,6 +181,7 @@ None. PLAN.md unchanged. Phase 3's framing was already correct after Phase 2's r
 
 ## Commits
 
-- `[hash TBD]` — `[v2.6 P3] Bridge-fed record index; delete esp_reader.py + parallel implementations of MO2/Mutagen domain logic`. Single commit absorbs the bridge changes (Models.cs, IndexScanner.cs, Program.cs), the Python rewrites (esp_index.py, tools_records.py), the new format-contract test (test_esp_index.py), the deletions (esp_reader.py, test_esp_reader.py), and this handoff (force-added against the dev/ gitignore per the Phase 2 precedent). PHASE_3_HARNESS_OUTPUT.md is also force-added.
+- `c968eff` — `[v2.6 P3] Bridge-fed record index; delete esp_reader.py + parallel implementations of MO2/Mutagen domain logic`. Single commit absorbs the bridge changes (Models.cs, IndexScanner.cs, Program.cs), the Python rewrites (esp_index.py, tools_records.py), the new format-contract test (test_esp_index.py), the deletions (esp_reader.py, test_esp_reader.py), and this handoff (force-added against the dev/ gitignore per the Phase 2 precedent). PHASE_3_HARNESS_OUTPUT.md is also force-added.
+- `[hash TBD — landed by this fixup commit]` — `[v2.6 P3 fixup] Record commit hash in PHASE_3_HANDOFF.md`. Tiny follow-up to replace the placeholder TBD line.
 
 Working tree at Phase 4 start: clean. No stray files.

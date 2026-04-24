@@ -143,6 +143,13 @@ Type: filesandordirs; Name: "{app}\plugins\{#PluginFolder}\__pycache__"
 Type: filesandordirs; Name: "{app}\plugins\{#PluginFolder}\ordlookup\__pycache__"
 ; Runtime-generated files the plugin creates
 Type: files; Name: "{app}\plugins\{#PluginFolder}\.record_index.pkl"
+;
+; NOTE: tool_paths.json is INTENTIONALLY NOT listed here (v2.7.0 Phase 4).
+; The file is user configuration written by CurStepChanged(ssPostInstall);
+; removing it on uninstall would lose the user's tool paths across reinstalls.
+; Inno only removes files it installed by default, so tool_paths.json (which
+; we generate dynamically rather than declare in [Files]) is preserved
+; without requiring a [UninstallSkip] equivalent entry.
 
 [Code]
 //════════════════════════════════════════════════════════════════════════════
@@ -398,6 +405,80 @@ begin
   if IsNull then PapyrusScriptsDir := '' else PapyrusScriptsDir := Val;
 
   Result := True;
+end;
+
+
+//────────────────────────────────────────────────────────────────────────────
+// JSON writer (P0 Q3 locked signature, v2.7.0 Phase 4)
+//
+//   function WriteToolPathsJson(
+//     const Path: String;
+//     const PapyrusCompilerPath: String;
+//     const PapyrusScriptsDir: String
+//   ): Boolean;
+//
+// Writes a UTF-8 no-BOM tool_paths.json with schema_version=1. Empty-string
+// path params emit `null`; non-empty paths emit quoted string literals with
+// `\` → `\\` and `"` → `\"` escape. Overwrites any existing file. Ensures
+// the parent directory exists before the write. Line endings are LF; output
+// is the exact shape ReadToolPathsJson round-trips AND that Python 3's
+// json.load parses cleanly with encoding='utf-8' (no BOM).
+//
+// Returns True on successful write, False on disk/permissions failure.
+// Caller (P4's CurStepChanged) surfaces failure in the post-install MsgBox
+// and the install log.
+//────────────────────────────────────────────────────────────────────────────
+
+function EscapeJsonString(const S: String): String;
+var
+  I: Integer;
+  Ch: Char;
+begin
+  Result := '';
+  for I := 1 to Length(S) do begin
+    Ch := S[I];
+    if Ch = '\' then
+      Result := Result + '\\'
+    else if Ch = '"' then
+      Result := Result + '\"'
+    else
+      Result := Result + Ch;
+  end;
+end;
+
+function WriteToolPathsJson(const Path: String;
+  const PapyrusCompilerPath: String;
+  const PapyrusScriptsDir: String): Boolean;
+var
+  Body: String;
+  CompilerLine, ScriptsLine: String;
+  ParentDir: String;
+begin
+  if PapyrusCompilerPath = '' then
+    CompilerLine := '  "papyrus_compiler": null'
+  else
+    CompilerLine := '  "papyrus_compiler": "' + EscapeJsonString(PapyrusCompilerPath) + '"';
+
+  if PapyrusScriptsDir = '' then
+    ScriptsLine := '  "papyrus_scripts_dir": null'
+  else
+    ScriptsLine := '  "papyrus_scripts_dir": "' + EscapeJsonString(PapyrusScriptsDir) + '"';
+
+  Body :=
+    '{' + #10 +
+    '  "schema_version": 1,' + #10 +
+    CompilerLine + ',' + #10 +
+    ScriptsLine + #10 +
+    '}' + #10;
+
+  ParentDir := ExtractFilePath(Path);
+  if (ParentDir <> '') and (not DirExists(ParentDir)) then
+    ForceDirectories(ParentDir);
+
+  // AnsiString cast: for ASCII paths (the common case per P0 Q3 scope-lock
+  // rationale), bytes are identical to UTF-8. SaveStringToFile writes raw
+  // bytes with no BOM, which Python 3's json.load(encoding='utf-8') requires.
+  Result := SaveStringToFile(Path, AnsiString(Body), False);
 end;
 
 
@@ -710,8 +791,271 @@ end;
 //                        detector page.
 //────────────────────────────────────────────────────────────────────────────
 
+//════════════════════════════════════════════════════════════════════════════
+// v2.7.0 Phase 4 — Optional Tools picker page
+//
+// Custom wizard page rendered AFTER the P3 detector page. Contains 4 rows:
+//
+//   Row 0 (PICK_BSARCH)       — BSArch.exe file picker (copy-at-install)
+//   Row 1 (PICK_NIF_TOOL)     — nif-tool.exe file picker (copy-at-install)
+//   Row 2 (PICK_PAPYRUS_COMP) — PapyrusCompiler.exe file picker + nested
+//                               "Reference this path at runtime (don't copy
+//                               into plugin folder)" checkbox. Unchecked =
+//                               copy-at-install (binary mode). Checked =
+//                               tool_paths.json["papyrus_compiler"] write
+//                               (JSON-reference mode, no copy).
+//   Row 3 (PICK_PAPYRUS_DIR)  — Papyrus Scripts sources dir picker.
+//                               tool_paths.json["papyrus_scripts_dir"] write,
+//                               no copy.
+//
+// Initial state seeding (from P3 detector globals):
+//   Keep   → path pre-populated, ReadOnly, Browse disabled.
+//   Change → path pre-populated, editable, Browse enabled.
+//   Skip   → path blank, editable.
+//   None   → path blank, editable.
+// Row 2 mirrors the dominant detected mode (binary OR JSON). If BOTH were
+// detected pre-install, a red one-line warning surfaces and the checkbox
+// defaults to JSON-reference (the more explicit signal).
+//
+// Re-layout convention (inherited from P3): LayoutPickerPage re-seeds each
+// row's fields on every page entry. Any user text typed into an Edit is
+// discarded if the user navigates Back-then-Forward. Acceptable trade-off
+// per P3 precedent; documented in the handoff.
+//
+// Validation (NextButtonClick on picker page):
+//   • Non-empty file-row path: must exist on disk (hard error).
+//   • File-row filename mismatch (e.g. user picked xEdit64.exe for BSArch):
+//     soft Yes/No warning; Yes overrides, No returns to the picker.
+//   • Non-empty dir-row path: dir must exist on disk (hard error). No
+//     content validation (user may have partial Scripts.zip extractions).
+//   • Empty = skip (valid state, no validation).
+//
+// Install-step (CurStepChanged ssPostInstall):
+//   • BSArch / nif-tool: copy to plugin-dir target (overwrite), OR delete
+//     any existing plugin-dir binary when source is empty.
+//   • PapyrusCompiler: copy (unchecked) or write JSON key + delete existing
+//     plugin-dir binary (checked) or skip-with-cleanup (empty).
+//   • Papyrus Scripts dir: write JSON key (or null).
+//   • tool_paths.json ALWAYS written (schema_version=1, non-set keys=null).
+//
+// Note: [UninstallDelete] explicitly does NOT list tool_paths.json — user
+// config must survive uninstall. See the comment there.
+//════════════════════════════════════════════════════════════════════════════
+
+const
+  PICK_BSARCH       = 0;
+  PICK_NIF_TOOL     = 1;
+  PICK_PAPYRUS_COMP = 2;
+  PICK_PAPYRUS_DIR  = 3;
+  NUM_PICK_ROWS     = 4;
+
+var
+  g_PickerPage:          TWizardPage;
+  g_PickerTitle:         array[0..3] of TNewStaticText;
+  g_PickerDesc:          array[0..3] of TNewStaticText;
+  g_PickerEdit:          array[0..3] of TNewEdit;
+  g_PickerBrowse:        array[0..3] of TNewButton;
+  g_PickerJsonCheckbox:  TNewCheckBox;
+  g_PickerDualWarning:   TNewStaticText;
+  // True once NextButtonClick(g_PickerPage.ID) fires — i.e. user interactively
+  // confirmed the picker. In silent mode the picker page never renders, so
+  // this stays False and CurStepChanged seeds Edit values from detector
+  // globals via LayoutPickerPage (honours "Keep existing on silent install").
+  g_PickerUserConfirmed: Boolean;
+
+
+//────────────────────────────────────────────────────────────────────────────
+// Row factory — title label, desc label, path edit, Browse button.
+//
+// DescHeight in px: pass 13 for one-line, 26 for two-line. Edit and Browse
+// sit side-by-side on one line; the Browse button is anchored 80px wide at
+// the right edge of the surface.
+//────────────────────────────────────────────────────────────────────────────
+
+procedure CreatePickerRow(Idx: Integer; Y: Integer; const Title, Desc: String; DescHeight: Integer);
+var
+  EditTop: Integer;
+begin
+  EditTop := Y + 14 + DescHeight + 2;
+
+  g_PickerTitle[Idx] := TNewStaticText.Create(g_PickerPage);
+  g_PickerTitle[Idx].Parent := g_PickerPage.Surface;
+  g_PickerTitle[Idx].Caption := Title;
+  g_PickerTitle[Idx].Font.Style := [fsBold];
+  g_PickerTitle[Idx].AutoSize := False;
+  g_PickerTitle[Idx].Top := ScaleY(Y);
+  g_PickerTitle[Idx].Left := 0;
+  g_PickerTitle[Idx].Width := g_PickerPage.SurfaceWidth;
+  g_PickerTitle[Idx].Height := ScaleY(14);
+
+  g_PickerDesc[Idx] := TNewStaticText.Create(g_PickerPage);
+  g_PickerDesc[Idx].Parent := g_PickerPage.Surface;
+  g_PickerDesc[Idx].Caption := Desc;
+  g_PickerDesc[Idx].AutoSize := False;
+  g_PickerDesc[Idx].Top := ScaleY(Y + 14);
+  g_PickerDesc[Idx].Left := 0;
+  g_PickerDesc[Idx].Width := g_PickerPage.SurfaceWidth;
+  g_PickerDesc[Idx].Height := ScaleY(DescHeight);
+
+  g_PickerEdit[Idx] := TNewEdit.Create(g_PickerPage);
+  g_PickerEdit[Idx].Parent := g_PickerPage.Surface;
+  g_PickerEdit[Idx].Top := ScaleY(EditTop);
+  g_PickerEdit[Idx].Left := 0;
+  g_PickerEdit[Idx].Width := g_PickerPage.SurfaceWidth - ScaleX(85);
+  g_PickerEdit[Idx].Height := ScaleY(21);
+  g_PickerEdit[Idx].Text := '';
+
+  g_PickerBrowse[Idx] := TNewButton.Create(g_PickerPage);
+  g_PickerBrowse[Idx].Parent := g_PickerPage.Surface;
+  g_PickerBrowse[Idx].Caption := 'Browse...';
+  g_PickerBrowse[Idx].Top := ScaleY(EditTop - 1);
+  g_PickerBrowse[Idx].Left := g_PickerPage.SurfaceWidth - ScaleX(80);
+  g_PickerBrowse[Idx].Width := ScaleX(80);
+  g_PickerBrowse[Idx].Height := ScaleY(23);
+end;
+
+
+//────────────────────────────────────────────────────────────────────────────
+// Browse-button handlers (one per row; wired via .OnClick in InitializeWizard)
+//────────────────────────────────────────────────────────────────────────────
+
+procedure OnBrowseBSArch(Sender: TObject);
+var
+  fn: String;
+begin
+  fn := g_PickerEdit[PICK_BSARCH].Text;
+  if GetOpenFileName('Select BSArch.exe', fn, '',
+      'BSArch executables|BSArch.exe;bsarch.exe|All files (*.*)|*.*', 'exe') then
+    g_PickerEdit[PICK_BSARCH].Text := fn;
+end;
+
+procedure OnBrowseNifTool(Sender: TObject);
+var
+  fn: String;
+begin
+  fn := g_PickerEdit[PICK_NIF_TOOL].Text;
+  if GetOpenFileName('Select nif-tool.exe', fn, '',
+      'nif-tool.exe|nif-tool.exe|All files (*.*)|*.*', 'exe') then
+    g_PickerEdit[PICK_NIF_TOOL].Text := fn;
+end;
+
+procedure OnBrowsePapyrusCompiler(Sender: TObject);
+var
+  fn: String;
+begin
+  fn := g_PickerEdit[PICK_PAPYRUS_COMP].Text;
+  if GetOpenFileName('Select PapyrusCompiler.exe', fn, '',
+      'PapyrusCompiler.exe|PapyrusCompiler.exe|All files (*.*)|*.*', 'exe') then
+    g_PickerEdit[PICK_PAPYRUS_COMP].Text := fn;
+end;
+
+procedure OnBrowsePapyrusScriptsDir(Sender: TObject);
+var
+  dn: String;
+begin
+  dn := g_PickerEdit[PICK_PAPYRUS_DIR].Text;
+  if BrowseForFolder('Select the extracted Scripts.zip folder', dn, True) then
+    g_PickerEdit[PICK_PAPYRUS_DIR].Text := dn;
+end;
+
+
+//────────────────────────────────────────────────────────────────────────────
+// Row-state seeding helper (Rows 0, 1, 3 — simple copy-or-skip surfaces).
+//
+// Keep     → path locked to existing, Browse disabled.
+// Change   → path pre-populated, editable, Browse enabled.
+// Skip/None → path blank, editable.
+//────────────────────────────────────────────────────────────────────────────
+
+procedure SeedPickerSimpleRow(Idx: Integer; Detected, Keep, Change: Boolean; const ExistingPath: String);
+begin
+  if Detected and Keep then begin
+    g_PickerEdit[Idx].Text := ExistingPath;
+    g_PickerEdit[Idx].ReadOnly := True;
+    g_PickerBrowse[Idx].Enabled := False;
+  end else if Detected and Change then begin
+    g_PickerEdit[Idx].Text := ExistingPath;
+    g_PickerEdit[Idx].ReadOnly := False;
+    g_PickerBrowse[Idx].Enabled := True;
+  end else begin
+    g_PickerEdit[Idx].Text := '';
+    g_PickerEdit[Idx].ReadOnly := False;
+    g_PickerBrowse[Idx].Enabled := True;
+  end;
+end;
+
+
+//────────────────────────────────────────────────────────────────────────────
+// LayoutPickerPage — seeds all 4 rows from P3 detector globals on every
+// page entry. Called from CurPageChanged.
+//────────────────────────────────────────────────────────────────────────────
+
+procedure LayoutPickerPage();
+var
+  binaryPrior, jsonPrior: Boolean;
+  compilerReadOnly: Boolean;
+begin
+  // Rows 0 + 1 + 3 — simple copy-or-skip pattern.
+  SeedPickerSimpleRow(PICK_BSARCH,
+    g_Detected_bsarch, g_Keep_bsarch, g_Change_bsarch,
+    g_ExistingPath_bsarch);
+  SeedPickerSimpleRow(PICK_NIF_TOOL,
+    g_Detected_nif_tool, g_Keep_nif_tool, g_Change_nif_tool,
+    g_ExistingPath_nif_tool);
+  SeedPickerSimpleRow(PICK_PAPYRUS_DIR,
+    g_Detected_papyrus_scripts_dir, g_Keep_papyrus_scripts_dir, g_Change_papyrus_scripts_dir,
+    g_ExistingPath_papyrus_scripts_dir);
+
+  // Row 2 — PapyrusCompiler combined (binary + JSON + checkbox).
+  binaryPrior := g_Detected_papyrus_compiler_binary and (g_Keep_papyrus_compiler_binary or g_Change_papyrus_compiler_binary);
+  jsonPrior   := g_Detected_papyrus_compiler_json   and (g_Keep_papyrus_compiler_json   or g_Change_papyrus_compiler_json);
+
+  // Dual-detection warning visible only when BOTH surfaces were detected
+  // AND the user didn't choose Skip on both (i.e. at least one of them
+  // is still in play). Red label prompts user to pick one mode.
+  g_PickerDualWarning.Visible := binaryPrior and jsonPrior;
+
+  // Seed path + checkbox based on which surface "wins" the Row 2 slot.
+  // Priority: JSON (more explicit signal per P0 Q4) > binary > none.
+  if jsonPrior and g_Keep_papyrus_compiler_json then begin
+    g_PickerEdit[PICK_PAPYRUS_COMP].Text := g_ExistingPath_papyrus_compiler_json;
+    g_PickerJsonCheckbox.Checked := True;
+    compilerReadOnly := True;
+  end else if binaryPrior and g_Keep_papyrus_compiler_binary and (not jsonPrior) then begin
+    g_PickerEdit[PICK_PAPYRUS_COMP].Text := g_ExistingPath_papyrus_compiler_binary;
+    g_PickerJsonCheckbox.Checked := False;
+    compilerReadOnly := True;
+  end else if jsonPrior and g_Change_papyrus_compiler_json then begin
+    g_PickerEdit[PICK_PAPYRUS_COMP].Text := g_ExistingPath_papyrus_compiler_json;
+    g_PickerJsonCheckbox.Checked := True;
+    compilerReadOnly := False;
+  end else if binaryPrior and g_Change_papyrus_compiler_binary then begin
+    g_PickerEdit[PICK_PAPYRUS_COMP].Text := g_ExistingPath_papyrus_compiler_binary;
+    g_PickerJsonCheckbox.Checked := False;
+    compilerReadOnly := False;
+  end else begin
+    // No prior state OR Skip on everything. Blank editable; default copy mode.
+    g_PickerEdit[PICK_PAPYRUS_COMP].Text := '';
+    g_PickerJsonCheckbox.Checked := False;
+    compilerReadOnly := False;
+  end;
+  g_PickerEdit[PICK_PAPYRUS_COMP].ReadOnly := compilerReadOnly;
+  g_PickerBrowse[PICK_PAPYRUS_COMP].Enabled := not compilerReadOnly;
+  g_PickerJsonCheckbox.Enabled := True;
+end;
+
+
+//────────────────────────────────────────────────────────────────────────────
+// .NET 8 runtime hard-block is defined above (IsDotNet8Installed +
+// InitializeSetup). It remains unchanged in Phase 4.
+//
+// Wizard page lifecycle hooks (InitializeWizard / ShouldSkipPage /
+// CurPageChanged / NextButtonClick) combine P3's detector + P4's picker.
+//────────────────────────────────────────────────────────────────────────────
+
 procedure InitializeWizard();
 begin
+  // ── P3 detector page ──
   g_DetectorPage := CreateCustomPage(
     wpSelectDir,
     'Previous Claude MO2 install detected',
@@ -726,11 +1070,70 @@ begin
   CreateDetectorRow(SURF_PAPYRUS_COMPILER_BINARY, 'PapyrusCompiler (in-plugin binary)');
   CreateDetectorRow(SURF_PAPYRUS_COMPILER_JSON,   'PapyrusCompiler (JSON reference)');
   CreateDetectorRow(SURF_PAPYRUS_SCRIPTS_DIR,     'Papyrus Scripts sources directory');
+
+  // ── P4 picker page ──
+  g_PickerPage := CreateCustomPage(
+    g_DetectorPage.ID,
+    'Optional Tools',
+    'Point the installer at tools you want to enable. ' +
+    'Leave any field empty to skip — you can configure later by editing ' +
+    'tool_paths.json (Papyrus surfaces) or re-running this installer.'
+  );
+
+  CreatePickerRow(PICK_BSARCH, 0,
+    'BSArch.exe',
+    'Part of xEdit. Required for BSA/BA2 list / extract / validate tools.', 13);
+  g_PickerBrowse[PICK_BSARCH].OnClick := @OnBrowseBSArch;
+
+  CreatePickerRow(PICK_NIF_TOOL, 55,
+    'nif-tool.exe',
+    'From Spooky''s AutoMod Toolkit. Required for NIF texture / shader tools.', 13);
+  g_PickerBrowse[PICK_NIF_TOOL].OnClick := @OnBrowseNifTool;
+
+  CreatePickerRow(PICK_PAPYRUS_COMP, 110,
+    'PapyrusCompiler.exe',
+    'Ships with the Creation Kit. Required for compiling Papyrus scripts.', 13);
+  g_PickerBrowse[PICK_PAPYRUS_COMP].OnClick := @OnBrowsePapyrusCompiler;
+
+  // Row 2 checkbox — "Reference at runtime (don't copy)"
+  g_PickerJsonCheckbox := TNewCheckBox.Create(g_PickerPage);
+  g_PickerJsonCheckbox.Parent := g_PickerPage.Surface;
+  g_PickerJsonCheckbox.Caption := 'Reference this path at runtime (don''t copy into plugin folder)';
+  g_PickerJsonCheckbox.Top := ScaleY(164);
+  g_PickerJsonCheckbox.Left := ScaleX(12);
+  g_PickerJsonCheckbox.Width := g_PickerPage.SurfaceWidth - ScaleX(12);
+  g_PickerJsonCheckbox.Height := ScaleY(17);
+  g_PickerJsonCheckbox.Checked := False;
+
+  // Row 2 dual-detection warning (hidden by default; visible only when both
+  // binary AND JSON surfaces were detected pre-install).
+  g_PickerDualWarning := TNewStaticText.Create(g_PickerPage);
+  g_PickerDualWarning.Parent := g_PickerPage.Surface;
+  g_PickerDualWarning.Caption := 'Detected both a copied binary AND a JSON reference. Choose one mode.';
+  g_PickerDualWarning.Font.Color := $000000FF;
+  g_PickerDualWarning.AutoSize := False;
+  g_PickerDualWarning.Top := ScaleY(184);
+  g_PickerDualWarning.Left := ScaleX(12);
+  g_PickerDualWarning.Width := g_PickerPage.SurfaceWidth - ScaleX(12);
+  g_PickerDualWarning.Height := ScaleY(14);
+  g_PickerDualWarning.Visible := False;
+
+  // Row 3 uses DescHeight=32 to give the 2-line description breathing room at
+  // higher DPI scales. At 125-150% scaling the default dialog font line-height
+  // exceeds 13 px, so DescHeight=26 clips the second line under the edit field.
+  // 32 keeps total row-3 bottom at Y=272 — still well under Inno's ~305 px
+  // surface budget.
+  CreatePickerRow(PICK_PAPYRUS_DIR, 203,
+    'Papyrus Scripts sources directory',
+    'Extracted Scripts.zip (from Creation Kit). Required for compiling' + #13#10 +
+    'scripts that reference Actor / Quest / Debug / other base types.', 32);
+  g_PickerBrowse[PICK_PAPYRUS_DIR].OnClick := @OnBrowsePapyrusScriptsDir;
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
 var
   AnyDetected: Boolean;
+  I: Integer;
 begin
   Result := False;
   if PageID = g_DetectorPage.ID then begin
@@ -741,11 +1144,25 @@ begin
                    g_Detected[SURF_PAPYRUS_COMPILER_JSON] or
                    g_Detected[SURF_PAPYRUS_SCRIPTS_DIR];
     Result := not AnyDetected;
+
+    // Silent-mode safety net: the detector page never renders for user input
+    // in /SILENT or /VERYSILENT, so NextButtonClick never records selections.
+    // Default every detected surface to Keep so existing binaries/JSON values
+    // are preserved across silent upgrades (T5 / T6 scenarios).
+    if WizardSilent then begin
+      for I := 0 to NUM_SURFACES - 1 do begin
+        if g_Detected[I] then
+          g_Selection[I] := SEL_KEEP;
+      end;
+      SyncNamedGlobalsFromArrays();
+    end;
+
     if Result then
       Log('[v2.7 P3 detector] ShouldSkipPage = True (no surfaces detected; detector page hidden).')
     else
       Log('[v2.7 P3 detector] ShouldSkipPage = False (surfaces detected; detector page will render).');
   end;
+  // Picker page is never skipped — user may want to add tools to a fresh install.
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
@@ -756,6 +1173,43 @@ begin
     // a Back → edit → Forward navigation).
     RunDetection();
     LayoutDetectorPage();
+  end else if CurPageID = g_PickerPage.ID then begin
+    // Seed each row's initial state from P3 detector globals. The globals
+    // are populated either by RunDetection via ShouldSkipPage (auto-skip
+    // case) or by the detector page's NextButtonClick (surfaces detected).
+    LayoutPickerPage();
+  end;
+end;
+
+//────────────────────────────────────────────────────────────────────────────
+// Picker-page Next-button validation helpers
+//────────────────────────────────────────────────────────────────────────────
+
+function ValidatePickerFilePath(const Path, ExpectedName, SurfaceLabel: String): Boolean;
+var
+  actualName: String;
+begin
+  Result := True;
+  if Path = '' then Exit;
+  if not FileExists(Path) then begin
+    MsgBox(SurfaceLabel + ' path does not exist:' + #13#10 + Path + #13#10 + #13#10 + 'Pick a valid file or clear the field to skip this tool.', mbError, MB_OK);
+    Result := False;
+    Exit;
+  end;
+  actualName := ExtractFileName(Path);
+  if CompareText(actualName, ExpectedName) <> 0 then begin
+    if MsgBox('The file you picked for ' + SurfaceLabel + ' does not match the expected filename "' + ExpectedName + '":' + #13#10 + actualName + #13#10 + #13#10 + 'Continue anyway?', mbConfirmation, MB_YESNO) = IDNO then
+      Result := False;
+  end;
+end;
+
+function ValidatePickerDirPath(const Path, SurfaceLabel: String): Boolean;
+begin
+  Result := True;
+  if Path = '' then Exit;
+  if not DirExists(Path) then begin
+    MsgBox(SurfaceLabel + ' directory does not exist:' + #13#10 + Path + #13#10 + #13#10 + 'Pick a valid directory or clear the field to skip.', mbError, MB_OK);
+    Result := False;
   end;
 end;
 
@@ -791,55 +1245,170 @@ begin
       end;
     end;
     SyncNamedGlobalsFromArrays();
+  end else if CurPageID = g_PickerPage.ID then begin
+    // Silent mode (/SILENT, /VERYSILENT) can't surface MsgBoxes for
+    // validation failures — a stale JSON path would block an automated
+    // upgrade. Trust the caller's inputs and let CopyFile/JSON-write
+    // surface any remaining errors at install-step. Interactive mode
+    // runs the full validation so typos hit hard-error / soft-warning
+    // dialogs as designed.
+    if not WizardSilent then begin
+      if not ValidatePickerFilePath(g_PickerEdit[PICK_BSARCH].Text,       'BSArch.exe',          'BSArch') then begin Result := False; Exit; end;
+      if not ValidatePickerFilePath(g_PickerEdit[PICK_NIF_TOOL].Text,     'nif-tool.exe',        'nif-tool') then begin Result := False; Exit; end;
+      if not ValidatePickerFilePath(g_PickerEdit[PICK_PAPYRUS_COMP].Text, 'PapyrusCompiler.exe', 'PapyrusCompiler') then begin Result := False; Exit; end;
+      if not ValidatePickerDirPath(g_PickerEdit[PICK_PAPYRUS_DIR].Text,   'Papyrus Scripts sources') then begin Result := False; Exit; end;
+      g_PickerUserConfirmed := True;
+    end;
   end;
 end;
 
+
 //────────────────────────────────────────────────────────────────────────────
-// Post-install: report which user-provided tools are detected
+// Install-step wiring (v2.7.0 Phase 4)
+//
+// Semantics — final state is determined by the picker's Edit text values
+// (NOT the detector's Keep/Change/Skip selection globals). The detector
+// merely seeds the picker; what the user confirms in the picker is the
+// truth at install time.
+//
+// For each binary surface (BSArch / nif-tool / PapyrusCompiler-in-copy-mode):
+//   • Text empty                → delete any existing plugin-dir binary.
+//   • Text equals target path   → no-op (Keep case; source already here).
+//   • Text points elsewhere     → CopyFile(source, target, overwrite=True).
+// For PapyrusCompiler in JSON-reference mode (checkbox checked, non-empty):
+//   • Write JSON key + delete any existing plugin-dir binary.
+// For Papyrus Scripts dir:
+//   • No copy; JSON key only.
+// tool_paths.json is ALWAYS written at install-step end with schema_version=1
+// and null values for any unconfigured key.
+//
+// Post-install MsgBox summarises all 4 user-facing surfaces (BSArch,
+// nif-tool, PapyrusCompiler mode+path, Papyrus Scripts dir) + JSON path.
 //────────────────────────────────────────────────────────────────────────────
+
+function ApplyBinarySurface(const Source, Target, SurfaceLabel: String): String;
+var
+  parentDir: String;
+begin
+  if Source = '' then begin
+    if FileExists(Target) then begin
+      if DeleteFile(Target) then
+        Result := 'not configured (removed prior binary at ' + Target + ')'
+      else
+        Result := 'WARNING: could not remove prior binary at ' + Target;
+    end else
+      Result := 'not configured';
+    Exit;
+  end;
+  if CompareText(Source, Target) = 0 then begin
+    Result := Target + ' (kept existing)';
+    Exit;
+  end;
+  parentDir := ExtractFilePath(Target);
+  if (parentDir <> '') and (not DirExists(parentDir)) then begin
+    if not ForceDirectories(parentDir) then begin
+      Result := 'FAILED: could not create directory ' + parentDir;
+      Exit;
+    end;
+  end;
+  if CopyFile(Source, Target, False) then
+    Result := Target + ' (copied from ' + Source + ')'
+  else
+    Result := 'FAILED: could not copy ' + Source + ' -> ' + Target;
+end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  baseDir: String;
-  bsarchOk, niftoolOk, pscOk: Boolean;
+  pluginDir, toolsDir, jsonPath: String;
+  bsarchTarget, niftoolTarget, compilerTarget, compilerSubTarget: String;
+  bsarchSource, niftoolSource, compilerSource, scriptsDir: String;
+  useJsonReference: Boolean;
+  jsonCompilerPath, jsonScriptsDir: String;
+  statusBsarch, statusNiftool, statusCompiler, statusScripts: String;
+  writeOk: Boolean;
   msg: String;
 begin
-  if CurStep = ssPostInstall then begin
-    baseDir := ExpandConstant('{app}\plugins\' + '{#PluginFolder}' + '\tools\spooky-cli\tools');
-    bsarchOk := FileExists(baseDir + '\bsarch\bsarch.exe');
-    niftoolOk := FileExists(baseDir + '\nif-tool\nif-tool.exe');
-    pscOk := FileExists(baseDir + '\papyrus-compiler\PapyrusCompiler.exe');
+  if CurStep <> ssPostInstall then Exit;
 
-    msg := 'Claude MO2 installed to:' + #13#10;
-    msg := msg + ExpandConstant('{app}\plugins\' + '{#PluginFolder}') + #13#10 + #13#10;
-    msg := msg + 'Optional tools status:' + #13#10;
-    if bsarchOk then
-      msg := msg + '  [OK]  BSArch (BSA/BA2 tools enabled)' + #13#10
-    else begin
-      msg := msg + '  [--]  BSArch NOT installed' + #13#10;
-      msg := msg + '         Get it: https://github.com/TES5Edit/TES5Edit/releases' + #13#10;
-      msg := msg + '         (see tools/spooky-cli/tools/bsarch/README.txt)' + #13#10;
-    end;
-    if niftoolOk then
-      msg := msg + '  [OK]  nif-tool (NIF extras enabled)' + #13#10
-    else begin
-      msg := msg + '  [--]  nif-tool NOT installed' + #13#10;
-      msg := msg + '         Get it: https://github.com/SpookyPirate/spookys-automod-toolkit/releases' + #13#10;
-      msg := msg + '         (see tools/spooky-cli/tools/nif-tool/README.txt)' + #13#10;
-    end;
-    if pscOk then
-      msg := msg + '  [OK]  PapyrusCompiler (script compile enabled)' + #13#10
-    else begin
-      msg := msg + '  [--]  PapyrusCompiler NOT installed' + #13#10;
-      msg := msg + '         Requires the Creation Kit (free via Steam)' + #13#10;
-      msg := msg + '         https://store.steampowered.com/app/1946180/' + #13#10;
-    end;
-
-    msg := msg + #13#10 + 'Next steps:' + #13#10;
-    msg := msg + '  1. Launch Mod Organizer 2' + #13#10;
-    msg := msg + '  2. Tools > Start/Stop Claude Server' + #13#10;
-    msg := msg + '  3. Restart Claude Code once (so it discovers the MCP server)';
-
-    MsgBox(msg, mbInformation, MB_OK);
+  // Silent-mode fallback: if the user didn't interactively confirm the picker
+  // page, seed Edit fields from detector globals now. LayoutPickerPage takes
+  // Keep→ExistingPath / Skip→blank / None→blank, matching the semantics of
+  // the picker UI user would have seen. Interactive installs skip this call
+  // because g_PickerUserConfirmed was set in NextButtonClick(picker).
+  if not g_PickerUserConfirmed then begin
+    LayoutPickerPage();
+    Log('[v2.7 P4] Silent-mode LayoutPickerPage: seeded picker fields from detector globals.');
   end;
+
+
+  pluginDir         := ExpandConstant('{app}\plugins\' + '{#PluginFolder}');
+  toolsDir          := pluginDir + '\tools\spooky-cli\tools';
+  jsonPath          := pluginDir + '\tool_paths.json';
+
+  bsarchTarget      := toolsDir + '\bsarch\bsarch.exe';
+  niftoolTarget     := toolsDir + '\nif-tool\nif-tool.exe';
+  compilerTarget    := toolsDir + '\papyrus-compiler\PapyrusCompiler.exe';
+  compilerSubTarget := toolsDir + '\papyrus-compiler\Original Compiler\PapyrusCompiler.exe';
+
+  bsarchSource      := g_PickerEdit[PICK_BSARCH].Text;
+  niftoolSource     := g_PickerEdit[PICK_NIF_TOOL].Text;
+  compilerSource    := g_PickerEdit[PICK_PAPYRUS_COMP].Text;
+  scriptsDir        := g_PickerEdit[PICK_PAPYRUS_DIR].Text;
+  useJsonReference  := g_PickerJsonCheckbox.Checked;
+
+  // BSArch + nif-tool — simple copy-or-skip.
+  statusBsarch  := ApplyBinarySurface(bsarchSource,  bsarchTarget,  'BSArch');
+  statusNiftool := ApplyBinarySurface(niftoolSource, niftoolTarget, 'nif-tool');
+
+  // PapyrusCompiler — mode selection via checkbox.
+  if compilerSource = '' then begin
+    jsonCompilerPath := '';
+    if FileExists(compilerTarget)    then DeleteFile(compilerTarget);
+    if FileExists(compilerSubTarget) then DeleteFile(compilerSubTarget);
+    statusCompiler := 'not configured';
+  end else if useJsonReference then begin
+    jsonCompilerPath := compilerSource;
+    if FileExists(compilerTarget)    then DeleteFile(compilerTarget);
+    if FileExists(compilerSubTarget) then DeleteFile(compilerSubTarget);
+    statusCompiler := compilerSource + ' (JSON-reference)';
+  end else begin
+    jsonCompilerPath := '';
+    statusCompiler := ApplyBinarySurface(compilerSource, compilerTarget, 'PapyrusCompiler') + ' (copy mode)';
+  end;
+
+  // Papyrus Scripts dir — JSON-only.
+  if scriptsDir = '' then begin
+    jsonScriptsDir := '';
+    statusScripts := 'not configured';
+  end else begin
+    jsonScriptsDir := scriptsDir;
+    statusScripts := scriptsDir;
+  end;
+
+  // Write tool_paths.json (always, schema_version=1).
+  writeOk := WriteToolPathsJson(jsonPath, jsonCompilerPath, jsonScriptsDir);
+  if writeOk then
+    Log('[v2.7 P4] Wrote ' + jsonPath)
+  else
+    Log('[v2.7 P4] FAILED to write ' + jsonPath);
+
+  // Post-install summary MsgBox.
+  msg := 'Claude MO2 installed to:' + #13#10;
+  msg := msg + pluginDir + #13#10 + #13#10;
+  msg := msg + 'Optional tools configured:' + #13#10;
+  msg := msg + '  BSArch:          ' + statusBsarch  + #13#10;
+  msg := msg + '  nif-tool:        ' + statusNiftool + #13#10;
+  msg := msg + '  PapyrusCompiler: ' + statusCompiler + #13#10;
+  msg := msg + '  Papyrus Scripts: ' + statusScripts  + #13#10;
+  msg := msg + #13#10;
+  if writeOk then
+    msg := msg + 'Config file:     ' + jsonPath + #13#10
+  else
+    msg := msg + 'WARNING: failed to write config file at ' + jsonPath + #13#10;
+  msg := msg + #13#10 + 'Next steps:' + #13#10;
+  msg := msg + '  1. Launch Mod Organizer 2' + #13#10;
+  msg := msg + '  2. Tools > Start/Stop Claude Server' + #13#10;
+  msg := msg + '  3. Restart Claude Code once (so it discovers the MCP server)';
+
+  MsgBox(msg, mbInformation, MB_OK);
 end;

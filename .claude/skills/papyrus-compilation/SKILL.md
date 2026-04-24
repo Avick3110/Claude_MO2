@@ -11,9 +11,16 @@ description: Compile user-provided Papyrus source (.psc) into .pex using mo2_com
 
 ## Prerequisites
 
-Requires the Creation Kit installed and its `Scripts.zip` extracted into a mod MO2 sees, so the VFS includes base-Skyrim script headers (`Actor`, `Quest`, `Debug`, etc.). Without these, any user script that extends a base class or calls a base-Skyrim function will fail with "unknown type" errors.
+Requires the Creation Kit installed for `PapyrusCompiler.exe` and its base-Skyrim script headers (`Actor`, `Quest`, `Debug`, etc.). Without those headers any user script that extends a base class or calls a base-Skyrim function will fail with "unknown type" errors.
 
-The plugin invokes `PapyrusCompiler.exe` directly (not via Spooky's CLI), so a user-provided binary at `<plugin>/tools/spooky-cli/tools/papyrus-compiler/PapyrusCompiler.exe` is required.
+**`PapyrusCompiler.exe` discovery (priority order):**
+1. `tool_paths.json["papyrus_compiler"]` (JSON-reference mode — set via the v2.7.0 installer's PapyrusCompiler row with the "Reference this path at runtime" checkbox checked, or by editing the JSON directly).
+2. `<plugin>/tools/spooky-cli/tools/papyrus-compiler/PapyrusCompiler.exe` (copy mode — the v2.7.0 installer's default; can also be dropped manually).
+3. Legacy fallbacks at `%USERPROFILE%/Documents/tools/papyrus-compiler/...` for users who let Spooky auto-download the compiler.
+
+**Base-Skyrim script headers** (used by `_collect_header_dirs()` for `-i` import paths):
+- VFS-aggregated `Source/Scripts` dirs across all active mods (the standard path — extract `Scripts.zip` into a mod MO2 sees).
+- `tool_paths.json["papyrus_scripts_dir"]` is **additive** to the VFS list — point it at a non-MO2-managed extraction (e.g. `<Steam>\Skyrim Special Edition\Data\Source\Scripts`) to supplement VFS-derived dirs without setting up a Scripts mod.
 
 ## Notes
 

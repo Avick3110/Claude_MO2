@@ -1,6 +1,6 @@
 # Known Issues & Limitations
 
-Current as of v2.6.1. These are known limitations, not bugs — all reported bugs have been resolved. For the full version history see `mo2_mcp/CHANGELOG.md`.
+Current as of v2.7.0. These are known limitations, not bugs — all reported bugs have been resolved. For the full version history see `mo2_mcp/CHANGELOG.md`.
 
 ---
 
@@ -31,6 +31,23 @@ These are by design — we don't bundle proprietary or license-undecidable tools
 **Where to get it:** Shipped in Spooky's v1.11.1 release 7z. Place at `<plugin>/tools/spooky-cli/tools/nif-tool/nif-tool.exe`.
 
 **Impact:** Those two tools fail with guidance if the binary is missing. `mo2_nif_info` works without it (library-native via Spooky).
+
+---
+
+## User-provided tools — how they're configured
+
+Since v2.7.0, all four user-provided tool surfaces are configurable through the installer's Optional Tools wizard page. The page detects existing state on upgrade and pre-populates the Edit fields — leave a path as-is to keep, edit it to swap, clear it to skip. JSON-based config lives at `<plugin>/mo2_mcp/tool_paths.json` and survives uninstall.
+
+| Tool | How configured | Refresh method |
+|---|---|---|
+| BSArch | Installer picker; copied into plugin dir | Re-run installer with new binary |
+| nif-tool | Installer picker; copied into plugin dir | Re-run installer with new binary |
+| PapyrusCompiler | Installer picker (copy by default; JSON-reference via checkbox) | Re-run installer OR edit `tool_paths.json` |
+| Papyrus Scripts sources | `tool_paths.json` (additive to VFS) | Edit `tool_paths.json` + restart MO2 |
+
+**JSON-reference mode for PapyrusCompiler.** The installer's PapyrusCompiler row has a "Reference this path at runtime (don't copy into plugin folder)" checkbox. Checked: the installer writes the picked path into `tool_paths.json["papyrus_compiler"]` and the binary stays in place at the user's existing CK install. Unchecked (default): the picked binary is copied into `<plugin>/tools/spooky-cli/tools/papyrus-compiler/`. JSON-reference wins at runtime if both a copied binary and a JSON path are detected.
+
+**Papyrus Scripts sources is additive.** A configured `papyrus_scripts_dir` does not replace MO2's VFS-aggregated `findFiles` chain — it appends to it. Users who keep an extracted-`Scripts.zip` mod active in MO2 don't need to configure this at all; the JSON path supplements that VFS source for users who prefer to point at a non-MO2-managed extraction (e.g. directly at `<Steam>\Skyrim Special Edition\Data\Source\Scripts`).
 
 ---
 
@@ -73,6 +90,8 @@ Implicit-load plugins (Skyrim.esm, DLC ESMs, Creation Club masters listed in `<g
 - **External filesystem changes require a manual MO2 refresh.** MO2 does not auto-detect `rm`/`cp`/`mv` of plugin files made outside its API. After any external change to plugin files (via Bash, another tool, or manual intervention), press F5 in MO2 (or use the Refresh button) before calling `mo2_create_patch`, `mo2_build_record_index`, or any read-back against the affected plugin. Skipping this leaves orphans in `loadorder.txt` and new plugins may be missing from the index entirely — symptoms include read-back returning empty even with `include_disabled: true`. Prefer `mo2_write_file` (routes through MO2's output mod, detected immediately) over Bash for plugin-adjacent writes.
 - **Large modlists can exceed Claude Code's default MCP timeout on cold force-rebuild.** Claude Code's default MCP tool-call timeout is 60 s; `mo2_build_record_index(force_rebuild=true)` on ~3000+ plugin modlists takes roughly 76 s on reference hardware. The server-side build completes regardless — a follow-up `mo2_record_index_status` call will show `state: "done"` — but the client call appears to time out. **Set `MCP_TIMEOUT=120000` in your environment before launching Claude Code** to avoid the timeout entirely. Normal queries and cache-hit rebuilds stay well under the default.
 - **Some plugins are rejected by Mutagen's strict parser.** The record index builds by handing every plugin to Mutagen for enumeration. Mutagen is stricter than xEdit about format conformance — plugins with malformed records (e.g. `DATA` subrecord length mismatches) can scan clean in xEdit but fail in Mutagen. Those plugins are absent from the record index; `mo2_record_index_status` lists them in the `errors` array. If a plugin you care about doesn't appear in query results, run xEdit's **Check for Errors** on it to confirm the state, then have the mod author fix it (or auto-clean via xEdit if feasible). Two plugins in the reference test modlist (`TasteOfDeath_Addon_Dialogue.esp`, `ksws03_quest.esp`) are known to hit this — ~0.06% scan loss on a 3,384-plugin load order.
+- **Inno registry hygiene on multi-instance installs.** v2.7.0's installer uses a static `AppId` and `CreateUninstallRegKey=yes`, so each install to a different MO2 directory writes the same HKCU uninstall key. The most-recent install's path wins for "uninstall this" lookups. For users with one MO2 install: invisible. For users with multiple MO2 instances installing the plugin to each: a clean uninstall reads the latest install path, not necessarily the one being uninstalled. Workaround: uninstall via the MO2-instance-specific `unins000.exe` directly (the per-install copy in each plugin dir always points at the right target). Permanent fix candidate for v2.8: dynamic `AppId` per install path so each install gets its own registry entry.
+- **Back-navigation from Dir → Optional Tools preserves user edits.** v2.7.0's Optional Tools picker page seeds its Edit fields once on first entry and keeps them populated through Back-navigation. If you click Back from the Optional Tools page, change the target MO2 directory, then click Next: the picker's Edit values stay populated from the original detection — they don't re-detect against the new target dir. This is intentional (edit survival across Back is the priority); to get fresh detection against a new target, Cancel and restart the installer.
 
 ---
 
@@ -127,3 +146,5 @@ These are reported or reportable to Spooky upstream; our wrappers already work a
 | `mo2_build_record_index` fire-and-poll protocol required every caller to implement a polling loop that was easy to misuse | v2.6.0 (now blocking; returns full status dict) |
 | Event-driven index invalidation (`onPluginStateChanged` full-rebuild fallback, debounced `onRefreshed` rebuild, `trigger_refresh_and_wait_for_index`) accumulated edge cases and silent stalls | v2.6.0 (replaced with lazy build + per-query mtime freshness check) |
 | `_find_papyrus_compiler()` didn't check `<plugin>/tools/spooky-cli/tools/papyrus-compiler/` — the path the installer's README stub directs users to populate — so `mo2_compile_script` returned "PapyrusCompiler.exe not found" for users who followed the documented placement | v2.6.1 (in-plugin paths added as highest-priority search entries) |
+| `UsePreviousAppDir=yes` made the installer silently default the MO2 target dir to the last-used path on reinstall — users with multiple MO2 instances could land in the wrong one without noticing | v2.7.0 (`UsePreviousAppDir=no`) |
+| .NET 8 Runtime was a soft-block — `MB_YESNOCANCEL`'s `IDNO` branch let install continue without it, producing confusing runtime errors at first patch / record-detail call | v2.7.0 (single-button `MB_OK` + unconditional `ShellExec` to download URL + unconditional `Result := False`) |

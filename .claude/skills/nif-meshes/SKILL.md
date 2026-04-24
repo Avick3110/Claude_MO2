@@ -17,6 +17,6 @@ description: Inspect NIF mesh files via mo2_nif_info (format/version metadata), 
 
 ## Notes
 
-- `nif-tool.exe` is a Rust binary from the Spooky team; its license is undetermined, so we don't redistribute. Users extract it from [Spooky's v1.11.1 release](https://github.com/SpookyPirate/spookys-automod-toolkit/releases) and place at the path above.
+- `nif-tool.exe` is a Rust binary from the Spooky team; its license is undetermined, so we don't redistribute. Users extract it from [Spooky's v1.11.1 release](https://github.com/SpookyPirate/spookys-automod-toolkit/releases), then either point the v2.7.0 installer's Optional Tools page at it (the installer copies it into the plugin dir for you) or drop it manually at the path above.
 - NIF paths are VFS-resolved — pass game-relative paths (e.g., `meshes/armor/iron/cuirass.nif`).
 - `mo2_nif_info` still works even when `nif-tool.exe` is missing — it's the only library-native NIF operation.

@@ -4,6 +4,50 @@ All plugin changes are made in the Dev Build copy first. Once tested and stable,
 
 ---
 
+## v2.7.0 — 2026-04-24
+
+Installer overhaul. Four user-provided tool surfaces (BSArch, nif-tool, PapyrusCompiler, Papyrus Scripts sources) are now configured through a single installer wizard page — no more silent README stubs. The path-persistence regression that landed users in the wrong MO2 instance on reinstall is fixed. .NET 8 Runtime is now a hard install gate.
+
+### Mid-plan architectural simplification
+
+The original v2.7.0 design called for a separate detector wizard page with Keep/Change/Skip radios per tool surface, feeding a downstream picker page. During matrix testing, two structural bugs surfaced (shared Windows radio group across rows; selection state reset on re-entry). Rather than patch them, the design collapsed: detector page removed, picker page handles detection + Keep/Change/Skip via Edit-field text semantics — leave path = Keep, edit path = Change, clear field = Skip. One configuration page instead of two. ~263 lines of installer Pascal deleted, two structural bugs eliminated.
+
+### Changed — installer
+
+- **Path persistence: `UsePreviousAppDir=no`.** The installer's directory-selection page now defaults to `{autopf}\Mod Organizer 2` on every run instead of the last-used path. Users with multiple MO2 instances no longer risk landing the plugin in the wrong instance by overlooking a silent default. Existing `NextButtonClick` validation (target dir must contain `ModOrganizer.exe`) is unchanged.
+- **.NET 8 Runtime is a hard install gate.** The v2.6.x `MB_YESNOCANCEL` MsgBox in `InitializeSetup()` had an `IDNO` fall-through that let install continue without .NET 8, producing confusing runtime errors at first patch or record-detail call. v2.7.0 replaces it with a single-button `MB_OK` MsgBox + unconditional `ShellExec` to Microsoft's .NET 8 download page + unconditional `Result := False`. No continue-anyway branch.
+- **Optional Tools picker page.** A new wizard page after the directory-select step prompts for four tool surfaces:
+  - **BSArch.exe** — copied into `<plugin>/tools/spooky-cli/tools/bsarch/bsarch.exe`.
+  - **nif-tool.exe** — copied into `<plugin>/tools/spooky-cli/tools/nif-tool/nif-tool.exe`.
+  - **PapyrusCompiler.exe** — by default copied into `<plugin>/tools/spooky-cli/tools/papyrus-compiler/`. A checkbox switches to JSON-reference mode, where the path is recorded in `tool_paths.json["papyrus_compiler"]` and the binary stays in place at the user's existing Creation Kit install.
+  - **Papyrus Scripts sources directory** — recorded in `tool_paths.json["papyrus_scripts_dir"]`. Additive to MO2's VFS-aggregated `findFiles` chain; a configured dir supplements VFS-derived script dirs rather than replacing them.
+
+  Empty path = Skip (no copy; existing plugin-dir binary deleted). Pre-populated path on upgrade = Keep (no-op). Edited path = Change (copy new source over target). The page seeds itself once on first entry from the live install state — Back-navigation preserves user edits.
+- **Filename-mismatch soft warning.** If a picker target's filename doesn't match the surface (e.g. user picks `xEdit64.exe` for the BSArch row), a Yes/No dialog surfaces before overriding. Yes honors the override; the file copies to the surface's canonical name (e.g. `bsarch.exe`) regardless of source name.
+- **`tool_paths.json` survives uninstall.** The file is explicitly omitted from `[UninstallDelete]` so user configuration persists across reinstalls.
+
+### Changed — Python config layer
+
+- **New module `mo2_mcp/tool_paths.py`.** Loads `<plugin>/mo2_mcp/tool_paths.json`, validates `schema_version: 1`, and exposes `get(tool)` for `papyrus_compiler` / `papyrus_scripts_dir`. Cache is process-lifetime; MO2 restart picks up edits made outside the installer. Schema-version mismatch, malformed JSON, and on-disk-missing paths all log a warning and surface as `None` to callers — Claude can prompt the user at invocation time.
+- **`_find_papyrus_compiler()` priority 0 = JSON override.** When `tool_paths.json["papyrus_compiler"]` is set and points at a real file, it wins over the plugin-dir + `%USERPROFILE%` fallback chain.
+- **`_collect_header_dirs()` additive append.** When `tool_paths.json["papyrus_scripts_dir"]` is set, the configured dir appends to the existing VFS-aggregated list (deduplicated against the existing seen set). VFS-derived headers still drive the import chain; the JSON-configured dir supplements them with base-Skyrim sources for users who don't keep an extracted-`Scripts.zip` mod active in MO2.
+
+### Not changed
+
+- MCP tool count or interface — 29 tools, identical surface.
+- `mutagen-bridge-path` and `spooky-cli-path` MO2 plugin settings — unchanged. JSON config is additive for the four new surfaces; does not retire existing setting-based overrides.
+- README stubs at `<plugin>/tools/spooky-cli/tools/{bsarch,nif-tool,papyrus-compiler}/README.txt` — preserved as manual-placement guidance for users who prefer to drop binaries themselves rather than re-run the installer.
+- Record index, bridge, or any non-Papyrus runtime behavior.
+
+### Migration
+
+- **Re-run the v2.7.0 installer.** On upgrade from v2.6.x, the picker page detects existing plugin-dir binaries (BSArch / nif-tool / PapyrusCompiler) and pre-populates the Edit fields with their target paths. Default action is Keep (leave path as-is = no-op). To swap a binary, edit the path; to drop a binary, clear the field. Empty fields skip — no binary written, any pre-existing binary at that target is deleted.
+- **`tool_paths.json` is new in v2.7.0.** v2.6.x users have no JSON file. The installer creates it on first v2.7.0 run with `schema_version: 1` and both keys initially null (or populated if the picker fields were set). Edit it later to add a Papyrus Scripts sources path or to flip PapyrusCompiler between copy and JSON-reference modes.
+- **Multiple MO2 instances.** Inno's static `AppId` plus `CreateUninstallRegKey=yes` means each install to a different MO2 directory writes the same HKCU uninstall key — most-recent install wins for "uninstall this" lookups. For users with one MO2 install this is invisible. For users with multiple instances who install the plugin to each, uninstall via the MO2-instance-specific `unins000.exe` directly to remove the right copy. Dynamic AppId per install path is a candidate fix for v2.8.
+- **No mandatory action for users who don't want the new pickers.** v2.7.0's Python graceful-degrades to v2.6.1 behavior when `tool_paths.json` is absent. The JSON-config code path is additive — existing v2.6.1 fallback chains are unchanged.
+
+---
+
 ## v2.6.1 — 2026-04-24
 
 Hotfix for a silent failure in `mo2_compile_script` where `PapyrusCompiler.exe` wasn't found at the installer-shipped path the `README_PAPYRUSCOMPILER.txt` stub directs users to populate.

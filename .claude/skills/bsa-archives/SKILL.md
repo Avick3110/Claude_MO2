@@ -4,7 +4,7 @@ description: List, extract, and validate BSA/BA2 archives via mo2_list_bsa, mo2_
 
 # BSA / BA2 Archives
 
-All four tools shell out through Spooky's CLI to `BSArch.exe`. BSArch is user-provided — extract from xEdit's release archive and place at `<plugin>/tools/spooky-cli/tools/bsarch/bsarch.exe`.
+All four tools shell out through Spooky's CLI to `BSArch.exe`. BSArch is user-provided — extract from xEdit's release archive, then either point the v2.7.0 installer's Optional Tools page at it (the installer copies it into the plugin dir for you) or drop it manually at `<plugin>/tools/spooky-cli/tools/bsarch/bsarch.exe`.
 
 **`mo2_list_bsa`** — List contents of an archive.
 - Params: `archive_path`, `filter` (glob, optional), `limit` (default 500, 0 for all)

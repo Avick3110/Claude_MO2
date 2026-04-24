@@ -18,7 +18,7 @@
 ; 5. Reports which optional tools are detected post-install.
 
 #define AppName "Claude MO2"
-#define AppVersion "2.6.1"
+#define AppVersion "2.7.0"
 #define AppPublisher "Aaronavich"
 #define AppURL "https://github.com/Aaronavich/claude-mo2"
 #define PluginFolder "mo2_mcp"
@@ -36,7 +36,7 @@ VersionInfoVersion={#AppVersion}
 ; User selects their MO2 root folder. Plugin files go under {app}\plugins\mo2_mcp\
 DefaultDirName={autopf}\Mod Organizer 2
 DirExistsWarning=no
-UsePreviousAppDir=yes
+UsePreviousAppDir=no
 AppendDefaultDirName=no
 
 ; Privileges: default to lowest; user can elevate via dialog if they chose a privileged dir.
@@ -174,23 +174,29 @@ end;
 
 function InitializeSetup(): Boolean;
 var
-  response: Integer;
   resultCode: Integer;
 begin
   Result := True;
   if not IsDotNet8Installed() then begin
-    response := MsgBox(
-      'The .NET 8 Runtime is required by Claude MO2''s ESP patching and other .NET-backed tools.' + #13#10 + #13#10 +
-      'It was not detected on your system. Would you like to open the Microsoft download page now?' + #13#10 + #13#10 +
-      '(You can continue without it, but those tools will not work until you install .NET 8.)',
-      mbConfirmation, MB_YESNOCANCEL);
-    if response = IDYES then begin
-      ShellExec('open', 'https://dotnet.microsoft.com/en-us/download/dotnet/8.0', '', '', SW_SHOW, ewNoWait, resultCode);
-      Result := False;  // Abort install — user should restart installer after installing .NET 8
-    end else if response = IDCANCEL then begin
-      Result := False;
-    end;
-    // IDNO falls through — continue install with warning accepted
+    // Hard-block: .NET 8 is required. No continue-anyway branch.
+    // mbCriticalError reinforces the hard-block framing; MB_OK has a single
+    // button with no fall-through. ShellExec runs unconditionally so the
+    // user's browser lands on the download page regardless of how they
+    // dismiss the dialog.
+    MsgBox(
+      '.NET 8 Runtime is required.' + #13#10 + #13#10 +
+      'Claude MO2 needs the .NET 8 Runtime for ESP patching and other .NET-backed tools.' + #13#10 +
+      'It was not detected on your system.' + #13#10 + #13#10 +
+      'Click OK to open the Microsoft download page in your browser, then re-run this installer after installing .NET 8.' + #13#10 + #13#10 +
+      'Download URL:' + #13#10 +
+      'https://dotnet.microsoft.com/en-us/download/dotnet/8.0',
+      mbCriticalError,
+      MB_OK
+    );
+    ShellExec('open',
+      'https://dotnet.microsoft.com/en-us/download/dotnet/8.0',
+      '', '', SW_SHOW, ewNoWait, resultCode);
+    Result := False;
   end;
 end;
 

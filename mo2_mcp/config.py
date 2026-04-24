@@ -6,7 +6,7 @@ DEFAULT_LOG_LEVEL = "info"
 DEFAULT_AUTO_START = False
 
 PLUGIN_NAME = "MO2 MCP Server"
-PLUGIN_VERSION = (2, 6, 1)
+PLUGIN_VERSION = (2, 7, 0)
 PLUGIN_AUTHOR = "Aaronavich"
 PLUGIN_DESCRIPTION = (
     "MCP server plugin that connects AI assistants to MO2 — "

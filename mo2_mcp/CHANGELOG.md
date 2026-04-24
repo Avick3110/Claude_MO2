@@ -4,6 +4,26 @@ All plugin changes are made in the Dev Build copy first. Once tested and stable,
 
 ---
 
+## v2.6.1 — 2026-04-24
+
+Hotfix for a silent failure in `mo2_compile_script` where `PapyrusCompiler.exe` wasn't found at the installer-shipped path the `README_PAPYRUSCOMPILER.txt` stub directs users to populate.
+
+### Fixed
+
+- **`_find_papyrus_compiler()` now checks `<plugin>/tools/spooky-cli/tools/papyrus-compiler/`** before falling back to Spooky's `%USERPROFILE%/Documents/tools/papyrus-compiler/` auto-download paths. Both the flat `PapyrusCompiler.exe` layout (what the README stub directs users to produce when they copy CK's `Papyrus Compiler` folder contents into the placeholder dir) and the `Original Compiler/PapyrusCompiler.exe` sub-layout (what users get if they copy Spooky's auto-downloaded tree into the plugin dir) resolve. Prior to v2.6.1 the discovery function only checked the `%USERPROFILE%` variants — so users who followed the installer's README and placed the CK-extracted compiler into the plugin dir got `"PapyrusCompiler.exe not found"` errors at runtime even though the binary was sitting at the documented path.
+
+### Not changed
+
+- MCP tool count or interface — 29 tools, identical surface.
+- Record index, bridge, or any non-Papyrus code path.
+- Installer layout — the `<plugin>/tools/spooky-cli/tools/papyrus-compiler/` placeholder dir and `README_PAPYRUSCOMPILER.txt` stub are already shipped in v2.6.0; only the Python-side discovery changes in v2.6.1.
+
+### Migration
+
+No action required. The fix is Python-only; v2.6.1's installer is byte-identical to v2.6.0's in payload, apart from the version string and the one-line Python change. Users who encountered `"PapyrusCompiler.exe not found"` in v2.6.0 despite placing the compiler at the documented path will see compile work correctly in v2.6.1. Users who had the compiler at one of the `%USERPROFILE%/Documents/tools/papyrus-compiler/` fallback paths see no behavior change.
+
+---
+
 ## v2.6.0 — 2026-04-23
 
 Upgrade path: v2.5.5 (last public) → v2.6.0. v2.5.6 and v2.5.7 were local-only builds whose content rolls into this release; their individual entries are preserved below as historical record.

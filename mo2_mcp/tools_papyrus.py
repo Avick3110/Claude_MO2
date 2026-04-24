@@ -43,12 +43,34 @@ from .config import PLUGIN_NAME
 def _find_papyrus_compiler() -> Path | None:
     """Locate PapyrusCompiler.exe.
 
-    Spooky's `papyrus download` drops the Bethesda Original Compiler under
-    %USERPROFILE%\\Documents\\tools\\papyrus-compiler\\papyrus-compiler\\Original Compiler\\.
-    We check that (plus a couple of near-variants).
+    Search order (highest priority first):
+    1. <plugin>/tools/spooky-cli/tools/papyrus-compiler/PapyrusCompiler.exe
+       (flat CK-extraction layout — what the installer's README stub directs
+       users to after extracting Creation Kit's "Papyrus Compiler" folder
+       contents into the installer-shipped placeholder dir).
+    2. <plugin>/tools/spooky-cli/tools/papyrus-compiler/Original Compiler/PapyrusCompiler.exe
+       (Spooky download layout preserved — users who copy Spooky's auto-
+       downloaded tree into the plugin dir keep the "Original Compiler"
+       subfolder).
+    3-5. %USERPROFILE%\\Documents\\tools\\papyrus-compiler\\... variants
+       (Spooky's `papyrus download` auto-download locations; kept for users
+       who haven't copied the compiler into the plugin dir).
+
+    v2.6.1: in-plugin paths were added. Prior versions only checked the
+    %USERPROFILE% variants, so users who followed the README stub and
+    placed the compiler in the installer-shipped dir got "not found"
+    errors at runtime despite the binary being present at the documented
+    path.
     """
+    plugin_dir = Path(__file__).resolve().parent
     home = Path(os.environ.get("USERPROFILE", os.path.expanduser("~")))
     candidates = [
+        # In-plugin locations (installer-shipped placeholder dir; the path
+        # the README stub directs users to populate). Checked first so users
+        # who follow the documented workflow land here.
+        plugin_dir / "tools" / "spooky-cli" / "tools" / "papyrus-compiler" / "PapyrusCompiler.exe",
+        plugin_dir / "tools" / "spooky-cli" / "tools" / "papyrus-compiler" / "Original Compiler" / "PapyrusCompiler.exe",
+        # %USERPROFILE% Spooky-download fallbacks.
         home / "Documents" / "tools" / "papyrus-compiler" / "papyrus-compiler" / "Original Compiler" / "PapyrusCompiler.exe",
         home / "Documents" / "tools" / "papyrus-compiler" / "Original Compiler" / "PapyrusCompiler.exe",
         home / "Documents" / "tools" / "papyrus-compiler" / "PapyrusCompiler.exe",

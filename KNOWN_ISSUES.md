@@ -1,6 +1,6 @@
 # Known Issues & Limitations
 
-Current as of v2.6.0. These are known limitations, not bugs — all reported bugs have been resolved. For the full version history see `mo2_mcp/CHANGELOG.md`.
+Current as of v2.6.1. These are known limitations, not bugs — all reported bugs have been resolved. For the full version history see `mo2_mcp/CHANGELOG.md`.
 
 ---
 
@@ -126,3 +126,4 @@ These are reported or reportable to Spooky upstream; our wrappers already work a
 | Freshly-written patches couldn't be read back until the user ticked the MO2 checkbox — `mo2_record_detail` returned "Record not found" even with `include_disabled: true` | v2.6.0 (`mo2_create_patch` waits on MO2's `onRefreshed` signal before returning) |
 | `mo2_build_record_index` fire-and-poll protocol required every caller to implement a polling loop that was easy to misuse | v2.6.0 (now blocking; returns full status dict) |
 | Event-driven index invalidation (`onPluginStateChanged` full-rebuild fallback, debounced `onRefreshed` rebuild, `trigger_refresh_and_wait_for_index`) accumulated edge cases and silent stalls | v2.6.0 (replaced with lazy build + per-query mtime freshness check) |
+| `_find_papyrus_compiler()` didn't check `<plugin>/tools/spooky-cli/tools/papyrus-compiler/` — the path the installer's README stub directs users to populate — so `mo2_compile_script` returned "PapyrusCompiler.exe not found" for users who followed the documented placement | v2.6.1 (in-plugin paths added as highest-priority search entries) |

@@ -15,7 +15,7 @@ The installer:
 After install:
 1. Launch Mod Organizer 2
 2. Tools → Start/Stop Claude Server
-3. Restart Claude Code once so it discovers the MCP server
+3. Restart Claude Code once on first install so it discovers the MCP server. Not required on subsequent MO2 restarts — CC reconnects to the same HTTP URL automatically.
 
 **SmartScreen warning:** the installer is unsigned (free OSS project, no EV cert budget). Click "More info" → "Run anyway" to proceed.
 

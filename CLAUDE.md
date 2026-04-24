@@ -11,7 +11,7 @@ The MCP server runs inside MO2. Start it from Tools > Start/Stop Claude Server. 
 If the server isn't responding, check in order:
 1. Is the server running in MO2? (Tools menu should show it as active)
 2. Does `~/.claude.json` contain an `mcpServers.mo2` entry? (The plugin writes this automatically)
-3. Did you restart Claude Code after the first server start? (Required once for initial discovery)
+3. Did you restart Claude Code after the plugin's very first server start? (Required once — the first time `~/.claude.json` gains the `mcpServers.mo2` entry. Subsequent MO2 restarts do not require CC to restart; CC reconnects to the same HTTP URL automatically.)
 4. Call `mo2_ping` to verify the connection.
 
 ## What You Can Do

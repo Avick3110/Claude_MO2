@@ -34,6 +34,7 @@ from PyQt6.QtCore import qInfo, qWarning
 
 import mobase
 
+from . import tool_paths
 from .config import PLUGIN_NAME
 
 
@@ -44,6 +45,11 @@ def _find_papyrus_compiler() -> Path | None:
     """Locate PapyrusCompiler.exe.
 
     Search order (highest priority first):
+    0. tool_paths.json `papyrus_compiler` key (v2.7.0+). Lets users point at
+       an existing Creation Kit install rather than copying
+       PapyrusCompiler.exe into the plugin tree. Skipped if the JSON is
+       absent, the key is null, or the configured path is not an existing
+       file on disk (warnings logged by `tool_paths.get`).
     1. <plugin>/tools/spooky-cli/tools/papyrus-compiler/PapyrusCompiler.exe
        (flat CK-extraction layout — what the installer's README stub directs
        users to after extracting Creation Kit's "Papyrus Compiler" folder
@@ -56,12 +62,24 @@ def _find_papyrus_compiler() -> Path | None:
        (Spooky's `papyrus download` auto-download locations; kept for users
        who haven't copied the compiler into the plugin dir).
 
-    v2.6.1: in-plugin paths were added. Prior versions only checked the
-    %USERPROFILE% variants, so users who followed the README stub and
-    placed the compiler in the installer-shipped dir got "not found"
-    errors at runtime despite the binary being present at the documented
-    path.
+    v2.6.1: in-plugin paths were added (priorities 1-2). Prior versions only
+    checked the %USERPROFILE% variants, so users who followed the README
+    stub and placed the compiler in the installer-shipped dir got "not
+    found" errors at runtime despite the binary being present at the
+    documented path.
+
+    v2.7.0: priority 0 JSON override added. When the configured path points
+    at a valid PapyrusCompiler.exe, it wins over every in-plugin and
+    %USERPROFILE% fallback. When it doesn't resolve (key missing, null, or
+    path-not-file), discovery falls through to priorities 1-5 exactly as
+    in v2.6.1.
     """
+    override = tool_paths.get("papyrus_compiler")
+    if override:
+        override_path = Path(override)
+        if override_path.is_file():
+            return override_path
+
     plugin_dir = Path(__file__).resolve().parent
     home = Path(os.environ.get("USERPROFILE", os.path.expanduser("~")))
     candidates = [
@@ -265,6 +283,16 @@ def _handle_compile(organizer, args: dict) -> str:
     # collect every unique parent dir of .psc files in the VFS scripts/Source
     # tree and feed them all in.
     def _collect_header_dirs(vfs_dir: str) -> list[str]:
+        """Return unique parent dirs of .psc files across MO2's VFS merge.
+
+        v2.7.0: if `tool_paths.json` has a `papyrus_scripts_dir` configured,
+        it is additively appended to the VFS-derived list (never replaces
+        it). The existing `seen` set provides dedupe — a configured dir
+        that overlaps a VFS-found dir does not double-count in the
+        -import= chain. Honors the invariant that Papyrus imports span
+        multiple contributing mods; the JSON surface supplements but does
+        not supplant MO2's VFS aggregation.
+        """
         vfs_norm = vfs_dir.replace("/", "\\").strip("\\")
         dirs: list[str] = []
         seen = set()
@@ -280,11 +308,28 @@ def _handle_compile(organizer, args: dict) -> str:
             if os.path.isdir(parent):
                 seen.add(key)
                 dirs.append(parent)
-        # Single-dir fallback for configs where resolvePath does work on dirs
+        # Single-dir fallback for configs where resolvePath does work on dirs.
+        # Also populates `seen` so the v2.7.0 additive-append below can
+        # dedup against it (important when the configured scripts dir
+        # happens to resolve to the same folder as resolvePath).
         if not dirs:
             candidate = organizer.resolvePath(vfs_norm)
             if candidate and os.path.isdir(candidate):
+                seen.add(os.path.normpath(candidate).lower())
                 dirs.append(candidate)
+        # v2.7.0: additively append papyrus_scripts_dir from tool_paths.json
+        # if configured, exists as a directory, and isn't already covered
+        # by the VFS-aggregated list. Never replaces the VFS contributions
+        # — the configured dir supplements them so base-Skyrim imports
+        # (Actor, Quest, Debug, ...) resolve alongside mod-provided
+        # extensions.
+        scripts_override = tool_paths.get("papyrus_scripts_dir")
+        if scripts_override:
+            scripts_norm = os.path.normpath(scripts_override)
+            scripts_key = scripts_norm.lower()
+            if scripts_key not in seen and os.path.isdir(scripts_norm):
+                seen.add(scripts_key)
+                dirs.append(scripts_norm)
         return dirs
 
     header_dirs: list[str] = []

@@ -153,14 +153,30 @@ Type: files; Name: "{app}\plugins\{#PluginFolder}\.record_index.pkl"
 
 [Code]
 //════════════════════════════════════════════════════════════════════════════
-// v2.7.0 Phase 3 — Previous-install detector page
+// v2.7.0 Phase 3+P4 fixup — Single-page detection + configuration
 //
-// After the directory-select page, detect five tool surfaces at the chosen
-// MO2 target and render a conditional wizard page with Keep/Change/Skip
-// radios per detected surface. Selections recorded on Next are consumed by
-// Phase 4's Optional Tools picker page.
+// Originally P3 added a separate detector page (Keep/Change/Skip radios per
+// detected surface) whose selections seeded P4's picker page. P5 surfaced
+// two bugs in that design:
+//   1. All 9 radios (3 per row × 3 rows) shared one Windows radio group via
+//      their common Parent, so only one radio across the entire page could
+//      be checked at a time — per-row selection was structurally impossible.
+//   2. CurPageChanged(detector) unconditionally re-ran RunDetection, which
+//      reset g_Selection[] to SEL_NONE every time the user entered the page
+//      (including Back-nav), wiping their prior clicks.
 //
-// Surfaces (indexed 0..4):
+// The fix [v2.7 P3+P4 fixup] removes the detector page entirely. The picker
+// page now handles the whole flow: RunDetection runs on the picker's first
+// CurPageChanged entry, its output (g_Detected[] + g_ExistingPath[]) seeds
+// the Edit fields, and user-confirmed Edit text alone drives install-step
+// actions. Keep/Change/Skip semantics come for free from the Edit field:
+//
+//   • Leave path as-is        = Keep (install-step: no-op)
+//   • Edit the path           = Change (install-step: copy new path over target)
+//   • Clear the field         = Skip / uninstall that tool (install-step: delete)
+//
+// Surfaces (indexed 0..4) — used internally by RunDetection; picker rows
+// map a subset of these for display:
 //   0  bsarch                   — <target>\plugins\mo2_mcp\tools\
 //                                   spooky-cli\tools\bsarch\bsarch.exe
 //   1  nif_tool                 — ...\spooky-cli\tools\nif-tool\nif-tool.exe
@@ -176,12 +192,12 @@ Type: files; Name: "{app}\plugins\{#PluginFolder}\.record_index.pkl"
 // ReadToolPathsJson helper (P0 Q2 locked signature). Schema mismatch
 // (schema_version != 1) or malformed JSON → treat both JSON surfaces as
 // absent + log to install log; the wizard is never blocked.
-//
-// All globals are declared at unit scope so Phase 4's picker page can
-// read them directly.
 //════════════════════════════════════════════════════════════════════════════
 
 const
+  // Surface indices — used internally by RunDetection to populate the
+  // g_Detected[] + g_ExistingPath[] arrays. The picker page consumes
+  // those arrays directly via LayoutPickerPage.
   SURF_BSARCH                  = 0;
   SURF_NIF_TOOL                = 1;
   SURF_PAPYRUS_COMPILER_BINARY = 2;
@@ -189,59 +205,10 @@ const
   SURF_PAPYRUS_SCRIPTS_DIR     = 4;
   NUM_SURFACES                 = 5;
 
-  SEL_NONE   = -1;
-  SEL_KEEP   = 0;
-  SEL_CHANGE = 1;
-  SEL_SKIP   = 2;
-
 var
-  // Detector page handle (set in InitializeWizard).
-  g_DetectorPage: TWizardPage;
-
-  // Per-surface internal state driving the detector page's UI.
+  // RunDetection's output — populated on picker-page first entry.
   g_Detected:     array[0..4] of Boolean;
   g_ExistingPath: array[0..4] of String;
-  g_Selection:    array[0..4] of Integer;
-
-  // Row-control handles (created once in InitializeWizard, shown/hidden
-  // and repositioned per-navigation in LayoutDetectorPage).
-  g_Label_Title:   array[0..4] of TNewStaticText;
-  g_Label_Path:    array[0..4] of TNewStaticText;
-  g_Radio_Keep:    array[0..4] of TNewRadioButton;
-  g_Radio_Change:  array[0..4] of TNewRadioButton;
-  g_Radio_Skip:    array[0..4] of TNewRadioButton;
-
-  // ── Named globals exposed for Phase 4 consumption ──
-  // Populated by SyncNamedGlobalsFromArrays, called from RunDetection
-  // (so they're fresh even when ShouldSkipPage auto-skips the page) and
-  // again from NextButtonClick (so they reflect the user's actual
-  // selection after the page renders). Phase 4 reads these to seed its
-  // picker page's initial state. When g_Detected_<surface> is False, the
-  // corresponding Keep/Change/Skip booleans are all False — Phase 4 must
-  // key off g_Detected_* first.
-  g_Detected_bsarch:                  Boolean;
-  g_Detected_nif_tool:                Boolean;
-  g_Detected_papyrus_compiler_binary: Boolean;
-  g_Detected_papyrus_compiler_json:   Boolean;
-  g_Detected_papyrus_scripts_dir:     Boolean;
-
-  g_ExistingPath_bsarch:                  String;
-  g_ExistingPath_nif_tool:                String;
-  g_ExistingPath_papyrus_compiler_binary: String;
-  g_ExistingPath_papyrus_compiler_json:   String;
-  g_ExistingPath_papyrus_scripts_dir:     String;
-
-  g_Keep_bsarch,   g_Change_bsarch,   g_Skip_bsarch:   Boolean;
-  g_Keep_nif_tool, g_Change_nif_tool, g_Skip_nif_tool: Boolean;
-  g_Keep_papyrus_compiler_binary,
-  g_Change_papyrus_compiler_binary,
-  g_Skip_papyrus_compiler_binary: Boolean;
-  g_Keep_papyrus_compiler_json,
-  g_Change_papyrus_compiler_json,
-  g_Skip_papyrus_compiler_json: Boolean;
-  g_Keep_papyrus_scripts_dir,
-  g_Change_papyrus_scripts_dir,
-  g_Skip_papyrus_scripts_dir: Boolean;
 
 
 //────────────────────────────────────────────────────────────────────────────
@@ -483,52 +450,18 @@ end;
 
 
 //────────────────────────────────────────────────────────────────────────────
-// Named-globals sync
+// (SyncNamedGlobalsFromArrays deleted in [v2.7 P3+P4 fixup] — the picker
+// now reads the g_Detected[] / g_ExistingPath[] arrays directly.)
 //────────────────────────────────────────────────────────────────────────────
-
-procedure SyncNamedGlobalsFromArrays();
-begin
-  g_Detected_bsarch                      := g_Detected[SURF_BSARCH];
-  g_Detected_nif_tool                    := g_Detected[SURF_NIF_TOOL];
-  g_Detected_papyrus_compiler_binary     := g_Detected[SURF_PAPYRUS_COMPILER_BINARY];
-  g_Detected_papyrus_compiler_json       := g_Detected[SURF_PAPYRUS_COMPILER_JSON];
-  g_Detected_papyrus_scripts_dir         := g_Detected[SURF_PAPYRUS_SCRIPTS_DIR];
-
-  g_ExistingPath_bsarch                  := g_ExistingPath[SURF_BSARCH];
-  g_ExistingPath_nif_tool                := g_ExistingPath[SURF_NIF_TOOL];
-  g_ExistingPath_papyrus_compiler_binary := g_ExistingPath[SURF_PAPYRUS_COMPILER_BINARY];
-  g_ExistingPath_papyrus_compiler_json   := g_ExistingPath[SURF_PAPYRUS_COMPILER_JSON];
-  g_ExistingPath_papyrus_scripts_dir     := g_ExistingPath[SURF_PAPYRUS_SCRIPTS_DIR];
-
-  g_Keep_bsarch     := g_Selection[SURF_BSARCH]   = SEL_KEEP;
-  g_Change_bsarch   := g_Selection[SURF_BSARCH]   = SEL_CHANGE;
-  g_Skip_bsarch     := g_Selection[SURF_BSARCH]   = SEL_SKIP;
-
-  g_Keep_nif_tool   := g_Selection[SURF_NIF_TOOL] = SEL_KEEP;
-  g_Change_nif_tool := g_Selection[SURF_NIF_TOOL] = SEL_CHANGE;
-  g_Skip_nif_tool   := g_Selection[SURF_NIF_TOOL] = SEL_SKIP;
-
-  g_Keep_papyrus_compiler_binary   := g_Selection[SURF_PAPYRUS_COMPILER_BINARY] = SEL_KEEP;
-  g_Change_papyrus_compiler_binary := g_Selection[SURF_PAPYRUS_COMPILER_BINARY] = SEL_CHANGE;
-  g_Skip_papyrus_compiler_binary   := g_Selection[SURF_PAPYRUS_COMPILER_BINARY] = SEL_SKIP;
-
-  g_Keep_papyrus_compiler_json   := g_Selection[SURF_PAPYRUS_COMPILER_JSON] = SEL_KEEP;
-  g_Change_papyrus_compiler_json := g_Selection[SURF_PAPYRUS_COMPILER_JSON] = SEL_CHANGE;
-  g_Skip_papyrus_compiler_json   := g_Selection[SURF_PAPYRUS_COMPILER_JSON] = SEL_SKIP;
-
-  g_Keep_papyrus_scripts_dir   := g_Selection[SURF_PAPYRUS_SCRIPTS_DIR] = SEL_KEEP;
-  g_Change_papyrus_scripts_dir := g_Selection[SURF_PAPYRUS_SCRIPTS_DIR] = SEL_CHANGE;
-  g_Skip_papyrus_scripts_dir   := g_Selection[SURF_PAPYRUS_SCRIPTS_DIR] = SEL_SKIP;
-end;
 
 
 //────────────────────────────────────────────────────────────────────────────
 // Previous-install detection
 //
 // Reads the current WizardForm.DirEdit.Text target, walks the five tool
-// surfaces, and populates g_Detected[] / g_ExistingPath[] / g_Selection[].
-// Idempotent — safe to call from both ShouldSkipPage and CurPageChanged so
-// re-entry via the Back button re-detects against the latest chosen dir.
+// surfaces, and populates g_Detected[] / g_ExistingPath[]. Idempotent —
+// safe to call from both CurPageChanged(picker) and CurStepChanged so
+// re-entry after a Back → edit → Forward dir change re-detects correctly.
 //
 // Logs to the install log on malformed/schema-mismatch JSON. No wizard-
 // blocking errors.
@@ -547,13 +480,11 @@ begin
   for I := 0 to NUM_SURFACES - 1 do begin
     g_Detected[I]     := False;
     g_ExistingPath[I] := '';
-    g_Selection[I]    := SEL_NONE;
   end;
 
   MO2Dir := WizardForm.DirEdit.Text;
   if MO2Dir = '' then begin
-    Log('[v2.7 P3 detector] RunDetection skipped (DirEdit empty)');
-    SyncNamedGlobalsFromArrays();
+    Log('[v2.7 P3+P4 fixup] RunDetection skipped (DirEdit empty)');
     Exit;
   end;
 
@@ -584,7 +515,13 @@ begin
     g_ExistingPath[SURF_PAPYRUS_COMPILER_BINARY] := CompilerSub;
   end;
 
-  // Surfaces 3 + 4 — JSON-configured paths
+  // Surfaces 3 + 4 — JSON-configured paths. Missing-file semantics: if the
+  // JSON points at a compiler/scripts path that no longer exists on disk,
+  // we still record the path (user may have moved binaries and want to see
+  // the stale reference to fix). The picker will show it pre-filled; if
+  // they leave it as-is, install-step copy will fail visibly (reported in
+  // post-install MsgBox). Alternative — silently drop stale refs — would
+  // hide the problem from the user.
   SchemaVer    := 0;
   CompilerPath := '';
   ScriptsDir   := '';
@@ -593,9 +530,9 @@ begin
   if not JsonOk then begin
     if FileExists(JsonPath) then begin
       if (SchemaVer > 0) and (SchemaVer <> 1) then
-        Log(Format('[v2.7 P3 detector] %s has schema_version=%d (expected 1); skipping JSON surfaces.', [JsonPath, SchemaVer]))
+        Log(Format('[v2.7 P3+P4 fixup] %s has schema_version=%d (expected 1); skipping JSON surfaces.', [JsonPath, SchemaVer]))
       else
-        Log(Format('[v2.7 P3 detector] %s could not be parsed; skipping JSON surfaces.', [JsonPath]));
+        Log(Format('[v2.7 P3+P4 fixup] %s could not be parsed; skipping JSON surfaces.', [JsonPath]));
     end;
     // else: file absent — clean install; silent.
   end else begin
@@ -610,114 +547,24 @@ begin
   end;
 
   // Detection summary (audit trail in install log).
-  Summary := '[v2.7 P3 detector] Detected at ' + MO2Dir + ': ';
+  Summary := '[v2.7 P3+P4 fixup] Detected at ' + MO2Dir + ': ';
   if g_Detected[SURF_BSARCH]                  then Summary := Summary + 'bsarch ';
   if g_Detected[SURF_NIF_TOOL]                then Summary := Summary + 'nif_tool ';
   if g_Detected[SURF_PAPYRUS_COMPILER_BINARY] then Summary := Summary + 'papyrus_compiler_binary ';
   if g_Detected[SURF_PAPYRUS_COMPILER_JSON]   then Summary := Summary + 'papyrus_compiler_json ';
   if g_Detected[SURF_PAPYRUS_SCRIPTS_DIR]     then Summary := Summary + 'papyrus_scripts_dir ';
-  if Summary = '[v2.7 P3 detector] Detected at ' + MO2Dir + ': ' then
+  if Summary = '[v2.7 P3+P4 fixup] Detected at ' + MO2Dir + ': ' then
     Summary := Summary + '(none)';
   Log(Summary);
-
-  SyncNamedGlobalsFromArrays();
 end;
 
 
 //────────────────────────────────────────────────────────────────────────────
-// Detector page UI
-//
-// CreateDetectorRow builds a row's controls once in InitializeWizard.
-// LayoutDetectorPage (called from CurPageChanged) shows detected rows
-// and hides undetected, repositioning visible rows so they stack with
-// no gaps.
+// (Detector-page UI deleted in [v2.7 P3+P4 fixup] — the picker page now
+// handles detection + user edit end-to-end. RunDetection above still
+// populates g_Detected[] + g_ExistingPath[]; the picker reads those arrays
+// directly via LayoutPickerPage.)
 //────────────────────────────────────────────────────────────────────────────
-
-procedure CreateDetectorRow(Idx: Integer; const Title: String);
-begin
-  g_Label_Title[Idx] := TNewStaticText.Create(g_DetectorPage);
-  g_Label_Title[Idx].Parent := g_DetectorPage.Surface;
-  g_Label_Title[Idx].Caption := Title;
-  g_Label_Title[Idx].Font.Style := [fsBold];
-  g_Label_Title[Idx].AutoSize := False;
-  g_Label_Title[Idx].Left := 0;
-  g_Label_Title[Idx].Width := g_DetectorPage.SurfaceWidth;
-  g_Label_Title[Idx].Height := ScaleY(14);
-  g_Label_Title[Idx].Visible := False;
-
-  g_Label_Path[Idx] := TNewStaticText.Create(g_DetectorPage);
-  g_Label_Path[Idx].Parent := g_DetectorPage.Surface;
-  g_Label_Path[Idx].Caption := '';
-  g_Label_Path[Idx].AutoSize := False;
-  g_Label_Path[Idx].Left := ScaleX(12);
-  g_Label_Path[Idx].Width := g_DetectorPage.SurfaceWidth - ScaleX(12);
-  g_Label_Path[Idx].Height := ScaleY(14);
-  g_Label_Path[Idx].Visible := False;
-
-  g_Radio_Keep[Idx] := TNewRadioButton.Create(g_DetectorPage);
-  g_Radio_Keep[Idx].Parent := g_DetectorPage.Surface;
-  g_Radio_Keep[Idx].Caption := 'Keep';
-  g_Radio_Keep[Idx].Left := ScaleX(12);
-  g_Radio_Keep[Idx].Width := ScaleX(80);
-  g_Radio_Keep[Idx].Height := ScaleY(17);
-  g_Radio_Keep[Idx].Checked := True;
-  g_Radio_Keep[Idx].Visible := False;
-
-  g_Radio_Change[Idx] := TNewRadioButton.Create(g_DetectorPage);
-  g_Radio_Change[Idx].Parent := g_DetectorPage.Surface;
-  g_Radio_Change[Idx].Caption := 'Change';
-  g_Radio_Change[Idx].Left := ScaleX(100);
-  g_Radio_Change[Idx].Width := ScaleX(80);
-  g_Radio_Change[Idx].Height := ScaleY(17);
-  g_Radio_Change[Idx].Checked := False;
-  g_Radio_Change[Idx].Visible := False;
-
-  g_Radio_Skip[Idx] := TNewRadioButton.Create(g_DetectorPage);
-  g_Radio_Skip[Idx].Parent := g_DetectorPage.Surface;
-  g_Radio_Skip[Idx].Caption := 'Skip';
-  g_Radio_Skip[Idx].Left := ScaleX(188);
-  g_Radio_Skip[Idx].Width := ScaleX(80);
-  g_Radio_Skip[Idx].Height := ScaleY(17);
-  g_Radio_Skip[Idx].Checked := False;
-  g_Radio_Skip[Idx].Visible := False;
-end;
-
-procedure LayoutDetectorPage();
-var
-  I, Y: Integer;
-begin
-  Y := 0;
-  for I := 0 to NUM_SURFACES - 1 do begin
-    if g_Detected[I] then begin
-      g_Label_Title[I].Top := ScaleY(Y);
-      g_Label_Title[I].Visible := True;
-
-      g_Label_Path[I].Caption := g_ExistingPath[I];
-      g_Label_Path[I].Top := ScaleY(Y + 16);
-      g_Label_Path[I].Visible := True;
-
-      g_Radio_Keep[I].Top := ScaleY(Y + 34);
-      g_Radio_Keep[I].Checked := True;
-      g_Radio_Keep[I].Visible := True;
-
-      g_Radio_Change[I].Top := ScaleY(Y + 34);
-      g_Radio_Change[I].Checked := False;
-      g_Radio_Change[I].Visible := True;
-
-      g_Radio_Skip[I].Top := ScaleY(Y + 34);
-      g_Radio_Skip[I].Checked := False;
-      g_Radio_Skip[I].Visible := True;
-
-      Y := Y + 60;
-    end else begin
-      g_Label_Title[I].Visible := False;
-      g_Label_Path[I].Visible := False;
-      g_Radio_Keep[I].Visible := False;
-      g_Radio_Change[I].Visible := False;
-      g_Radio_Skip[I].Visible := False;
-    end;
-  end;
-end;
 
 
 //────────────────────────────────────────────────────────────────────────────
@@ -813,29 +660,34 @@ end;
 //   Change → path pre-populated, editable, Browse enabled.
 //   Skip   → path blank, editable.
 //   None   → path blank, editable.
-// Row 2 mirrors the dominant detected mode (binary OR JSON). If BOTH were
-// detected pre-install, a red one-line warning surfaces and the checkbox
-// defaults to JSON-reference (the more explicit signal).
+// Row 2 (PapyrusCompiler) pre-fill: if JSON-mode was detected the Edit field
+// shows that path and the "Reference at runtime" checkbox defaults to checked.
+// If only a plugin-dir binary was detected, the Edit shows the binary path
+// and the checkbox is unchecked. If BOTH detected (rare — prior manual JSON
+// edit alongside a still-present plugin binary), JSON wins (more explicit
+// user signal) and the plugin binary gets deleted at install-step.
 //
-// Re-layout convention (inherited from P3): LayoutPickerPage re-seeds each
-// row's fields on every page entry. Any user text typed into an Edit is
-// discarded if the user navigates Back-then-Forward. Acceptable trade-off
-// per P3 precedent; documented in the handoff.
+// Back-nav persistence: LayoutPickerPage runs ONLY on first picker-page
+// entry (via the g_PickerInitialized guard in CurPageChanged). User edits
+// survive Dir → Picker → Ready → Back → Picker round-trips.
 //
-// Validation (NextButtonClick on picker page):
+// Validation (NextButtonClick on picker page, interactive-mode only):
 //   • Non-empty file-row path: must exist on disk (hard error).
 //   • File-row filename mismatch (e.g. user picked xEdit64.exe for BSArch):
 //     soft Yes/No warning; Yes overrides, No returns to the picker.
 //   • Non-empty dir-row path: dir must exist on disk (hard error). No
 //     content validation (user may have partial Scripts.zip extractions).
-//   • Empty = skip (valid state, no validation).
+//   • Empty = skip/uninstall-that-tool (valid state, no validation).
 //
-// Install-step (CurStepChanged ssPostInstall):
-//   • BSArch / nif-tool: copy to plugin-dir target (overwrite), OR delete
-//     any existing plugin-dir binary when source is empty.
-//   • PapyrusCompiler: copy (unchecked) or write JSON key + delete existing
-//     plugin-dir binary (checked) or skip-with-cleanup (empty).
-//   • Papyrus Scripts dir: write JSON key (or null).
+// Install-step (CurStepChanged ssPostInstall) — semantics driven entirely
+// by the Edit field text (plus the JSON-reference checkbox for Row 2):
+//   • BSArch / nif-tool: empty → delete plugin-dir binary;
+//                        path equals target → no-op (Keep);
+//                        path differs      → copy (Change).
+//   • PapyrusCompiler: empty → delete both layouts + JSON null;
+//                      checkbox checked → JSON key + delete plugin binary;
+//                      checkbox unchecked → copy + JSON null.
+//   • Papyrus Scripts dir: write JSON key (or null if empty).
 //   • tool_paths.json ALWAYS written (schema_version=1, non-set keys=null).
 //
 // Note: [UninstallDelete] explicitly does NOT list tool_paths.json — user
@@ -856,12 +708,11 @@ var
   g_PickerEdit:          array[0..3] of TNewEdit;
   g_PickerBrowse:        array[0..3] of TNewButton;
   g_PickerJsonCheckbox:  TNewCheckBox;
-  g_PickerDualWarning:   TNewStaticText;
-  // True once NextButtonClick(g_PickerPage.ID) fires — i.e. user interactively
-  // confirmed the picker. In silent mode the picker page never renders, so
-  // this stays False and CurStepChanged seeds Edit values from detector
-  // globals via LayoutPickerPage (honours "Keep existing on silent install").
-  g_PickerUserConfirmed: Boolean;
+  // True once CurPageChanged(g_PickerPage.ID) has seeded the Edit fields
+  // from RunDetection for the first time. Prevents re-seeding on Back-nav
+  // re-entry (so user edits survive navigation). Also guarded against in
+  // CurStepChanged as defense-in-depth in case CurPageChanged never fired.
+  g_PickerInitialized:   Boolean;
 
 
 //────────────────────────────────────────────────────────────────────────────
@@ -960,88 +811,40 @@ end;
 
 
 //────────────────────────────────────────────────────────────────────────────
-// Row-state seeding helper (Rows 0, 1, 3 — simple copy-or-skip surfaces).
+// LayoutPickerPage — seeds each row's Edit field from RunDetection's output.
+// Called from CurPageChanged on first entry only (back-nav preserves user
+// edits via the g_PickerInitialized guard).
 //
-// Keep     → path locked to existing, Browse disabled.
-// Change   → path pre-populated, editable, Browse enabled.
-// Skip/None → path blank, editable.
-//────────────────────────────────────────────────────────────────────────────
-
-procedure SeedPickerSimpleRow(Idx: Integer; Detected, Keep, Change: Boolean; const ExistingPath: String);
-begin
-  if Detected and Keep then begin
-    g_PickerEdit[Idx].Text := ExistingPath;
-    g_PickerEdit[Idx].ReadOnly := True;
-    g_PickerBrowse[Idx].Enabled := False;
-  end else if Detected and Change then begin
-    g_PickerEdit[Idx].Text := ExistingPath;
-    g_PickerEdit[Idx].ReadOnly := False;
-    g_PickerBrowse[Idx].Enabled := True;
-  end else begin
-    g_PickerEdit[Idx].Text := '';
-    g_PickerEdit[Idx].ReadOnly := False;
-    g_PickerBrowse[Idx].Enabled := True;
-  end;
-end;
-
-
-//────────────────────────────────────────────────────────────────────────────
-// LayoutPickerPage — seeds all 4 rows from P3 detector globals on every
-// page entry. Called from CurPageChanged.
+// Semantics: Edit fields are always editable; Browse always enabled. The
+// user's final Edit text, not any internal Keep/Change/Skip flag, drives
+// install-step actions. Empty = skip/uninstall; text matches detected path
+// = no-op Keep; text differs = copy/Change.
+//
+// Row 2 (PapyrusCompiler) checkbox state: checked if JSON-mode detected;
+// unchecked if binary-mode detected; unchecked if neither. When BOTH are
+// detected (rare, from a prior manual JSON edit while plugin binary is
+// still present), prefer JSON-mode — the JSON value is the more explicit
+// user signal.
 //────────────────────────────────────────────────────────────────────────────
 
 procedure LayoutPickerPage();
-var
-  binaryPrior, jsonPrior: Boolean;
-  compilerReadOnly: Boolean;
 begin
-  // Rows 0 + 1 + 3 — simple copy-or-skip pattern.
-  SeedPickerSimpleRow(PICK_BSARCH,
-    g_Detected_bsarch, g_Keep_bsarch, g_Change_bsarch,
-    g_ExistingPath_bsarch);
-  SeedPickerSimpleRow(PICK_NIF_TOOL,
-    g_Detected_nif_tool, g_Keep_nif_tool, g_Change_nif_tool,
-    g_ExistingPath_nif_tool);
-  SeedPickerSimpleRow(PICK_PAPYRUS_DIR,
-    g_Detected_papyrus_scripts_dir, g_Keep_papyrus_scripts_dir, g_Change_papyrus_scripts_dir,
-    g_ExistingPath_papyrus_scripts_dir);
+  // Rows 0, 1, 3 — simple copy/skip surfaces.
+  g_PickerEdit[PICK_BSARCH].Text      := g_ExistingPath[SURF_BSARCH];
+  g_PickerEdit[PICK_NIF_TOOL].Text    := g_ExistingPath[SURF_NIF_TOOL];
+  g_PickerEdit[PICK_PAPYRUS_DIR].Text := g_ExistingPath[SURF_PAPYRUS_SCRIPTS_DIR];
 
-  // Row 2 — PapyrusCompiler combined (binary + JSON + checkbox).
-  binaryPrior := g_Detected_papyrus_compiler_binary and (g_Keep_papyrus_compiler_binary or g_Change_papyrus_compiler_binary);
-  jsonPrior   := g_Detected_papyrus_compiler_json   and (g_Keep_papyrus_compiler_json   or g_Change_papyrus_compiler_json);
-
-  // Dual-detection warning visible only when BOTH surfaces were detected
-  // AND the user didn't choose Skip on both (i.e. at least one of them
-  // is still in play). Red label prompts user to pick one mode.
-  g_PickerDualWarning.Visible := binaryPrior and jsonPrior;
-
-  // Seed path + checkbox based on which surface "wins" the Row 2 slot.
-  // Priority: JSON (more explicit signal per P0 Q4) > binary > none.
-  if jsonPrior and g_Keep_papyrus_compiler_json then begin
-    g_PickerEdit[PICK_PAPYRUS_COMP].Text := g_ExistingPath_papyrus_compiler_json;
+  // Row 2 — PapyrusCompiler (binary path + JSON-reference checkbox).
+  if g_Detected[SURF_PAPYRUS_COMPILER_JSON] then begin
+    g_PickerEdit[PICK_PAPYRUS_COMP].Text := g_ExistingPath[SURF_PAPYRUS_COMPILER_JSON];
     g_PickerJsonCheckbox.Checked := True;
-    compilerReadOnly := True;
-  end else if binaryPrior and g_Keep_papyrus_compiler_binary and (not jsonPrior) then begin
-    g_PickerEdit[PICK_PAPYRUS_COMP].Text := g_ExistingPath_papyrus_compiler_binary;
+  end else if g_Detected[SURF_PAPYRUS_COMPILER_BINARY] then begin
+    g_PickerEdit[PICK_PAPYRUS_COMP].Text := g_ExistingPath[SURF_PAPYRUS_COMPILER_BINARY];
     g_PickerJsonCheckbox.Checked := False;
-    compilerReadOnly := True;
-  end else if jsonPrior and g_Change_papyrus_compiler_json then begin
-    g_PickerEdit[PICK_PAPYRUS_COMP].Text := g_ExistingPath_papyrus_compiler_json;
-    g_PickerJsonCheckbox.Checked := True;
-    compilerReadOnly := False;
-  end else if binaryPrior and g_Change_papyrus_compiler_binary then begin
-    g_PickerEdit[PICK_PAPYRUS_COMP].Text := g_ExistingPath_papyrus_compiler_binary;
-    g_PickerJsonCheckbox.Checked := False;
-    compilerReadOnly := False;
   end else begin
-    // No prior state OR Skip on everything. Blank editable; default copy mode.
     g_PickerEdit[PICK_PAPYRUS_COMP].Text := '';
     g_PickerJsonCheckbox.Checked := False;
-    compilerReadOnly := False;
   end;
-  g_PickerEdit[PICK_PAPYRUS_COMP].ReadOnly := compilerReadOnly;
-  g_PickerBrowse[PICK_PAPYRUS_COMP].Enabled := not compilerReadOnly;
-  g_PickerJsonCheckbox.Enabled := True;
 end;
 
 
@@ -1055,29 +858,18 @@ end;
 
 procedure InitializeWizard();
 begin
-  // ── P3 detector page ──
-  g_DetectorPage := CreateCustomPage(
-    wpSelectDir,
-    'Previous Claude MO2 install detected',
-    'Choose what to do with each existing tool. ' +
-    'Keep = leave as-is. ' +
-    'Change = pick a new source on the next page. ' +
-    'Skip = remove from the plugin.'
-  );
-
-  CreateDetectorRow(SURF_BSARCH,                  'BSArch');
-  CreateDetectorRow(SURF_NIF_TOOL,                'nif-tool');
-  CreateDetectorRow(SURF_PAPYRUS_COMPILER_BINARY, 'PapyrusCompiler (in-plugin binary)');
-  CreateDetectorRow(SURF_PAPYRUS_COMPILER_JSON,   'PapyrusCompiler (JSON reference)');
-  CreateDetectorRow(SURF_PAPYRUS_SCRIPTS_DIR,     'Papyrus Scripts sources directory');
-
-  // ── P4 picker page ──
+  // Single Optional Tools page handles both fresh installs and upgrades.
+  // On entry, CurPageChanged runs RunDetection against the selected MO2
+  // dir and pre-fills each row's Edit field with any detected path. User
+  // can leave paths as-is (Keep), edit them (Change), or clear them (Skip
+  // / uninstall that tool).
   g_PickerPage := CreateCustomPage(
-    g_DetectorPage.ID,
+    wpSelectDir,
     'Optional Tools',
-    'Point the installer at tools you want to enable. ' +
-    'Leave any field empty to skip — you can configure later by editing ' +
-    'tool_paths.json (Papyrus surfaces) or re-running this installer.'
+    'Paths are pre-filled if a tool is already installed. Leave as-is to keep, ' +
+    'edit to change, or clear to uninstall that tool. You can reconfigure ' +
+    'any time by editing tool_paths.json (Papyrus surfaces) or re-running ' +
+    'this installer.'
   );
 
   CreatePickerRow(PICK_BSARCH, 0,
@@ -1105,19 +897,6 @@ begin
   g_PickerJsonCheckbox.Height := ScaleY(17);
   g_PickerJsonCheckbox.Checked := False;
 
-  // Row 2 dual-detection warning (hidden by default; visible only when both
-  // binary AND JSON surfaces were detected pre-install).
-  g_PickerDualWarning := TNewStaticText.Create(g_PickerPage);
-  g_PickerDualWarning.Parent := g_PickerPage.Surface;
-  g_PickerDualWarning.Caption := 'Detected both a copied binary AND a JSON reference. Choose one mode.';
-  g_PickerDualWarning.Font.Color := $000000FF;
-  g_PickerDualWarning.AutoSize := False;
-  g_PickerDualWarning.Top := ScaleY(184);
-  g_PickerDualWarning.Left := ScaleX(12);
-  g_PickerDualWarning.Width := g_PickerPage.SurfaceWidth - ScaleX(12);
-  g_PickerDualWarning.Height := ScaleY(14);
-  g_PickerDualWarning.Visible := False;
-
   // Row 3 uses DescHeight=32 to give the 2-line description breathing room at
   // higher DPI scales. At 125-150% scaling the default dialog font line-height
   // exceeds 13 px, so DescHeight=26 clips the second line under the edit field.
@@ -1131,53 +910,25 @@ begin
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
-var
-  AnyDetected: Boolean;
-  I: Integer;
 begin
   Result := False;
-  if PageID = g_DetectorPage.ID then begin
-    RunDetection();
-    AnyDetected := g_Detected[SURF_BSARCH] or
-                   g_Detected[SURF_NIF_TOOL] or
-                   g_Detected[SURF_PAPYRUS_COMPILER_BINARY] or
-                   g_Detected[SURF_PAPYRUS_COMPILER_JSON] or
-                   g_Detected[SURF_PAPYRUS_SCRIPTS_DIR];
-    Result := not AnyDetected;
-
-    // Silent-mode safety net: the detector page never renders for user input
-    // in /SILENT or /VERYSILENT, so NextButtonClick never records selections.
-    // Default every detected surface to Keep so existing binaries/JSON values
-    // are preserved across silent upgrades (T5 / T6 scenarios).
-    if WizardSilent then begin
-      for I := 0 to NUM_SURFACES - 1 do begin
-        if g_Detected[I] then
-          g_Selection[I] := SEL_KEEP;
-      end;
-      SyncNamedGlobalsFromArrays();
-    end;
-
-    if Result then
-      Log('[v2.7 P3 detector] ShouldSkipPage = True (no surfaces detected; detector page hidden).')
-    else
-      Log('[v2.7 P3 detector] ShouldSkipPage = False (surfaces detected; detector page will render).');
-  end;
-  // Picker page is never skipped — user may want to add tools to a fresh install.
+  // Picker page is never skipped — user may configure tools on a fresh
+  // install or review pre-filled paths on an upgrade.
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
-  if CurPageID = g_DetectorPage.ID then begin
-    // Re-run detection against the current DirEdit value (may have
-    // changed since ShouldSkipPage if the user is going forward after
-    // a Back → edit → Forward navigation).
-    RunDetection();
-    LayoutDetectorPage();
-  end else if CurPageID = g_PickerPage.ID then begin
-    // Seed each row's initial state from P3 detector globals. The globals
-    // are populated either by RunDetection via ShouldSkipPage (auto-skip
-    // case) or by the detector page's NextButtonClick (surfaces detected).
-    LayoutPickerPage();
+  if CurPageID = g_PickerPage.ID then begin
+    // Seed picker Edit fields from detection on FIRST entry only. Back-nav
+    // re-entries preserve the user's typed text (g_PickerInitialized guard).
+    // RunDetection reads WizardForm.DirEdit.Text so it picks up any dir
+    // changes from Back → edit → Forward navigation on first entry.
+    if not g_PickerInitialized then begin
+      RunDetection();
+      LayoutPickerPage();
+      g_PickerInitialized := True;
+      Log('[v2.7 P3+P4 fixup] Picker page first entry: RunDetection + LayoutPickerPage.');
+    end;
   end;
 end;
 
@@ -1216,7 +967,6 @@ end;
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
   appDir: String;
-  I: Integer;
 begin
   Result := True;
   if CurPageID = wpSelectDir then begin
@@ -1231,20 +981,6 @@ begin
         Result := False;
       end;
     end;
-  end else if CurPageID = g_DetectorPage.ID then begin
-    // Record user's Keep/Change/Skip selection for each detected row.
-    // Undetected rows keep g_Selection[I] = SEL_NONE (set by RunDetection).
-    for I := 0 to NUM_SURFACES - 1 do begin
-      if g_Detected[I] then begin
-        if g_Radio_Change[I].Checked then
-          g_Selection[I] := SEL_CHANGE
-        else if g_Radio_Skip[I].Checked then
-          g_Selection[I] := SEL_SKIP
-        else
-          g_Selection[I] := SEL_KEEP;
-      end;
-    end;
-    SyncNamedGlobalsFromArrays();
   end else if CurPageID = g_PickerPage.ID then begin
     // Silent mode (/SILENT, /VERYSILENT) can't surface MsgBoxes for
     // validation failures — a stale JSON path would block an automated
@@ -1257,7 +993,6 @@ begin
       if not ValidatePickerFilePath(g_PickerEdit[PICK_NIF_TOOL].Text,     'nif-tool.exe',        'nif-tool') then begin Result := False; Exit; end;
       if not ValidatePickerFilePath(g_PickerEdit[PICK_PAPYRUS_COMP].Text, 'PapyrusCompiler.exe', 'PapyrusCompiler') then begin Result := False; Exit; end;
       if not ValidatePickerDirPath(g_PickerEdit[PICK_PAPYRUS_DIR].Text,   'Papyrus Scripts sources') then begin Result := False; Exit; end;
-      g_PickerUserConfirmed := True;
     end;
   end;
 end;
@@ -1330,14 +1065,16 @@ var
 begin
   if CurStep <> ssPostInstall then Exit;
 
-  // Silent-mode fallback: if the user didn't interactively confirm the picker
-  // page, seed Edit fields from detector globals now. LayoutPickerPage takes
-  // Keep→ExistingPath / Skip→blank / None→blank, matching the semantics of
-  // the picker UI user would have seen. Interactive installs skip this call
-  // because g_PickerUserConfirmed was set in NextButtonClick(picker).
-  if not g_PickerUserConfirmed then begin
+  // Defense-in-depth: if some Inno code path bypassed CurPageChanged(picker)
+  // (should never happen, but silent-mode and unusual navigation histories
+  // are worth guarding against), seed the picker Edit fields now. Normal
+  // interactive and silent installs hit this no-op because CurPageChanged
+  // already ran RunDetection + LayoutPickerPage on picker-page entry.
+  if not g_PickerInitialized then begin
+    RunDetection();
     LayoutPickerPage();
-    Log('[v2.7 P4] Silent-mode LayoutPickerPage: seeded picker fields from detector globals.');
+    g_PickerInitialized := True;
+    Log('[v2.7 P3+P4 fixup] CurStepChanged defensive seeding: RunDetection + LayoutPickerPage (CurPageChanged did not fire).');
   end;
 
 

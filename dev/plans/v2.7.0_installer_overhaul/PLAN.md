@@ -468,6 +468,41 @@ Medium risk — changing tool-invocation paths used by `mo2_compile_script`. Mit
 
 ## Phase 3 — Previous-install detector wizard page
 
+> **[Superseded 2026-04-24 — `[v2.7 P3+P4 fixup]` commit during P5]**
+>
+> The separate detector page described in this section was **removed** during
+> P5 after interactive testing surfaced two structural bugs:
+>
+> 1. All 9 radio buttons (3 per row × 3 detected surfaces) shared a single
+>    Windows radio group because every `TNewRadioButton` was parented to
+>    `g_DetectorPage.Surface`. Only one radio across the entire page could
+>    be selected at a time — per-row Keep/Change/Skip was structurally
+>    impossible.
+> 2. `CurPageChanged(detector)` unconditionally re-ran `RunDetection`, which
+>    reset `g_Selection[I] := SEL_NONE`. Back-nav from the picker to the
+>    detector wiped the user's prior selections every time.
+>
+> The fix: delete the detector page entirely. The picker page (P4) now
+> handles detection + user edit in one place. Keep / Change / Skip semantics
+> derive from the picker's Edit-field text at install-step time:
+>
+> - **Leave path as-is** = Keep (no-op)
+> - **Edit the path**    = Change (copy new source over target)
+> - **Clear the field**  = Skip (delete any existing plugin-dir binary)
+>
+> `RunDetection()` is retained — it now runs on the picker's first
+> `CurPageChanged` entry and populates `g_Detected[]` + `g_ExistingPath[]`,
+> which `LayoutPickerPage` reads to pre-fill the Edit fields. Everything
+> below this block — detector page design, global-sharing protocol, radio
+> UI layout — is historical intent, superseded by the picker-only design
+> documented in the P3+P4 fixup commit.
+>
+> See `PHASE_5_HANDOFF.md` for the full regression trail and the
+> commit message of the fixup for the architectural reasoning.
+
+**~~Original Phase 3 intent below, preserved for audit trail:~~**
+
+
 **Goal:** Add a conditional Inno wizard page that fires on every install and checks 5 tool surfaces for prior state: BSArch binary, nif-tool binary, PapyrusCompiler binary (in-plugin), JSON `papyrus_compiler` override, JSON `papyrus_scripts_dir`. For each found surface, show "Keep / Change / Skip" per surface. Feed user's selections into globals that Phase 4's picker page uses as pre-populated defaults.
 
 **Prereqs from Phase 2:** `tool_paths.json` schema locked; Python side reads it.
@@ -557,6 +592,39 @@ Low-medium risk. Pure UI + detection; no file writes yet. `git revert` removes t
 ---
 
 ## Phase 4 — Optional Tools picker page + install-step wiring
+
+> **[Revised 2026-04-24 — `[v2.7 P3+P4 fixup]` commit during P5]**
+>
+> P4's picker page is preserved, but two simplifications landed during P5:
+>
+> 1. **Detector-global consumption removed.** LayoutPickerPage now reads
+>    the `g_Detected[]` / `g_ExistingPath[]` arrays directly (populated by
+>    `RunDetection` on the picker's first `CurPageChanged` entry). The per-
+>    surface `g_Keep_*` / `g_Change_*` / `g_Skip_*` named globals, the
+>    `g_Selection[]` array, and `SyncNamedGlobalsFromArrays` are all gone.
+>    Edit-field text alone drives install-step behaviour — empty = skip,
+>    matches target = Keep, differs = Change.
+> 2. **Dual-detection warning label removed.** When both a plugin-dir
+>    binary AND a JSON `papyrus_compiler` value are detected, Row 2 still
+>    seeds from the JSON path with the checkbox checked (JSON = more
+>    explicit signal), but no red warning label surfaces. The post-install
+>    state is coherent regardless: checked → plugin binary deleted + JSON
+>    key written; unchecked → plugin binary stays + JSON key cleared.
+> 3. **Back-nav Edit-field preservation.** The original P4 design re-ran
+>    `LayoutPickerPage` on every picker-page entry (including back-nav
+>    returns), discarding user edits. The fixup adds a `g_PickerInitialized`
+>    guard so `LayoutPickerPage` runs only on first entry.
+>
+> `CurStepChanged` install-step semantics are unchanged (they were already
+> Edit-field-driven in original P4). `ApplyBinarySurface` logic stays.
+> PapyrusCompiler checkbox branching stays. JSON write stays.
+>
+> Everything below this block reflects the original two-page design
+> (detector → picker). The actual shipping behaviour is the one-page
+> picker with detection handled transparently on first entry.
+
+**~~Original Phase 4 spec below, preserved for audit trail:~~**
+
 
 **Goal:** Custom wizard page with 4 rows (3 file pickers + 1 dir picker). PapyrusCompiler row is combined: file picker + a "Reference path at runtime (don't copy)" checkbox below it. On install (post-copy), write `tool_paths.json` and copy user-selected binaries to the plugin dir.
 
@@ -825,6 +893,10 @@ Low risk if Phase 5 passed. Hotfix path is v2.7.1 if post-release issues surface
 ## ✏️ Plan revisions
 
 If a phase finds the plan wrong (API differs from expectation, Inno doesn't expose what was assumed, etc.), update this PLAN.md as part of that phase's commit. Note the revision in the phase handoff. The plan is a living document until Phase 6 ships.
+
+### Log
+
+- **2026-04-24 — `[v2.7 P3+P4 fixup]` during P5** — Detector page deleted entirely. The picker page now handles detection + user edit in one flow. Keep/Change/Skip semantics derive from picker Edit-field text at install-step. Two P3 bugs motivated the change: (1) all detector radios shared one Windows radio group (per-row selection impossible), (2) CurPageChanged(detector) reset g_Selection on every entry (Back-nav wiped user picks). Fixup also removed the dual-detection warning label and added a g_PickerInitialized guard so Back-nav preserves user edits. See inline annotations at the top of Phase 3 + Phase 4 sections above and `PHASE_5_HANDOFF.md` for the regression trail. ~263 lines of .iss deleted; installer shrinks 1414 → 1151 LOC.
 
 ---
 

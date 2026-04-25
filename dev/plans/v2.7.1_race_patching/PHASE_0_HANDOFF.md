@@ -4,7 +4,7 @@
 **Status:** Complete
 **Date:** 2026-04-25
 **Session length:** ~1h
-**Commits made:** (will be filled in after commit lands)
+**Commits made:** `49d9a28` (`[v2.7.1 P0] Audit + scope lock + version bump to 2.7.1`), pushed to `origin/main`.
 **Live install synced:** No (Phase 0 is non-runtime — audit, probe, version bumps, doc placeholders. Phase 5 syncs.)
 
 ## What was done

@@ -525,30 +525,33 @@ Keep handoffs short — under 400 lines.
 
 ---
 
-## Phase 4 — Per-bug fix sessions
+## Phase 4 — Bridge fixes + matrix corrections + docs hygiene (single session)
 
-**Goal:** Fix each bug surfaced in Phase 2 + Phase 3. **One bug per session.** Each session produces one work commit (or a small number of related commits) and one `PHASE_4_<bug-slug>_HANDOFF.md`.
+**Goal:** Land all v2.8.0-bound bridge fixes, schema enhancements, matrix corrections, and docs hygiene in one cohesive session before Phase 5 ship. Original framing was "one bug per session" with v2.9 carry-overs for non-bug findings; **per Aaron 2026-04-26, no Phase-1/2/3-uncovered findings get punted to v2.9** (only Phase 4-discovered bonus-catches we choose not to pursue, or upstream-blocked items like AMMO enchantment, defer to v2.9). Result: Phase 4 absorbs 4.c.01 (helper-throw → Tier D unification, Phase 2 finding) + finding #5 (`actor_value` parameter on `add_conditions`, Phase 3 finding) + Phase 3 matrix corrections + coverage-smoke FormID swap into the same session as the `perk_quest_adapter_subclass` bug fix.
 
-The PerkAdapter/QuestAdapter bug is the priority-zero entry — known concrete fix-it; Phase 2's probe confirms.
+**Single work commit + hash-record commit cadence** (per v2.7.1 double-commit pattern). One `PHASE_4_HANDOFF.md` covering all of Phase 4.
 
-**Files to touch (per session):**
-- `Claude_MO2/tools/mutagen-bridge/PatchEngine.cs` (or whichever bridge file the bug lives in)
-- `Claude_MO2/tools/coverage-smoke/Program.cs` (add regression test)
-- `Claude_MO2/mo2_mcp/tools_patching.py` (only if the bug is a Python-side issue)
-- `Claude_MO2/mo2_mcp/CHANGELOG.md` (append fix bullet under v2.8.0 entry)
-- `Claude_MO2/KNOWN_ISSUES.md` (if the fix changes documented behavior)
-- `Claude_MO2/dev/plans/v2.8.0_verification/PHASE_4_<slug>_HANDOFF.md`
+**Scope-lock:** items 1–11 below are in scope. Other v2.7.1-era carry-overs (Quest condition disambiguation via `condition_target` parameter, AMMO enchantment, replace-semantics whole-dict, chained dict access) stay deferred — those weren't *uncovered by v2.8.0 verification*, they were *confirmed as known carry-overs from v2.7.1*. The discipline is "don't punt v2.8.0-uncovered findings," not "fix every documented carry-over from prior releases."
+
+**Files to touch:**
+- `Claude_MO2/tools/race-probe/Program.cs` (extend with VMAD disambiguation + cross-check probe)
+- `Claude_MO2/tools/mutagen-bridge/PatchEngine.cs` (3 bridge changes: PerkAdapter/QuestAdapter fix, `actor_value` param on Condition construction, helper-throw → Tier D unification on ApplyAddConditions/ApplyRemoveConditions)
+- `Claude_MO2/tools/coverage-smoke/Program.cs` (1.A.01 FormID swap; regression tests for all 3 bridge changes)
+- `Claude_MO2/mo2_mcp/tools_patching.py` (schema updates: attach_scripts list correction post-disambiguation; `actor_value` parameter on add_conditions)
+- `Claude_MO2/mo2_mcp/CHANGELOG.md` (bullets for bridge changes + matrix-accuracy improvements)
+- `Claude_MO2/KNOWN_ISSUES.md` (post-fix updates: remove PerkAdapter/QuestAdapter entry; add OTFT/SPEL limitation if Case A; add LVSP topology note from Phase 3 finding #4)
+- `Claude_MO2/dev/plans/v2.8.0_verification/PHASE_4_HANDOFF.md` (single handoff covering all 11 items)
 
 **No version bump in Phase 4** — Phase 1 already bumped to v2.8.0.
 
-### Pre-fix probe — `perk_quest_adapter_subclass` session ONLY
+### Pre-fix probe — OTFT/SPEL VMAD disambiguation (first action)
 
-Before applying the priority-zero bug fix, the `perk_quest_adapter_subclass` session must run an OTFT/SPEL VMAD disambiguation probe to definitively resolve whether Phase 2's Case (A) verdict (Mutagen lacks VMAD on Outfit/Spell) is correct. **Phase 2's evidence was suggestive but not conclusive** — the disambiguator checked one specific property name ("VirtualMachineAdapter") on concrete class + interfaces + base chain; all null. That rules out the simplest case but does NOT rule out (a) a different property name, (b) interface-based or extension-method access, or (c) Mutagen preserving VMAD on round-trip via a non-property mechanism.
+Before applying any bridge fix, run the OTFT/SPEL VMAD disambiguation probe to definitively resolve whether Phase 2's Case (A) verdict (Mutagen lacks VMAD on Outfit/Spell) is correct. **Phase 2's evidence was suggestive but not conclusive** — the disambiguator checked one specific property name ("VirtualMachineAdapter") on concrete class + interfaces + base chain; all null. That rules out the simplest case but does NOT rule out (a) a different property name, (b) interface-based or extension-method access, or (c) Mutagen preserving VMAD on round-trip via a non-property mechanism.
 
 **Three verdicts, three scope branches:**
 
-- **Case (A) confirmed** (Mutagen genuinely lacks support) → docs-only cleanup proceeds — remove Outfit + Spell from `tools_patching.py:104`, add KNOWN_ISSUES limitation entry. Coverage-smoke 1.r.40 + 1.r.47 stay as SKIP-with-Case-(A)-confirmed.
-- **Case (B): different property name** → bridge fix in scope. Adjust `ApplyAttachScripts`'s reflection lookup to find the actual property; coverage-smoke 1.r.40 + 1.r.47 flip from SKIP to positive PASS (regression tests added). Schema description updated to reflect what's actually supported.
+- **Case (A) confirmed** (Mutagen genuinely lacks support) → docs-only cleanup — remove Outfit + Spell from `tools_patching.py:104`, add KNOWN_ISSUES limitation entry. Coverage-smoke 1.r.40 + 1.r.47 stay as SKIP-with-Case-(A)-confirmed.
+- **Case (B): different property name** → bridge fix in scope. Adjust `ApplyAttachScripts`'s reflection lookup to find the actual property; coverage-smoke 1.r.40 + 1.r.47 flip from SKIP to positive PASS (regression tests added). Schema description updated.
 - **Case (C): interface-based or extension-method exposure** → bridge fix in scope. Adjust reflection to detect via interface check; same coverage-smoke flip + schema update.
 
 **Probe specification** (extend `tools/race-probe/Program.cs`'s existing Batch 7 disambiguator block at `Section("v2.8 P2 Batch 7 — VMAD case (A) vs (B) disambiguator …")`):
@@ -557,48 +560,63 @@ Before applying the priority-zero bug fix, the `perk_quest_adapter_subclass` ses
 2. **Mutagen-direct round-trip on a vanilla SPEL with VMAD.** Pick a SPEL whose binary form carries a VMAD subrecord — e.g. `Skyrim.esm:SummonFlameAtronachLeftHand` or any SPEL where `mo2_record_detail` shows `Scripts: [...]` (run a quick `mo2_query_records` filtered to Skyrim.esm SPEL records and pick one with attached scripts as reconnaissance). Round-trip via `SkyrimMod.CreateFromBinaryOverlay` → `WriteToBinary` → `CreateFromBinary`; inspect whether the round-tripped record retains the VMAD in any reflection-accessible form. If retained → Mutagen knows about VMAD somewhere; pursue (B)/(C) bridge fix. If lost → Mutagen genuinely lacks the schema entry; Case (A) confirmed.
 3. **Same probe pattern for OTFT.** Vanilla Skyrim.esm has fewer scripted Outfits, but the round-trip can be tested with a Mutagen-constructed Outfit + manually-set VMAD if no vanilla OTFT has scripts.
 
-**Capture the verdict in the work commit message and `PHASE_4_perk_quest_adapter_subclass_HANDOFF.md`.** Include the full probe output (property dump excerpts + round-trip evidence). The verdict drives the session's scope:
+**Capture the verdict in the work commit message and `PHASE_4_HANDOFF.md`.** Include the full probe output (property dump excerpts + round-trip evidence). The verdict drives item 3's scope (docs-only vs bridge fix).
 
-- Under Case (A): bug fix + docs-only OTFT/SPEL cleanup. Estimated ~30 minutes additional work over the bare PerkAdapter/QuestAdapter fix.
-- Under Case (B)/(C): bug fix + bridge VMAD-reflection fix + regression-test flip + schema update. Estimated ~2 hours additional work.
+**Cross-check (item 2 below) is independent of the disambiguation verdict:** runs against EVERY type currently in the schema's attach_scripts supported list. Phase 2 found OTFT/SPEL questionable; cross-check ensures no other type is a similar overstatement. If any are wrong, fix inline.
 
-**Cross-check carried into the same session (regardless of verdict):** while editing `tools_patching.py:104` (or the schema description), run the existing race-probe `typeof(X).GetProperty(...)` reflection probe against EVERY type currently in the supported list (NPC, Quest, Armor, Weapon, Container, Door, Activator, Furniture, Light, MagicEffect, Perk). Phase 2 found OTFT/SPEL questionable; cross-check ensures no other type in the list is a similar overstatement. If any are, fix inline in the same docs-edit pass; if all check out, that's a clean closure of the schema description's accuracy.
+### Steps
 
-The disambiguation probe is the **first action** of the `perk_quest_adapter_subclass` session — before step 3 of the generic per-bug flow below. The bug fix proper (Activator-based subclass construction) proceeds after the probe verdict is captured.
+**Phase 4 is one session executing items 1–11 in order. Each item builds on prior items; the smoke + commit cadence at the end consolidates everything.**
 
-### Steps (per Phase 4 session)
+1. **OTFT/SPEL VMAD disambiguation probe** (race-probe extension; pre-fix probe per spec above). Capture verdict (A/B/C) in handoff. Determines item 3's scope.
 
-1. **Identify your bug.** Read `PHASE_3_HANDOFF.md` (or `PHASE_2_HANDOFF.md` if Phase 3 didn't surface bugs). Pick the next un-fixed entry.
+2. **Cross-check reflection probe — every attach_scripts supported type** (race-probe extension; runs regardless of item 1's verdict). For each of {NPC, Quest, Armor, Weapon, Container, Door, Activator, Furniture, Light, MagicEffect, Perk} — run `typeof(X).GetProperty("VirtualMachineAdapter")` plus interface scan plus base-class chain walk. Anything that comes back null is a schema-description overstatement to fix in item 7 (schema docs). Capture per-type verdict in handoff.
 
-2. **Read the bug's repro from the relevant handoff.**
+3. **OTFT/SPEL outcome handling** (driven by item 1's verdict):
+   - **Case (A):** docs-only — `tools_patching.py:104` removes Outfit + Spell from the attach_scripts supported list (plus any other types item 2 surfaced); KNOWN_ISSUES.md gains an Outfit/Spell limitation entry under v2.8.0.
+   - **Case (B)/(C):** bridge fix in `ApplyAttachScripts` reflection lookup; coverage-smoke 1.r.40 + 1.r.47 flip from SKIP to positive PASS regression tests; schema description retained or refined.
 
-3. **Probe-first if necessary.** Extend `coverage-smoke` or `race-probe` to demonstrate the failure mode. Run it. Capture failing output.
+4. **`perk_quest_adapter_subclass` bug fix** (PatchEngine.cs:1739 area, in `ApplyAttachScripts`). Replace `vmad = new VirtualMachineAdapter()` with `vmad = (VirtualMachineAdapter)Activator.CreateInstance(vmadProp.PropertyType)!;` per the Phase 2 fix angle. EFFECTS_AUDIT.md § Constructibility (Phase 1) confirmed `PerkAdapter` and `QuestAdapter` are activator-creatable. The `Scripts` collection on the constructed adapter is non-null (each subclass auto-initializes Scripts via its parameterless ctor); the existing append loop continues unchanged. Regression risk: low — every other record type's `VirtualMachineAdapter` property declares the base type, so the change reduces to the existing path.
 
-4. **Root-cause.** Read the bridge code at file:line. Articulate root cause in handoff (one paragraph, link to file:line).
+5. **`add_conditions` `actor_value` parameter** (Phase 3 finding #5; PatchEngine.cs `BuildConditionFromJson` + Condition construction). Today, `function: "GetActorValue"` without an `actor_value` parameter defaults to ActorValue index 0 (Aggression — semantically meaningless for `>= 50`). Add an optional `actor_value` field to the add_conditions item shape. When supplied, parse string → ActorValue enum, set on the constructed Condition's parameter slot. **Scope-lock:** `actor_value` only. Other Condition function parameters (e.g. `GetIsID` taking a FormID, `GetInFaction` taking a Faction FormID, `GetInCell` taking a Cell FormID) stay v2.9 candidates UNLESS the bridge investigation reveals the generic Mutagen ConditionData parameter slot mechanism is essentially the same code — in which case fold in as bonus-catch with explicit handoff documentation. Otherwise minimal fix: just `actor_value`.
 
-5. **Fix.** Minimal change addressing root cause. Bonus-catch if the touched file surfaces a related latent issue. No drive-by cleanup.
+6. **Helper-throw → Tier D unification** (Phase 2 finding 4.c.01; PatchEngine.cs `ApplyAddConditions` + `ApplyRemoveConditions`). Today, when a record type lacks a `Conditions` property (e.g. QUST, which has DialogConditions/EventConditions instead), the helpers throw `"Record type X does not support conditions"` directly. The error response carries the helper-throw text, NOT Tier D's structured `unmatched_operators` field. Unify: change the helpers to recognize "no Conditions property" and **not write the corresponding mods key** (`conditions_added` / `conditions_removed`). Tier D's existing coverage check at the end of `ApplyModifications` will then catch the missing key and produce uniform `unmatched_operators: ["add_conditions"]` / `["remove_conditions"]` shape. Result: error responses are structurally consistent across all unsupported (operator, record-type) combos.
 
-6. **Add a regression test in `coverage-smoke`.** Same probe shape that demonstrated the bug, now passing.
+7. **Coverage-smoke 1.A.01 FormID swap** (Phase 3 finding #1). Today the test labels `Skyrim.esm:08F95E` as VendorItemFood but that FormID resolves to `AMBWindloopMountainsHills01LP` (audio category record). Bridge accepts opaque FormLinks for add_keywords without record-type validation, so the test passes mechanically — but the label is misleading. Swap to a real KYWD FormID in Skyrim.esm using `coverage-smoke`'s existing `FreshKwFor` predicate pattern (or pick a verified KYWD by inspection). Update the test name + comment.
 
-7. **Build the bridge:** `dotnet build -c Release`. Zero warnings, zero errors.
+8. **Regression tests** for items 4, 5, 6 in `coverage-smoke/Program.cs`:
+   - **Item 4 regression:** lift the race-probe Batch 7 PerkAdapter/QuestAdapter probes into coverage-smoke as positive-case tests (now passing post-fix).
+   - **Item 5 regression:** add a coverage-smoke cell exercising `add_conditions` with `function: "GetActorValue", actor_value: "Health", operator: ">=", value: 50` against an MGEF; readback verifies the constructed Condition references ActorValue.Health (not ActorValue index 0).
+   - **Item 6 regression:** add a coverage-smoke cell exercising `add_conditions` on a record type without Conditions property (e.g. QUST or ARMO); assert the response has `unmatched_operators: ["add_conditions"]` shape (not the legacy helper-throw shape).
 
-8. **Run `coverage-smoke` end-to-end.** Confirm new test passes AND every previously-passing test still passes.
+9. **Build the bridge:** `cd tools/mutagen-bridge && dotnet build -c Release`. Zero warnings, zero errors.
 
-9. **Update CHANGELOG** (append fix bullet under existing `## v2.8.0 — TBD` entry).
+10. **Run `coverage-smoke` end-to-end.** Expected: ALL 157 prior tests still pass + 3 new regression tests (items 4/5/6) pass + 1.r.40/1.r.47 either stay SKIP under Case (A) or flip to PASS under Case (B)/(C). Total target: 160+ tests, all green.
 
-10. **Update KNOWN_ISSUES.md** if the fix changes a documented limitation (e.g. removes the PerkAdapter/QuestAdapter entry).
+11. **Schema + docs updates:**
+    - `tools_patching.py`: attach_scripts supported-records list updated per items 2+3 verdict; add_conditions schema gains `actor_value` parameter (optional) per item 5.
+    - `CHANGELOG.md`: add `### Fixed — bridge` and `### Added — bridge` (or reorganize as needed) under `## v2.8.0 — TBD`. Bullets cover: PerkAdapter/QuestAdapter fix; OTFT/SPEL schema correction (whatever the verdict is); helper-throw → Tier D unification; `actor_value` parameter; matrix-accuracy improvements (coverage-smoke 1.A.01).
+    - `KNOWN_ISSUES.md`: remove PerkAdapter/QuestAdapter entry (now fixed); add OTFT/SPEL limitation entry under v2.8.0 if Case A; add LVSP topology note from Phase 3 finding #4 ("merge_leveled_list verification on Authoria modlist constrained by source-data uniformity"); add Configuration.PerkType clarification (PERK schema doesn't have a Configuration sub-object — writable scalars are top-level).
 
-11. **Write `PHASE_4_<slug>_HANDOFF.md`** documenting bug repro, root cause, fix, regression test, end-to-end smoke result.
+12. **Write `PHASE_4_HANDOFF.md`** — single handoff for all of Phase 4. Covers: probe verdict (item 1), cross-check verdict (item 2), per-item completion status, code change summaries, smoke results (pre + post counts), CHANGELOG/KNOWN_ISSUES diffs.
 
-12. **Commit:** `[v2.8 P4 <slug>] <one-line fix description>`. Push.
+13. **Commit pair** (per v2.7.1 double-commit cadence):
+    - **Work commit:** `[v2.8 P4] Bridge fixes + matrix corrections + docs hygiene` with body listing items 1–11 with one-line summaries each.
+    - **Hash-record commit:** `[v2.8 P4] Handoff: record commit hash <work-hash>` with empty diff.
+    Push both.
 
-### Acceptance (per Phase 4 session)
+### Acceptance
 
-- Targeted bug's regression test passes.
-- All previously-passing tests still pass.
-- Bridge builds clean.
-- Handoff captures root cause + fix + regression evidence.
-- CHANGELOG entry lists the fix.
+- OTFT/SPEL VMAD disambiguation verdict captured (A/B/C) with full evidence in handoff.
+- Cross-check probe captures per-type verdict for every attach_scripts supported type.
+- `perk_quest_adapter_subclass` bug fix verified by lifted race-probe Batch 7 → coverage-smoke regression test.
+- `add_conditions actor_value` parameter accepted by bridge; readback confirms ActorValue enum routes to the right slot.
+- Helper-throw → Tier D unification verified by coverage-smoke regression test (assert `unmatched_operators` shape on QUST + add_conditions OR ARMO + add_conditions, whichever target the test picks).
+- Coverage-smoke 1.A.01 cell uses a real KYWD FormID; test name + comment updated.
+- Bridge builds clean (0 warnings, 0 errors).
+- Coverage-smoke runs to 160+ tests, ALL PASS (including new regression cells; SKIPs only if item 1 verdict is Case A — 1.r.40 + 1.r.47 retain SKIP-with-Case-A-confirmed reason).
+- Schema description, CHANGELOG, KNOWN_ISSUES updated per item 11.
+- Work commit + hash-record commit pushed.
 
 ---
 
@@ -617,9 +635,13 @@ The disambiguation probe is the **first action** of the `perk_quest_adapter_subc
 
 1. **Verify session start.** `origin/main` at the latest Phase 4 commit (or Phase 3 if no Phase 4 needed) and clean. Live install at `<live>` running v2.7.1 (will be bumped at Phase 5 sync). All `PHASE_4_*_HANDOFF.md` files have `Status: Complete`.
 
-2. **Final coverage-smoke run** against the latest bridge build. Confirm 100% pass.
+2. **Final coverage-smoke run** against the latest bridge build. Confirm 100% pass — including the 3 new regression cells Phase 4 added (PerkAdapter/QuestAdapter, `actor_value`, helper-throw → Tier D unification).
 
-3. **Final live workflow re-run.** Re-execute any Layer 3 scenario that surfaced bugs in Phase 3, against the latest bridge. Confirm previously-failing assertions now pass. Test patches deleted.
+3. **Final live workflow re-run — required even if Phase 3 surfaced zero bugs.** Phase 4 introduced bridge changes (subclass-aware adapter construction, `add_conditions actor_value` parameter, helper-throw error path unification) that weren't present when Phase 3 ran scenarios against the live install. Re-run Scenarios 3.1, 3.4, 3.5 against the post-Phase-4 bridge to confirm no workflow regression:
+   - **3.1 (Reqtify-race + ability spells)** — exercises the most diverse capability surface (Effects-list write + Tier B aliases + IFormLinkNullable bonus-catch); regression risk if Phase 4's bridge changes interact unexpectedly with Phase 1's mechanisms.
+   - **3.4 (NPC bundle, 7 operators)** — exercises every NPC operator dispatch arm in one call; regression risk if Phase 4's adapter-construction change interferes with non-PERK/QUST attach_scripts (it shouldn't — every other type's property declares the base type — but verify).
+   - **3.5 (MGEF condition + PERK reflection)** — exercises `add_conditions` (Phase 4 changed the helper-throw path) and PERK reflection writes (no Phase 4 change, but adjacent code).
+   Each scenario follows the same protocol as Phase 3: build patch via `mo2_create_patch`, readback via `mo2_record_detail`, delete patch + F5. Any regression → halt and investigate before Phase 5 ship can proceed. Test patches deleted post-verification.
 
 4. **Build production bridge:**
    ```bash

@@ -12,6 +12,20 @@
 
 ---
 
+## 📝 Phase 3 corrections (2026-04-26 plan-amend)
+
+Per Aaron 2026-04-26, MATRIX is updated in place to reflect Phase 3 findings rather than preserved as a strict planning snapshot. Original-vs-corrected delta history lives in `PHASE_3_HANDOFF.md` § Findings. Four cells/sections corrected below:
+
+| Cell | Original | Corrected | Source finding |
+|---|---|---|---|
+| **1.A.01 / 1.A.03** | `Skyrim.esm:08F95E` labelled VendorItemFood | Use a real KYWD via `coverage-smoke`'s `FreshKwFor` predicate. The original FormID resolves to `AMBWindloopMountainsHills01LP` (audio category record), not a KYWD. Bridge accepts opaque FormLinks for add_keywords without record-type validation, so the test passes mechanically — but the label was misleading. Phase 4 swaps in the harness. | Phase 3 finding #1 |
+| **Scenario 3.3** | `mods.merged_count > 0` | Bridge response actually uses `details[].entries_merged` (top-level on per-record detail, not nested under `mods`). Use `entries_merged ≥ 0`. **LVSP topology constraint:** Authoria modlist's LVSP records carry uniform SPEL References across overrides (Requiem just rebalances levels), so merge correctly dedups to `entries_merged: 0` for any tested LVSP. Bridge mechanism is correct; the assertion shape needs to accept zero as valid for this modlist's data shape. | Phase 3 findings #2 + #4 |
+| **Scenario 3.5** | PERK reflection target `Configuration.PerkType` | Mutagen's PERK schema has no `Configuration` sub-object. Writable PERK scalars are at the top level: `Level`, `NumRanks`, `Trait`, `Playable`, `Hidden`, plus `NextPerk` as a single-field FormLink (which exercises Phase 1's IFormLinkNullable bonus-catch on `IFormLinkNullable<IPerkGetter>`). Use these instead. | Phase 3 finding #3 |
+
+Phase 3 finding #5 (`add_conditions GetActorValue parameterless default`) is being absorbed in Phase 4 as a bridge enhancement (`actor_value` parameter) rather than a matrix correction — handled in PLAN.md § Phase 4 step 5. After Phase 4, the matrix's add_conditions test cells (1.r.33 et al.) should be re-anchored to use the new `actor_value` parameter for GetActorValue cases.
+
+---
+
 ## Layer 1 — Coverage matrix (~58 assertions)
 
 ### 1.A — Tier A wire-ups (positive cases — 16 pairs × ≥1 record each)
@@ -20,9 +34,9 @@ Re-runs Phase 5's smoke matrix for regression-anchor PLUS adds a depth row per p
 
 | # | Op | Type | Source | Operation | Expected |
 |---|----|------|--------|-----------|----------|
-| 1.A.01 | add_keywords | RACE | first RACE w/ Keywords populated | add VendorItemFood (Skyrim.esm:08F95E) | mods.keywords_added=1; readback Keywords contains target |
+| 1.A.01 | add_keywords | RACE | first RACE w/ Keywords populated | add a real KYWD via `FreshKwFor` predicate (corrected 2026-04-26 — see § Phase 3 corrections) | mods.keywords_added=1; readback Keywords contains target |
 | 1.A.02 | remove_keywords | RACE | same | remove ActorTypeNPC | mods.keywords_removed=1; readback Keywords lacks target |
-| 1.A.03 | add_keywords | RACE | second RACE w/ Keywords populated | add VendorItemFood | mods.keywords_added=1 |
+| 1.A.03 | add_keywords | RACE | second RACE w/ Keywords populated | add a real KYWD via `FreshKwFor` predicate (corrected 2026-04-26) | mods.keywords_added=1 |
 | 1.A.04 | remove_keywords | RACE | same | remove a known-present keyword | mods.keywords_removed=1 |
 | 1.A.05 | add_spells | RACE | first RACE w/ ActorEffect populated | add Flames (Skyrim.esm:0002B956) | mods.spells_added=1; readback ActorEffect contains target |
 | 1.A.06 | remove_spells | RACE | same | remove first existing actor effect | mods.spells_removed=1 |
@@ -231,7 +245,7 @@ This is the workflow that surfaced Phase 1's Effects-list gap. Verifies the v2.7
 
 **Operations:** merge_leveled_list with base_plugin = overhaul winner, override_plugins = [content mod].
 
-**Assertions:** mods.merged_count > 0; output ESP contains the LVSP override; readback Entries contains union of base + override; ChanceNone preserved at base value.
+**Assertions** (corrected 2026-04-26 — see § Phase 3 corrections): bridge accepts (`success=true`); per-record `details[].entries_merged ≥ 0` (NOT `mods.merged_count` — bridge response uses top-level `entries_merged` on per-record detail). For Authoria modlist's LVSP records specifically, expect `entries_merged: 0` (LVSP topology constraint — vanilla/USSEP/Requiem carry uniform SPEL References across overrides; merge correctly dedups). Output ESP contains the LVSP override; readback Entries matches base plugin (Requiem); ChanceNone preserved.
 
 ### Scenario 3.4 — NPC bundle (~8 assertions)
 
@@ -245,9 +259,9 @@ This is the workflow that surfaced Phase 1's Effects-list gap. Verifies the v2.7
 
 **Target:** An MGEF + a PERK both winnable in the modlist (pick at Phase 3).
 
-**Operations:** MGEF: add_conditions (one ConditionFloat targeting GetActorValue). PERK: set_fields against a Mutagen property path (e.g. `Configuration.PerkType` — confirm at Phase 3).
+**Operations** (corrected 2026-04-26 — see § Phase 3 corrections): MGEF: `add_conditions` (one ConditionFloat targeting GetActorValue; **post-Phase-4 should also pass `actor_value: "<AV name>"`** to exercise the new Phase 4 parameter — see PLAN.md § Phase 4 step 5). PERK: `set_fields` against actually-writable PERK scalars — `Level`, `NumRanks`, `Trait`, `Playable`, `Hidden`, plus `NextPerk` (single-field FormLink — exercises Phase 1's IFormLinkNullable bonus-catch on `IFormLinkNullable<IPerkGetter>`). The original `Configuration.PerkType` path doesn't exist on Mutagen's PERK schema; Phase 3 substituted `{Level, NumRanks, NextPerk}` and confirmed all three writable.
 
-**Assertions:** MGEF readback Conditions contains new entry with correct function/operator/value; PERK readback target field has new value; both records ship in output ESP.
+**Assertions:** MGEF readback Conditions contains new entry with correct function/operator/value (and ActorValue resolved correctly post-Phase-4); PERK readback target fields have new values + source fields preserved (Effects, Name, Description, Trait, Playable, Hidden, Conditions); both records ship in output ESP.
 
 ---
 

@@ -4,7 +4,7 @@ All plugin changes are made in the Dev Build copy first. Once tested and stable,
 
 ---
 
-## v2.7.1 — TBD
+## v2.7.1 — 2026-04-25
 
 Comprehensive bridge coverage expansion driven by a user report on RACE patching. The surfaced limitation was a single (record-type, operator) gap; investigation found a class of silent-failure bugs covering many record types. v2.7.1 closes the bug class generically (Tier D), expands `set_fields` with bracket-indexer + JSON-object dict syntax (Tier C), wires up every Mutagen-supported (operator, record-type) gap the audit identified (Tier A — 16 pairs across 9 record types), and adds RACE stat aliases for ergonomics (Tier B). v2.8 will be the verification/hardening release — no new capabilities, real-world exercise of v2.7.1's wire-ups, fix what surfaces.
 

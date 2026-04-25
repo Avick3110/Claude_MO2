@@ -4,6 +4,27 @@ All plugin changes are made in the Dev Build copy first. Once tested and stable,
 
 ---
 
+## v2.8.0 — TBD
+
+Verification + Effects-list write capability. Bridge support for `set_fields: {Effects: [...]}` on SPEL/ALCH/ENCH/SCRL/INGR records — surfaced from a real consumer's custom-race rebuild patch hitting the gap during v2.7.1's first-day use. Plus a bonus-catch fix for single-field FormLink writes via `set_fields`, surfaced deterministically by Phase 1's smoke and folded in per the Phase 1 plan's bonus-catch precedent. v2.8 was originally scoped as pure verification; the Effects-list addition is a bounded re-scope (one new mechanism, five record types). v2.8.0's verification matrix runs in Phase 2/3.
+
+### Added — bridge
+
+- **SPEL/ALCH/ENCH/SCRL/INGR Effects array write** via `set_fields: {Effects: [...]}`. Each JSON object in the array constructs a fresh Mutagen `Effect` with sub-fields: `BaseEffect` (MGEF FormLink, accepts `IFormLinkNullable<IMagicEffectGetter>` per Mutagen 0.53.1's actual schema), `Data` (settable sub-LoquiObject of type `EffectData` — `Magnitude` / `Area` / `Duration`), and optional nested `Conditions` (each entry takes the same `{function, operator, value, global, run_on, or_flag}` shape as the existing `add_conditions` operator, via a shared `BuildCondition` factory extracted from `ApplyAddConditions` for single-source-of-truth). Replace-semantics — whole-array assignment clears the source list and writes the new entries. The mechanism is a generic JSON Array → `ExtendedList<T>` → constructed `T` per-element conversion; for `T == Condition` (which is abstract — see `dev/plans/v2.8.0_verification/EFFECTS_AUDIT.md` § Constructibility) the construction routes through the shared factory. The JSON-Object → sub-LoquiObject in-place merge that powers the `Effect.Data` setter (incidentally enabling `set_fields: {Configuration: {Health: 200}}`-style sub-object merges on every record) is a side effect of the minimum mechanism, not a separately advertised user-facing surface. Surfaced from a real consumer's custom-race rebuild patch; pre-existing carry-over candidate "per-effect spell conditions" is absorbed (per-effect `Conditions` ride the same recursion).
+
+- **JSON String → single-field FormLink in `set_fields`** (bonus-catch from Phase 1 smoke). Pre-v2.8.0, `set_fields` could write list-of-FormLink properties (since v2.5.6's MUSC.Tracks fix) but not single-field FormLink properties — the bridge's `ConvertJsonElementToListItem` had a JSON-string → FormLink branch for list elements, but the analogous branch was missing from `ConvertJsonValue`. v2.7.1 never exercised this path because no `set_fields` operation targeted a single-field FormLink. Phase 1's per-Effect property recursion exposed the gap deterministically — `Effect.BaseEffect` is `IFormLinkNullable<IMagicEffectGetter>` and 6 of 8 Layer 1.E smoke cells failed with "Cannot convert JSON String to IFormLinkNullable<…>". The fix covers all five Mutagen FormLink generic shapes (`IFormLinkGetter<T>` / `IFormLink<T>` / `IFormLinkNullable<T>` / `FormLink<T>` / `FormLinkNullable<T>`); a `IsNullableFormLinkType` helper picks the correct concrete (`FormLinkNullable<T>` for nullable target types — `FormLink<T>` doesn't implement `IFormLinkNullable<T>` so reflection setters reject it). Side benefit: every record type's single-field FormLink properties (RACE.Skin, ARMO.ObjectEffect via path-style `set_fields`, etc.) are now writable via `set_fields` with no schema-level change.
+
+### Out of scope (v2.9 candidates)
+
+- **Quest condition disambiguation** (`DialogConditions` / `EventConditions`). Carried over from v2.7.1 — surfaces as a clean Tier D error today.
+- **AMMO enchantment.** Carried over from v2.7.1 — Mutagen schema absence; requires upstream change.
+- **Replace-semantics whole-dict assignment** (Tier C dicts). Carried over from v2.7.1. Note: array-replace semantics ship in v2.8.0 (Effects-list); dict-merge remains the only Tier C dict mode.
+- **Chained dict access** (`Foo[Key].Sub`). Carried over from v2.7.1 — Tier C is terminal-bracket only.
+- **Adapter-subclass `attach_scripts` on PERK/QUST.** Carried over from v2.7.1; remains a candidate for Phase 4 if Phase 2/3 verification confirms the failure mode.
+- **QUST.Aliases / Stages / Objectives, PERK.Effects.** Out of scope for v2.8.0's bounded Effects-list mechanism — sub-class polymorphism makes Activator-create-then-recurse harder; defer until a real consumer surfaces.
+
+---
+
 ## v2.7.1 — 2026-04-25
 
 Comprehensive bridge coverage expansion driven by a user report on RACE patching. The surfaced limitation was a single (record-type, operator) gap; investigation found a class of silent-failure bugs covering many record types. v2.7.1 closes the bug class generically (Tier D), expands `set_fields` with bracket-indexer + JSON-object dict syntax (Tier C), wires up every Mutagen-supported (operator, record-type) gap the audit identified (Tier A — 16 pairs across 9 record types), and adds RACE stat aliases for ergonomics (Tier B). v2.8 will be the verification/hardening release — no new capabilities, real-world exercise of v2.7.1's wire-ups, fix what surfaces.

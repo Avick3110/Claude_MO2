@@ -1060,6 +1060,49 @@ public class PatchEngine
             return;
         }
 
+        // v2.8.0 Branch B — JSON Object → sub-LoquiObject in-place merge.
+        // When the JSON value is an object and the target property is a constructible
+        // non-dict, non-FormLink reference type (e.g. Effect.Data : EffectData),
+        // get-or-Activator-create the sub-instance, then recursively SetPropertyByPath
+        // each JSON member. In-place merge — preserves sibling fields not named in JSON.
+        //
+        // Probe-justified: EFFECTS_AUDIT.md § Effect class shape captures Effect.Data
+        // as a settable EffectData sub-LoquiObject, null-initialized after `new Effect()`.
+        // Required for set_fields: {Effects: [{Data: {Magnitude, Area, Duration}, ...}]}.
+        //
+        // Guards: !IsFormLinkType excludes IFormLink<>/IFormLinkNullable<>/FormLink<>
+        // and friends — those receive JSON strings, not objects; the Activator path
+        // would produce the wrong shape. !=typeof(string) prevents Activator on string.
+        // IsClass excludes value types (structs/primitives) — they fall through to
+        // ConvertJsonValue and surface the existing "Cannot convert" error.
+        //
+        // Side effect: incidentally enables set_fields: {Configuration: {Health: 200}}
+        // sub-LoquiObject merges on every record. Per scope-lock, NOT advertised in
+        // the schema description — the only Phase 1 user-facing surface is the
+        // Effects-array form.
+        if (value.ValueKind == JsonValueKind.Object &&
+            finalProp.PropertyType.IsClass &&
+            finalProp.PropertyType != typeof(string) &&
+            !IsFormLinkType(finalProp.PropertyType))
+        {
+            var subTarget = finalProp.GetValue(current);
+            if (subTarget == null)
+            {
+                if (!finalProp.CanWrite)
+                    throw new ArgumentException(
+                        $"Sub-object property '{finalProp.Name}' is null and has no setter; cannot merge JSON Object into it.");
+                subTarget = System.Activator.CreateInstance(finalProp.PropertyType)
+                    ?? throw new InvalidOperationException(
+                        $"Activator.CreateInstance returned null for {FriendlyTypeName(finalProp.PropertyType)}.");
+                finalProp.SetValue(current, subTarget);
+            }
+            foreach (var member in value.EnumerateObject())
+            {
+                SetPropertyByPath(subTarget, member.Name, member.Value);
+            }
+            return;
+        }
+
         var converted = ConvertJsonValue(value, finalProp.PropertyType);
         finalProp.SetValue(current, converted);
     }
@@ -1110,6 +1153,44 @@ public class PatchEngine
             throw new ArgumentException($"Malformed path segment '{segment}': empty key inside brackets.");
 
         return (name, key);
+    }
+
+    /// <summary>
+    /// v2.8.0 — Test whether <paramref name="t"/> is one of the Mutagen FormLink
+    /// generic shapes (<c>IFormLinkGetter&lt;T&gt;</c>, <c>IFormLink&lt;T&gt;</c>,
+    /// <c>IFormLinkNullable&lt;T&gt;</c>, <c>FormLink&lt;T&gt;</c>,
+    /// <c>FormLinkNullable&lt;T&gt;</c>). Used by Branch B in <c>SetPropertyByPath</c>
+    /// to keep FormLink-typed properties out of the JSON-Object → sub-LoquiObject
+    /// path — those receive JSON string values (parsed via <c>FormIdHelper.Parse</c>),
+    /// not JSON objects, and Activator-creating an empty FormLink would produce
+    /// the wrong shape if a user mistakenly passes a JSON object.
+    /// </summary>
+    private static bool IsFormLinkType(Type t)
+    {
+        if (!t.IsGenericType) return false;
+        var def = t.GetGenericTypeDefinition();
+        return def == typeof(IFormLinkGetter<>)
+            || def == typeof(IFormLink<>)
+            || def == typeof(IFormLinkNullable<>)
+            || def == typeof(FormLink<>)
+            || def == typeof(FormLinkNullable<>);
+    }
+
+    /// <summary>
+    /// v2.8.0 — Test whether <paramref name="t"/> is one of the Mutagen
+    /// FormLink shapes that requires the <c>FormLinkNullable&lt;T&gt;</c>
+    /// concrete (rather than the non-nullable <c>FormLink&lt;T&gt;</c>) when
+    /// constructing an instance for assignment. Used by ConvertJsonValue's
+    /// JSON String → single-field FormLink branch — properties typed
+    /// IFormLinkNullable&lt;T&gt; reject FormLink&lt;T&gt; instances at the
+    /// reflection setter because FormLink&lt;T&gt; doesn't implement
+    /// IFormLinkNullable&lt;T&gt;.
+    /// </summary>
+    private static bool IsNullableFormLinkType(Type t)
+    {
+        if (!t.IsGenericType) return false;
+        var def = t.GetGenericTypeDefinition();
+        return def == typeof(IFormLinkNullable<>) || def == typeof(FormLinkNullable<>);
     }
 
     /// <summary>
@@ -1252,6 +1333,29 @@ public class PatchEngine
         if (underlying.IsEnum && value.ValueKind == JsonValueKind.Number)
             return Enum.ToObject(underlying, value.GetInt32());
 
+        // v2.8.0 — JSON String → single-field FormLink. Bonus-catch from Phase 1
+        // Layer 1.E smoke: Effect.BaseEffect is IFormLinkNullable<IMagicEffectGetter>,
+        // not IFormLink<>. ConvertJsonElementToListItem's FormLink branch only handles
+        // list-element types (IFormLinkGetter<>/IFormLink<>/FormLink<>), and Mutagen
+        // documents that "list elements are non-nullable" — so single-field FormLink
+        // properties (BaseEffect on Effect, ArmorRace on Race, etc.) flow here via
+        // SetPropertyByPath fallback. Without this branch, every set_fields against
+        // a single FormLink fails. Probe-predicted (EFFECTS_AUDIT.md § Open
+        // questions item 3); confirmed by smoke; fix is one-liner-y by design.
+        //
+        // For nullable target types the concrete must be FormLinkNullable<T> —
+        // FormLink<T> doesn't implement IFormLinkNullable<T>, so a setter that
+        // expects the nullable interface would reject a non-nullable instance.
+        if (value.ValueKind == JsonValueKind.String && IsFormLinkType(underlying))
+        {
+            var formKey = FormIdHelper.Parse(value.GetString()!);
+            var inner = underlying.GetGenericArguments()[0];
+            var concreteType = IsNullableFormLinkType(underlying)
+                ? typeof(FormLinkNullable<>).MakeGenericType(inner)
+                : typeof(FormLink<>).MakeGenericType(inner);
+            return System.Activator.CreateInstance(concreteType, formKey);
+        }
+
         // JSON arrays into Mutagen list-typed fields (ExtendedList<T> / IExtendedList<T> / IList<T>).
         // Common case: properties typed ExtendedList<IFormLinkGetter<X>> — e.g. MUSC.Tracks.
         if (value.ValueKind == JsonValueKind.Array)
@@ -1342,6 +1446,44 @@ public class PatchEngine
             }
         }
 
+        // v2.8.0 Branch A — JSON Object → constructed LoquiObject element.
+        // Used by set_fields: {Effects: [{...}, ...]} on SPEL/ALCH/ENCH/SCRL/INGR
+        // (and by any future list-of-LoquiObject property the bridge dispatches).
+        // Each JSON object constructs a fresh elementType instance; per-property
+        // values flow back through SetPropertyByPath (recursive — so nested
+        // sub-objects, FormLinks, and lists all reuse existing machinery).
+        //
+        // Special case typeof(Condition): the generic Activator path can't
+        // construct an abstract class — see EFFECTS_AUDIT.md § Constructibility.
+        // BuildConditionFromJson uses the {function, operator, value, global, ...}
+        // DSL the existing ApplyAddConditions handler has used since v2.4.1.
+        if (element.ValueKind == JsonValueKind.Object && elementType.IsClass && elementType != typeof(string))
+        {
+            if (elementType == typeof(Condition))
+                return BuildConditionFromJson(element);
+
+            object? entry;
+            try
+            {
+                entry = System.Activator.CreateInstance(elementType);
+            }
+            catch (Exception ex)
+            {
+                throw new ArgumentException(
+                    $"Cannot construct list element of type {FriendlyTypeName(elementType)} via Activator.CreateInstance: {ex.Message}",
+                    ex);
+            }
+            if (entry == null)
+                throw new InvalidOperationException(
+                    $"Activator.CreateInstance returned null for {FriendlyTypeName(elementType)}.");
+
+            foreach (var member in element.EnumerateObject())
+            {
+                SetPropertyByPath(entry, member.Name, member.Value);
+            }
+            return entry;
+        }
+
         // Primitive / string / enum element — recurse.
         return ConvertJsonValue(element, elementType);
     }
@@ -1423,71 +1565,107 @@ public class PatchEngine
         int added = 0;
         foreach (var ce in conditions)
         {
-            var typeName = $"Mutagen.Bethesda.Skyrim.{ce.Function}ConditionData";
-            var condDataType = typeof(ISkyrimMod).Assembly.GetType(typeName);
-            if (condDataType == null)
-                throw new ArgumentException($"Unknown condition function: '{ce.Function}'");
-
-            var condData = System.Activator.CreateInstance(condDataType) as ConditionData;
-            if (condData == null)
-                throw new InvalidOperationException($"Could not create {typeName}");
-
-            // Set RunOnType
-            if (Enum.TryParse<Condition.RunOnType>(ce.RunOn, true, out var runOn))
-                condData.RunOnType = runOn;
-
-            Condition condition;
-            if (!string.IsNullOrEmpty(ce.Global))
-            {
-                // ConditionGlobal: compare against a Global variable (e.g., MCM toggles)
-                var globalKey = FormIdHelper.Parse(ce.Global);
-                var globalLink = globalKey.ToLink<IGlobalGetter>();
-
-                // The function's own Global parameter (CTDA Parameter #1 in xEdit) — Mutagen stores
-                // these in FormLinkOrIndex<T> (which supports either a FormKey or an alias index).
-                // Without setting this, xEdit reports "NULL reference, expected: GLOB".
-                var globalProp = condDataType.GetProperty("Global");
-                if (globalProp != null
-                    && globalProp.PropertyType.IsGenericType
-                    && globalProp.PropertyType.GetGenericTypeDefinition().Name.StartsWith("IFormLinkOrIndex"))
-                {
-                    var targetType = globalProp.PropertyType.GetGenericArguments()[0];
-                    var concreteType = typeof(FormLinkOrIndex<>).MakeGenericType(targetType);
-                    // ctor: FormLinkOrIndex<T>(IFormLinkOrIndexFlagGetter parent, FormKey key)
-                    var newInstance = System.Activator.CreateInstance(concreteType, new object[] { condData, globalKey });
-                    globalProp.SetValue(condData, newInstance);
-                }
-
-                condition = new ConditionGlobal
-                {
-                    ComparisonValue = globalLink,
-                    CompareOperator = ParseCompareOperator(ce.Operator),
-                    Data = condData,
-                };
-            }
-            else if (ce.Value.HasValue)
-            {
-                // ConditionFloat: compare against a literal value
-                condition = new ConditionFloat
-                {
-                    ComparisonValue = ce.Value.Value,
-                    CompareOperator = ParseCompareOperator(ce.Operator),
-                    Data = condData,
-                };
-            }
-            else
-            {
-                throw new ArgumentException(
-                    $"Condition for '{ce.Function}' must provide either 'value' (float) or 'global' (FormID) — got neither.");
-            }
-
-            if (ce.OrFlag)
-                condition.Flags |= Condition.Flag.OR;
-
-            condList.Add(condition);
+            condList.Add(BuildCondition(ce));
             added++;
         }
         return added;
+    }
+
+    /// <summary>
+    /// v2.8.0 — Single-source-of-truth Condition factory. Builds one Mutagen
+    /// <c>Condition</c> (concrete <c>ConditionFloat</c> or <c>ConditionGlobal</c>)
+    /// from the friendly <c>ConditionEntry</c> DSL: <c>{function, operator, value,
+    /// global, run_on, or_flag}</c>. Used by <c>ApplyAddConditions</c> AND by
+    /// <c>BuildConditionFromJson</c> (Branch A's <c>typeof(Condition)</c>
+    /// special case for nested-Conditions arrays inside an Effect entry).
+    ///
+    /// Probe-justified single-source-of-truth: <c>Activator.CreateInstance(typeof(Condition))</c>
+    /// throws (Condition is abstract — see EFFECTS_AUDIT.md Constructibility section),
+    /// so the generic Branch A Activator path can't construct a Condition.
+    /// </summary>
+    private static Condition BuildCondition(ConditionEntry ce)
+    {
+        var typeName = $"Mutagen.Bethesda.Skyrim.{ce.Function}ConditionData";
+        var condDataType = typeof(ISkyrimMod).Assembly.GetType(typeName);
+        if (condDataType == null)
+            throw new ArgumentException($"Unknown condition function: '{ce.Function}'");
+
+        var condData = System.Activator.CreateInstance(condDataType) as ConditionData;
+        if (condData == null)
+            throw new InvalidOperationException($"Could not create {typeName}");
+
+        // Set RunOnType
+        if (Enum.TryParse<Condition.RunOnType>(ce.RunOn, true, out var runOn))
+            condData.RunOnType = runOn;
+
+        Condition condition;
+        if (!string.IsNullOrEmpty(ce.Global))
+        {
+            // ConditionGlobal: compare against a Global variable (e.g., MCM toggles)
+            var globalKey = FormIdHelper.Parse(ce.Global);
+            var globalLink = globalKey.ToLink<IGlobalGetter>();
+
+            // The function's own Global parameter (CTDA Parameter #1 in xEdit) — Mutagen stores
+            // these in FormLinkOrIndex<T> (which supports either a FormKey or an alias index).
+            // Without setting this, xEdit reports "NULL reference, expected: GLOB".
+            var globalProp = condDataType.GetProperty("Global");
+            if (globalProp != null
+                && globalProp.PropertyType.IsGenericType
+                && globalProp.PropertyType.GetGenericTypeDefinition().Name.StartsWith("IFormLinkOrIndex"))
+            {
+                var targetType = globalProp.PropertyType.GetGenericArguments()[0];
+                var concreteType = typeof(FormLinkOrIndex<>).MakeGenericType(targetType);
+                // ctor: FormLinkOrIndex<T>(IFormLinkOrIndexFlagGetter parent, FormKey key)
+                var newInstance = System.Activator.CreateInstance(concreteType, new object[] { condData, globalKey });
+                globalProp.SetValue(condData, newInstance);
+            }
+
+            condition = new ConditionGlobal
+            {
+                ComparisonValue = globalLink,
+                CompareOperator = ParseCompareOperator(ce.Operator),
+                Data = condData,
+            };
+        }
+        else if (ce.Value.HasValue)
+        {
+            // ConditionFloat: compare against a literal value
+            condition = new ConditionFloat
+            {
+                ComparisonValue = ce.Value.Value,
+                CompareOperator = ParseCompareOperator(ce.Operator),
+                Data = condData,
+            };
+        }
+        else
+        {
+            throw new ArgumentException(
+                $"Condition for '{ce.Function}' must provide either 'value' (float) or 'global' (FormID) — got neither.");
+        }
+
+        if (ce.OrFlag)
+            condition.Flags |= Condition.Flag.OR;
+
+        return condition;
+    }
+
+    /// <summary>
+    /// v2.8.0 — JsonElement entry-point for <see cref="BuildCondition"/>. Used by
+    /// Branch A in <see cref="ConvertJsonElementToListItem"/> when the array
+    /// element type is <c>typeof(Condition)</c> — keeps the friendly
+    /// <c>{function, operator, value, ...}</c> DSL working inside nested
+    /// <c>Effect.Conditions</c> arrays under <c>set_fields: {Effects: [...]}</c>.
+    /// </summary>
+    private static Condition BuildConditionFromJson(JsonElement entryJson)
+    {
+        if (entryJson.ValueKind != JsonValueKind.Object)
+            throw new ArgumentException(
+                $"Condition entry must be a JSON object, got {entryJson.ValueKind}.");
+        var ce = entryJson.Deserialize<ConditionEntry>()
+            ?? throw new ArgumentException("Failed to deserialize JSON object as ConditionEntry.");
+        if (string.IsNullOrEmpty(ce.Function))
+            throw new ArgumentException("Condition entry requires a 'function' field.");
+        return BuildCondition(ce);
     }
 
     private static int ApplyRemoveConditions(IMajorRecord record, List<ConditionRemoval> removals)

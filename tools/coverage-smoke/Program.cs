@@ -32,9 +32,11 @@
 // for the 16 (operator, record-type) pairs newly supported in v2.7.1.
 
 using System.Diagnostics;
+using System.Reflection;
 using System.Text.Json;
 using Mutagen.Bethesda.Plugins;
 using Mutagen.Bethesda.Skyrim;
+using Noggog;
 
 const string SkyrimEsm = @"E:\SteamLibrary\steamapps\common\Skyrim Special Edition\Data\Skyrim.esm";
 
@@ -1087,6 +1089,611 @@ failures += KwRemoveTest(18, "MGEF", firstMagicEffectWithKw.FormKey, firstMagicE
                 Console.WriteLine($"  readback: Entries contains ref {freshSpellRef} ({overridden.Entries.Count} total)");
             }
         }
+    }
+    Console.WriteLine(ok ? "  PASS" : "  FAIL");
+    if (!ok) failures++;
+    Console.WriteLine();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v2.8 Phase 1 / Layer 1.E — Effects-list write capability (NEW)
+//
+// Tests 23-30 exercise the JSON Array → ExtendedList<Effect> mechanism added
+// to the bridge in v2.8.0 (Branch A in ConvertJsonElementToListItem +
+// Branch B in SetPropertyByPath, with shared BuildConditionFromJson helper
+// for nested per-effect Conditions). Per MATRIX.md § Layer 1.E.
+//
+// Source-record picks: pick the first {Spell, Ingestible, ObjectEffect,
+// Scroll, Ingredient} with ≥1 existing Effect, so replace-semantics is
+// observable (source list cleared; new single entry written).
+// ═══════════════════════════════════════════════════════════════════════════
+
+var firstSpellWithEffects = source.Spells.FirstOrDefault(s => s.Effects != null && s.Effects.Count >= 2)
+    ?? source.Spells.FirstOrDefault(s => s.Effects != null && s.Effects.Count >= 1)
+    ?? throw new InvalidOperationException("No Spell with Effects in Skyrim.esm");
+var firstAlchWithEffects = source.Ingestibles.FirstOrDefault(a => a.Effects != null && a.Effects.Count >= 1)
+    ?? throw new InvalidOperationException("No Ingestible with Effects in Skyrim.esm");
+var firstEnchWithEffects = source.ObjectEffects.FirstOrDefault(e => e.Effects != null && e.Effects.Count >= 1)
+    ?? throw new InvalidOperationException("No ObjectEffect with Effects in Skyrim.esm");
+var firstScrlWithEffects = source.Scrolls.FirstOrDefault(s => s.Effects != null && s.Effects.Count >= 1)
+    ?? throw new InvalidOperationException("No Scroll with Effects in Skyrim.esm");
+var firstIngrWithEffects = source.Ingredients.FirstOrDefault(i => i.Effects != null && i.Effects.Count >= 1)
+    ?? throw new InvalidOperationException("No Ingredient with Effects in Skyrim.esm");
+
+FormKey FreshMgefFor(IEnumerable<FormKey> existing)
+{
+    var set = new HashSet<FormKey>(existing);
+    return source.MagicEffects.FirstOrDefault(m => !set.Contains(m.FormKey))?.FormKey
+        ?? throw new InvalidOperationException("No fresh MagicEffect available in Skyrim.esm");
+}
+var freshMgefForSpel = FreshMgefFor(firstSpellWithEffects.Effects!.Select(e => e.BaseEffect.FormKey));
+var freshMgefForAlch = FreshMgefFor(firstAlchWithEffects.Effects!.Select(e => e.BaseEffect.FormKey));
+var freshMgefForEnch = FreshMgefFor(firstEnchWithEffects.Effects!.Select(e => e.BaseEffect.FormKey));
+var freshMgefForScrl = FreshMgefFor(firstScrlWithEffects.Effects!.Select(e => e.BaseEffect.FormKey));
+var freshMgefForIngr = FreshMgefFor(firstIngrWithEffects.Effects!.Select(e => e.BaseEffect.FormKey));
+
+Console.WriteLine($"SPEL-fx:    {firstSpellWithEffects.FormKey} ({firstSpellWithEffects.EditorID}, Effects.Count={firstSpellWithEffects.Effects!.Count}); freshMGEF={freshMgefForSpel}");
+Console.WriteLine($"ALCH-fx:    {firstAlchWithEffects.FormKey} ({firstAlchWithEffects.EditorID}, Effects.Count={firstAlchWithEffects.Effects!.Count}); freshMGEF={freshMgefForAlch}");
+Console.WriteLine($"ENCH-fx:    {firstEnchWithEffects.FormKey} ({firstEnchWithEffects.EditorID}, Effects.Count={firstEnchWithEffects.Effects!.Count}); freshMGEF={freshMgefForEnch}");
+Console.WriteLine($"SCRL-fx:    {firstScrlWithEffects.FormKey} ({firstScrlWithEffects.EditorID}, Effects.Count={firstScrlWithEffects.Effects!.Count}); freshMGEF={freshMgefForScrl}");
+Console.WriteLine($"INGR-fx:    {firstIngrWithEffects.FormKey} ({firstIngrWithEffects.EditorID}, Effects.Count={firstIngrWithEffects.Effects!.Count}); freshMGEF={freshMgefForIngr}");
+Console.WriteLine();
+
+// Helper — verify a successful Effects-replace: Effects.Count == expectedCount,
+// Effects[0].BaseEffect == expectedBase (when expectedCount > 0), Effects[0].Data
+// matches expected magnitude/area/duration. Returns true if all assertions pass.
+// Operates on getter interfaces because CreateFromBinaryOverlay returns read-only
+// records.
+bool VerifyEffectsReplace(IReadOnlyList<IEffectGetter> effects, int expectedCount,
+                          FormKey? expectedBase, float? expectedMag, int? expectedArea, int? expectedDur,
+                          int? expectedConditions)
+{
+    bool ok = true;
+    if (effects.Count != expectedCount)
+    {
+        Console.WriteLine($"  FAIL: Effects.Count expected {expectedCount}, got {effects.Count}");
+        return false;
+    }
+    if (expectedCount == 0) return true;
+    var e0 = effects[0];
+    if (expectedBase.HasValue && e0.BaseEffect.FormKey != expectedBase.Value)
+    {
+        Console.WriteLine($"  FAIL: Effects[0].BaseEffect expected {expectedBase}, got {e0.BaseEffect.FormKey}");
+        ok = false;
+    }
+    if (expectedMag.HasValue && (e0.Data == null || Math.Abs(e0.Data.Magnitude - expectedMag.Value) > 0.001f))
+    {
+        Console.WriteLine($"  FAIL: Effects[0].Data.Magnitude expected {expectedMag}, got {e0.Data?.Magnitude}");
+        ok = false;
+    }
+    if (expectedArea.HasValue && (e0.Data == null || e0.Data.Area != expectedArea.Value))
+    {
+        Console.WriteLine($"  FAIL: Effects[0].Data.Area expected {expectedArea}, got {e0.Data?.Area}");
+        ok = false;
+    }
+    if (expectedDur.HasValue && (e0.Data == null || e0.Data.Duration != expectedDur.Value))
+    {
+        Console.WriteLine($"  FAIL: Effects[0].Data.Duration expected {expectedDur}, got {e0.Data?.Duration}");
+        ok = false;
+    }
+    if (expectedConditions.HasValue && (e0.Conditions == null || e0.Conditions.Count != expectedConditions.Value))
+    {
+        Console.WriteLine($"  FAIL: Effects[0].Conditions.Count expected {expectedConditions}, got {e0.Conditions?.Count}");
+        ok = false;
+    }
+    return ok;
+}
+
+// ── Test 23 (1.E.01): set_fields(Effects=[{BaseEffect, Data}]) on SPEL — replace ──
+{
+    var outPath = Path.Combine(outDir, "test23-1e01-effects-spel.esp");
+    if (File.Exists(outPath)) File.Delete(outPath);
+    int srcCount = firstSpellWithEffects.Effects!.Count;
+
+    var req = new
+    {
+        command = "patch",
+        output_path = outPath,
+        esl_flag = false,
+        author = "coverage-smoke",
+        records = new[]
+        {
+            new
+            {
+                op = "override",
+                formid = FormatFormKey(firstSpellWithEffects.FormKey),
+                source_path = SkyrimEsm,
+                set_fields = new Dictionary<string, object>
+                {
+                    ["Effects"] = new object[]
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["BaseEffect"] = FormatFormKey(freshMgefForSpel),
+                            ["Data"] = new Dictionary<string, object>
+                            {
+                                ["Magnitude"] = 50f,
+                                ["Area"]      = 0,
+                                ["Duration"]  = 0,
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        load_order = new { game_release = "SkyrimSE", listings = loadOrderListings }
+    };
+
+    var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+    Console.WriteLine($"── Test 23 (1.E.01): set_fields(Effects=[{{BaseEffect,Data}}]) on SPEL (replace from {srcCount}) ──");
+    Console.WriteLine($"  exit code: {exit}");
+    foreach (var line in stdout.Split('\n')) Console.WriteLine($"    {line.TrimEnd('\r')}");
+
+    using var doc = JsonDocument.Parse(stdout);
+    var root = doc.RootElement;
+    bool ok = root.GetProperty("success").GetBoolean();
+    if (!ok) Console.WriteLine("  FAIL: bridge response was not success");
+    else
+    {
+        var d0 = root.GetProperty("details")[0];
+        if (!d0.TryGetProperty("modifications", out var mods)
+            || !mods.TryGetProperty("fields_set", out var setCount)
+            || setCount.GetInt32() != 1)
+        {
+            Console.WriteLine("  FAIL: modifications.fields_set should be 1");
+            ok = false;
+        }
+        if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+        else if (ok)
+        {
+            using var outMod = SkyrimMod.CreateFromBinaryOverlay(outPath, SkyrimRelease.SkyrimSE);
+            var rec = outMod.Spells.FirstOrDefault(s => s.FormKey == firstSpellWithEffects.FormKey);
+            if (rec?.Effects == null) { Console.WriteLine("  FAIL: SPEL override or Effects missing"); ok = false; }
+            else
+            {
+                ok &= VerifyEffectsReplace(rec.Effects, 1, freshMgefForSpel, 50f, 0, 0, null);
+                if (ok) Console.WriteLine($"  readback: Effects.Count=1 (replaced from {srcCount}); BaseEffect={rec.Effects[0].BaseEffect.FormKey}; Magnitude={rec.Effects[0].Data!.Magnitude}");
+            }
+        }
+    }
+    Console.WriteLine(ok ? "  PASS" : "  FAIL");
+    if (!ok) failures++;
+    Console.WriteLine();
+}
+
+// ── Test 24 (1.E.02): set_fields(Effects=[{BaseEffect, Data, Conditions}]) on SPEL — nested Conditions ──
+{
+    var outPath = Path.Combine(outDir, "test24-1e02-effects-spel-conditions.esp");
+    if (File.Exists(outPath)) File.Delete(outPath);
+
+    var req = new
+    {
+        command = "patch",
+        output_path = outPath,
+        esl_flag = false,
+        author = "coverage-smoke",
+        records = new[]
+        {
+            new
+            {
+                op = "override",
+                formid = FormatFormKey(firstSpellWithEffects.FormKey),
+                source_path = SkyrimEsm,
+                set_fields = new Dictionary<string, object>
+                {
+                    ["Effects"] = new object[]
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["BaseEffect"] = FormatFormKey(freshMgefForSpel),
+                            ["Data"] = new Dictionary<string, object>
+                            {
+                                ["Magnitude"] = 50f, ["Area"] = 0, ["Duration"] = 0,
+                            },
+                            ["Conditions"] = new object[]
+                            {
+                                new Dictionary<string, object>
+                                {
+                                    ["function"] = "GetActorValue",
+                                    ["operator"] = ">=",
+                                    ["value"]    = 50f,
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        load_order = new { game_release = "SkyrimSE", listings = loadOrderListings }
+    };
+
+    var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+    Console.WriteLine($"── Test 24 (1.E.02): set_fields(Effects=[{{BaseEffect,Data,Conditions}}]) on SPEL (nested Conditions) ──");
+    Console.WriteLine($"  exit code: {exit}");
+    foreach (var line in stdout.Split('\n')) Console.WriteLine($"    {line.TrimEnd('\r')}");
+
+    using var doc = JsonDocument.Parse(stdout);
+    var root = doc.RootElement;
+    bool ok = root.GetProperty("success").GetBoolean();
+    if (!ok) Console.WriteLine("  FAIL: bridge response was not success");
+    else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+    else
+    {
+        using var outMod = SkyrimMod.CreateFromBinaryOverlay(outPath, SkyrimRelease.SkyrimSE);
+        var rec = outMod.Spells.FirstOrDefault(s => s.FormKey == firstSpellWithEffects.FormKey);
+        if (rec?.Effects == null) { Console.WriteLine("  FAIL: SPEL override or Effects missing"); ok = false; }
+        else
+        {
+            ok &= VerifyEffectsReplace(rec.Effects, 1, freshMgefForSpel, 50f, null, null, 1);
+            if (ok)
+            {
+                var c0 = rec.Effects[0].Conditions![0];
+                Console.WriteLine($"  readback: Effects[0].Conditions.Count=1; cond[0] type={c0.GetType().Name}; data type={c0.Data?.GetType().Name}");
+            }
+        }
+    }
+    Console.WriteLine(ok ? "  PASS" : "  FAIL");
+    if (!ok) failures++;
+    Console.WriteLine();
+}
+
+// ── Test 25 (1.E.03): ALCH.Effects replace ──
+{
+    var outPath = Path.Combine(outDir, "test25-1e03-effects-alch.esp");
+    if (File.Exists(outPath)) File.Delete(outPath);
+    int srcCount = firstAlchWithEffects.Effects!.Count;
+
+    var req = new
+    {
+        command = "patch",
+        output_path = outPath,
+        esl_flag = false,
+        author = "coverage-smoke",
+        records = new[]
+        {
+            new
+            {
+                op = "override",
+                formid = FormatFormKey(firstAlchWithEffects.FormKey),
+                source_path = SkyrimEsm,
+                set_fields = new Dictionary<string, object>
+                {
+                    ["Effects"] = new object[]
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["BaseEffect"] = FormatFormKey(freshMgefForAlch),
+                            ["Data"] = new Dictionary<string, object>
+                            {
+                                ["Magnitude"] = 10f, ["Area"] = 0, ["Duration"] = 30,
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        load_order = new { game_release = "SkyrimSE", listings = loadOrderListings }
+    };
+
+    var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+    Console.WriteLine($"── Test 25 (1.E.03): set_fields(Effects=[...]) on ALCH (replace from {srcCount}) ──");
+    Console.WriteLine($"  exit code: {exit}");
+    foreach (var line in stdout.Split('\n')) Console.WriteLine($"    {line.TrimEnd('\r')}");
+
+    using var doc = JsonDocument.Parse(stdout);
+    var root = doc.RootElement;
+    bool ok = root.GetProperty("success").GetBoolean();
+    if (!ok) Console.WriteLine("  FAIL: bridge response was not success");
+    else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+    else
+    {
+        using var outMod = SkyrimMod.CreateFromBinaryOverlay(outPath, SkyrimRelease.SkyrimSE);
+        var rec = outMod.Ingestibles.FirstOrDefault(a => a.FormKey == firstAlchWithEffects.FormKey);
+        if (rec?.Effects == null) { Console.WriteLine("  FAIL: ALCH override or Effects missing"); ok = false; }
+        else
+        {
+            ok &= VerifyEffectsReplace(rec.Effects, 1, freshMgefForAlch, 10f, 0, 30, null);
+            if (ok) Console.WriteLine($"  readback: Effects.Count=1 (replaced from {srcCount}); BaseEffect={rec.Effects[0].BaseEffect.FormKey}; Mag/Area/Dur={rec.Effects[0].Data!.Magnitude}/{rec.Effects[0].Data!.Area}/{rec.Effects[0].Data!.Duration}");
+        }
+    }
+    Console.WriteLine(ok ? "  PASS" : "  FAIL");
+    if (!ok) failures++;
+    Console.WriteLine();
+}
+
+// ── Test 26 (1.E.04): ENCH.Effects replace ──
+{
+    var outPath = Path.Combine(outDir, "test26-1e04-effects-ench.esp");
+    if (File.Exists(outPath)) File.Delete(outPath);
+    int srcCount = firstEnchWithEffects.Effects!.Count;
+
+    var req = new
+    {
+        command = "patch",
+        output_path = outPath,
+        esl_flag = false,
+        author = "coverage-smoke",
+        records = new[]
+        {
+            new
+            {
+                op = "override",
+                formid = FormatFormKey(firstEnchWithEffects.FormKey),
+                source_path = SkyrimEsm,
+                set_fields = new Dictionary<string, object>
+                {
+                    ["Effects"] = new object[]
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["BaseEffect"] = FormatFormKey(freshMgefForEnch),
+                            ["Data"] = new Dictionary<string, object>
+                            {
+                                ["Magnitude"] = 5f, ["Area"] = 0, ["Duration"] = 0,
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        load_order = new { game_release = "SkyrimSE", listings = loadOrderListings }
+    };
+
+    var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+    Console.WriteLine($"── Test 26 (1.E.04): set_fields(Effects=[...]) on ENCH (replace from {srcCount}) ──");
+    Console.WriteLine($"  exit code: {exit}");
+    foreach (var line in stdout.Split('\n')) Console.WriteLine($"    {line.TrimEnd('\r')}");
+
+    using var doc = JsonDocument.Parse(stdout);
+    var root = doc.RootElement;
+    bool ok = root.GetProperty("success").GetBoolean();
+    if (!ok) Console.WriteLine("  FAIL: bridge response was not success");
+    else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+    else
+    {
+        using var outMod = SkyrimMod.CreateFromBinaryOverlay(outPath, SkyrimRelease.SkyrimSE);
+        var rec = outMod.ObjectEffects.FirstOrDefault(e => e.FormKey == firstEnchWithEffects.FormKey);
+        if (rec?.Effects == null) { Console.WriteLine("  FAIL: ENCH override or Effects missing"); ok = false; }
+        else
+        {
+            ok &= VerifyEffectsReplace(rec.Effects, 1, freshMgefForEnch, 5f, 0, 0, null);
+            if (ok) Console.WriteLine($"  readback: Effects.Count=1 (replaced from {srcCount}); BaseEffect={rec.Effects[0].BaseEffect.FormKey}");
+        }
+    }
+    Console.WriteLine(ok ? "  PASS" : "  FAIL");
+    if (!ok) failures++;
+    Console.WriteLine();
+}
+
+// ── Test 27 (1.E.05): SCRL.Effects replace ──
+{
+    var outPath = Path.Combine(outDir, "test27-1e05-effects-scrl.esp");
+    if (File.Exists(outPath)) File.Delete(outPath);
+    int srcCount = firstScrlWithEffects.Effects!.Count;
+
+    var req = new
+    {
+        command = "patch",
+        output_path = outPath,
+        esl_flag = false,
+        author = "coverage-smoke",
+        records = new[]
+        {
+            new
+            {
+                op = "override",
+                formid = FormatFormKey(firstScrlWithEffects.FormKey),
+                source_path = SkyrimEsm,
+                set_fields = new Dictionary<string, object>
+                {
+                    ["Effects"] = new object[]
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["BaseEffect"] = FormatFormKey(freshMgefForScrl),
+                        }
+                    }
+                }
+            }
+        },
+        load_order = new { game_release = "SkyrimSE", listings = loadOrderListings }
+    };
+
+    var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+    Console.WriteLine($"── Test 27 (1.E.05): set_fields(Effects=[{{BaseEffect}}]) on SCRL (replace from {srcCount}) ──");
+    Console.WriteLine($"  exit code: {exit}");
+    foreach (var line in stdout.Split('\n')) Console.WriteLine($"    {line.TrimEnd('\r')}");
+
+    using var doc = JsonDocument.Parse(stdout);
+    var root = doc.RootElement;
+    bool ok = root.GetProperty("success").GetBoolean();
+    if (!ok) Console.WriteLine("  FAIL: bridge response was not success");
+    else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+    else
+    {
+        using var outMod = SkyrimMod.CreateFromBinaryOverlay(outPath, SkyrimRelease.SkyrimSE);
+        var rec = outMod.Scrolls.FirstOrDefault(s => s.FormKey == firstScrlWithEffects.FormKey);
+        if (rec?.Effects == null) { Console.WriteLine("  FAIL: SCRL override or Effects missing"); ok = false; }
+        else
+        {
+            ok &= VerifyEffectsReplace(rec.Effects, 1, freshMgefForScrl, null, null, null, null);
+            if (ok) Console.WriteLine($"  readback: Effects.Count=1 (replaced from {srcCount}); BaseEffect={rec.Effects[0].BaseEffect.FormKey}");
+        }
+    }
+    Console.WriteLine(ok ? "  PASS" : "  FAIL");
+    if (!ok) failures++;
+    Console.WriteLine();
+}
+
+// ── Test 28 (1.E.06): INGR.Effects replace ──
+{
+    var outPath = Path.Combine(outDir, "test28-1e06-effects-ingr.esp");
+    if (File.Exists(outPath)) File.Delete(outPath);
+    int srcCount = firstIngrWithEffects.Effects!.Count;
+
+    var req = new
+    {
+        command = "patch",
+        output_path = outPath,
+        esl_flag = false,
+        author = "coverage-smoke",
+        records = new[]
+        {
+            new
+            {
+                op = "override",
+                formid = FormatFormKey(firstIngrWithEffects.FormKey),
+                source_path = SkyrimEsm,
+                set_fields = new Dictionary<string, object>
+                {
+                    ["Effects"] = new object[]
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["BaseEffect"] = FormatFormKey(freshMgefForIngr),
+                            ["Data"] = new Dictionary<string, object>
+                            {
+                                ["Magnitude"] = 1f, ["Area"] = 0, ["Duration"] = 0,
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        load_order = new { game_release = "SkyrimSE", listings = loadOrderListings }
+    };
+
+    var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+    Console.WriteLine($"── Test 28 (1.E.06): set_fields(Effects=[...]) on INGR (replace from {srcCount}) ──");
+    Console.WriteLine($"  exit code: {exit}");
+    foreach (var line in stdout.Split('\n')) Console.WriteLine($"    {line.TrimEnd('\r')}");
+
+    using var doc = JsonDocument.Parse(stdout);
+    var root = doc.RootElement;
+    bool ok = root.GetProperty("success").GetBoolean();
+    if (!ok) Console.WriteLine("  FAIL: bridge response was not success");
+    else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+    else
+    {
+        using var outMod = SkyrimMod.CreateFromBinaryOverlay(outPath, SkyrimRelease.SkyrimSE);
+        var rec = outMod.Ingredients.FirstOrDefault(i => i.FormKey == firstIngrWithEffects.FormKey);
+        if (rec?.Effects == null) { Console.WriteLine("  FAIL: INGR override or Effects missing"); ok = false; }
+        else
+        {
+            ok &= VerifyEffectsReplace(rec.Effects, 1, freshMgefForIngr, 1f, 0, 0, null);
+            if (ok) Console.WriteLine($"  readback: Effects.Count=1 (replaced from {srcCount}); BaseEffect={rec.Effects[0].BaseEffect.FormKey}");
+        }
+    }
+    Console.WriteLine(ok ? "  PASS" : "  FAIL");
+    if (!ok) failures++;
+    Console.WriteLine();
+}
+
+// ── Test 29 (1.E.07): SPEL.Effects=[] empty array clear ──
+{
+    var outPath = Path.Combine(outDir, "test29-1e07-effects-spel-empty.esp");
+    if (File.Exists(outPath)) File.Delete(outPath);
+    int srcCount = firstSpellWithEffects.Effects!.Count;
+
+    var req = new
+    {
+        command = "patch",
+        output_path = outPath,
+        esl_flag = false,
+        author = "coverage-smoke",
+        records = new[]
+        {
+            new
+            {
+                op = "override",
+                formid = FormatFormKey(firstSpellWithEffects.FormKey),
+                source_path = SkyrimEsm,
+                set_fields = new Dictionary<string, object>
+                {
+                    ["Effects"] = Array.Empty<object>(),
+                }
+            }
+        },
+        load_order = new { game_release = "SkyrimSE", listings = loadOrderListings }
+    };
+
+    var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+    Console.WriteLine($"── Test 29 (1.E.07): set_fields(Effects=[]) on SPEL (whole-list clear, src had {srcCount}) ──");
+    Console.WriteLine($"  exit code: {exit}");
+    foreach (var line in stdout.Split('\n')) Console.WriteLine($"    {line.TrimEnd('\r')}");
+
+    using var doc = JsonDocument.Parse(stdout);
+    var root = doc.RootElement;
+    bool ok = root.GetProperty("success").GetBoolean();
+    if (!ok) Console.WriteLine("  FAIL: bridge response was not success");
+    else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+    else
+    {
+        using var outMod = SkyrimMod.CreateFromBinaryOverlay(outPath, SkyrimRelease.SkyrimSE);
+        var rec = outMod.Spells.FirstOrDefault(s => s.FormKey == firstSpellWithEffects.FormKey);
+        if (rec?.Effects == null) { Console.WriteLine("  FAIL: SPEL override or Effects missing"); ok = false; }
+        else
+        {
+            ok &= VerifyEffectsReplace(rec.Effects, 0, null, null, null, null, null);
+            if (ok) Console.WriteLine($"  readback: Effects.Count=0 (cleared from {srcCount})");
+        }
+    }
+    Console.WriteLine(ok ? "  PASS" : "  FAIL");
+    if (!ok) failures++;
+    Console.WriteLine();
+}
+
+// ── Test 30 (1.E.08): SPEL.Effects with bad FormLink — record-level error + rollback ──
+{
+    var outPath = Path.Combine(outDir, "test30-1e08-effects-spel-badformlink.esp");
+    if (File.Exists(outPath)) File.Delete(outPath);
+
+    var req = new
+    {
+        command = "patch",
+        output_path = outPath,
+        esl_flag = false,
+        author = "coverage-smoke",
+        records = new[]
+        {
+            new
+            {
+                op = "override",
+                formid = FormatFormKey(firstSpellWithEffects.FormKey),
+                source_path = SkyrimEsm,
+                set_fields = new Dictionary<string, object>
+                {
+                    ["Effects"] = new object[]
+                    {
+                        new Dictionary<string, object>
+                        {
+                            ["BaseEffect"] = "Skyrim.esm:DOESNOTEXIST",
+                        }
+                    }
+                }
+            }
+        },
+        load_order = new { game_release = "SkyrimSE", listings = loadOrderListings }
+    };
+
+    var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+    Console.WriteLine("── Test 30 (1.E.08): set_fields(Effects=[{BaseEffect:bad-formid}]) on SPEL (rollback) ──");
+    Console.WriteLine($"  exit code: {exit}");
+    foreach (var line in stdout.Split('\n')) Console.WriteLine($"    {line.TrimEnd('\r')}");
+
+    using var doc = JsonDocument.Parse(stdout);
+    var root = doc.RootElement;
+    bool ok = true;
+    if (root.GetProperty("success").GetBoolean()) { Console.WriteLine("  FAIL: success should be false"); ok = false; }
+    if (root.GetProperty("failed_count").GetInt32() != 1) { Console.WriteLine("  FAIL: failed_count should be 1"); ok = false; }
+    if (root.GetProperty("records_written").GetInt32() != 0) { Console.WriteLine("  FAIL: records_written should be 0 (rolled back)"); ok = false; }
+    if (File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP should not exist (rolled back)"); ok = false; }
+    var d0 = root.GetProperty("details")[0];
+    if (!d0.TryGetProperty("error", out var err) || string.IsNullOrEmpty(err.GetString()))
+    { Console.WriteLine("  FAIL: error field should be set"); ok = false; }
+    else
+    {
+        Console.WriteLine($"  error message captured: {err.GetString()}");
     }
     Console.WriteLine(ok ? "  PASS" : "  FAIL");
     if (!ok) failures++;

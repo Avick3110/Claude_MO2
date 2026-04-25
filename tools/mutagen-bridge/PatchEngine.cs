@@ -9,6 +9,8 @@ using Mutagen.Bethesda.Plugins;
 using Mutagen.Bethesda.Plugins.Records;
 using Mutagen.Bethesda.Skyrim;
 using Noggog;
+// Disambiguate Mutagen.Bethesda.Skyrim.Activator from System.Activator under implicit usings.
+using SkActivator = Mutagen.Bethesda.Skyrim.Activator;
 
 namespace MutagenBridge;
 
@@ -685,6 +687,26 @@ public class PatchEngine
             }
         }
 
+        // ── RACE actor effects (add_spells / remove_spells on RACE) ──
+        // v2.7.1 Tier A wire-up. Mirrors the NPC ActorEffect pattern above.
+        // Tier D contract: mods key written unconditionally inside the matched
+        // arm; the null-check on race.ActorEffect controls only the iteration,
+        // not the mods-key write.
+        if (record is Race race)
+        {
+            if (op.AddSpells?.Count > 0)
+            {
+                race.ActorEffect ??= new ExtendedList<IFormLinkGetter<ISpellRecordGetter>>();
+                mods["spells_added"] = AddFormLinks(race.ActorEffect, op.AddSpells);
+            }
+            if (op.RemoveSpells?.Count > 0)
+            {
+                mods["spells_removed"] = race.ActorEffect != null
+                    ? RemoveFormLinks(race.ActorEffect, op.RemoveSpells)
+                    : 0;
+            }
+        }
+
         // ── Container Inventory ──
         if (record is Container container)
         {
@@ -736,6 +758,52 @@ public class PatchEngine
                     {
                         Level = item.Level, Count = item.Count,
                         Reference = fk.ToLink<IItemGetter>(),
+                    }
+                });
+                added++;
+            }
+            mods["items_added"] = added;
+        }
+
+        // ── Leveled NPC entries (add_items on LVLN) ──
+        // v2.7.1 Tier A wire-up. Mirrors the LVLI shape; entry construction
+        // matches MergeLeveledNpcs at line 303. Reference target is INpcSpawnGetter.
+        if (record is LeveledNpc leveledNpc && op.AddItems?.Count > 0)
+        {
+            leveledNpc.Entries ??= new ExtendedList<LeveledNpcEntry>();
+            int added = 0;
+            foreach (var item in op.AddItems)
+            {
+                var fk = FormIdHelper.Parse(item.Reference);
+                leveledNpc.Entries.Add(new LeveledNpcEntry
+                {
+                    Data = new LeveledNpcEntryData
+                    {
+                        Level = item.Level, Count = item.Count,
+                        Reference = fk.ToLink<INpcSpawnGetter>(),
+                    }
+                });
+                added++;
+            }
+            mods["items_added"] = added;
+        }
+
+        // ── Leveled Spell entries (add_items on LVSP) ──
+        // v2.7.1 Tier A wire-up. Mirrors the LVLI shape; entry construction
+        // matches MergeLeveledSpells at line 353. Reference target is ISpellRecordGetter.
+        if (record is LeveledSpell leveledSpell && op.AddItems?.Count > 0)
+        {
+            leveledSpell.Entries ??= new ExtendedList<LeveledSpellEntry>();
+            int added = 0;
+            foreach (var item in op.AddItems)
+            {
+                var fk = FormIdHelper.Parse(item.Reference);
+                leveledSpell.Entries.Add(new LeveledSpellEntry
+                {
+                    Data = new LeveledSpellEntryData
+                    {
+                        Level = item.Level, Count = item.Count,
+                        Reference = fk.ToLink<ISpellRecordGetter>(),
                     }
                 });
                 added++;
@@ -1641,6 +1709,13 @@ public class PatchEngine
         Ingredient r => r.Keywords ??= new ExtendedList<IFormLinkGetter<IKeywordGetter>>(),
         MiscItem r => r.Keywords ??= new ExtendedList<IFormLinkGetter<IKeywordGetter>>(),
         Scroll r => r.Keywords ??= new ExtendedList<IFormLinkGetter<IKeywordGetter>>(),
+        // v2.7.1 Tier A wire-ups (probe-verified in P0; AUDIT.md add_keywords/remove_keywords).
+        Race r => r.Keywords ??= new ExtendedList<IFormLinkGetter<IKeywordGetter>>(),
+        Furniture r => r.Keywords ??= new ExtendedList<IFormLinkGetter<IKeywordGetter>>(),
+        SkActivator r => r.Keywords ??= new ExtendedList<IFormLinkGetter<IKeywordGetter>>(),
+        Location r => r.Keywords ??= new ExtendedList<IFormLinkGetter<IKeywordGetter>>(),
+        Spell r => r.Keywords ??= new ExtendedList<IFormLinkGetter<IKeywordGetter>>(),
+        MagicEffect r => r.Keywords ??= new ExtendedList<IFormLinkGetter<IKeywordGetter>>(),
         _ => null,
     };
 

@@ -4,7 +4,7 @@
 **Status:** Complete
 **Date:** 2026-04-25
 **Session length:** ~1h
-**Commits made:** TBD (see commit step at end of session — handoff written before commit; this file's hash is recorded in a follow-up commit per the established pattern).
+**Commits made:** `cb0cc9d` (`[v2.7.1 P2] Tier C — bracket-indexer dict mutation`), pushed to `origin/main` alongside this handoff hash-record commit.
 **Live install synced:** No (Phase 2 doesn't sync — Phase 5 does the only live sync of v2.7.1).
 
 ## What was done

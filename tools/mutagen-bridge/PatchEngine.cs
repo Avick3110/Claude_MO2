@@ -936,9 +936,15 @@ public class PatchEngine
         var parts = path.Split('.');
         object current = target;
 
-        // Navigate to the parent of the target property
+        // Navigate to the parent of the target property.
+        // Intermediate segments must be plain names — bracket syntax is final-segment-only in v2.7.1.
         for (int i = 0; i < parts.Length - 1; i++)
         {
+            if (parts[i].IndexOf('[') >= 0 || parts[i].IndexOf(']') >= 0)
+                throw new ArgumentException(
+                    $"Bracket syntax is not supported on intermediate path segment '{parts[i]}'. " +
+                    "v2.7.1 supports terminal-segment dict access only (Foo[Key], not Foo[Key].Sub).");
+
             var prop = current.GetType().GetProperty(parts[i],
                 BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
             if (prop == null)
@@ -954,13 +960,198 @@ public class PatchEngine
             current = next!;
         }
 
-        var finalProp = current.GetType().GetProperty(parts[^1],
+        var (finalName, finalKey) = ParsePathSegment(parts[^1]);
+        var finalProp = current.GetType().GetProperty(finalName,
             BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
         if (finalProp == null)
-            throw new ArgumentException($"Property '{parts[^1]}' not found on {current.GetType().Name}");
+            throw new ArgumentException($"Property '{finalName}' not found on {current.GetType().Name}");
+
+        // Tier C — bracket-indexer write: single dict entry via the property's IDictionary<,> indexer.
+        if (finalKey != null)
+        {
+            WriteDictEntry(finalProp, current, finalKey, value);
+            return;
+        }
+
+        // Tier C — whole-dict object form against a dict-typed property:
+        // merge each JSON member via the indexer. v2.7.1 ships merge-only semantics
+        // regardless of setter presence (single-path collapse — replace deferred to v2.8).
+        if (value.ValueKind == JsonValueKind.Object &&
+            IsClosedDictionary(finalProp.PropertyType, out _, out _))
+        {
+            WriteDictMerge(finalProp, current, value);
+            return;
+        }
 
         var converted = ConvertJsonValue(value, finalProp.PropertyType);
         finalProp.SetValue(current, converted);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Tier C — Bracket-indexer dict mutation (v2.7.1)
+    //
+    // Adds path syntax `PropertyName[Key]` to set_fields, plus whole-dict JSON-object
+    // form against any IDictionary<TKey, TValue> property. Both routes go through the
+    // dict's `set_Item` indexer — single-path merge semantics, regardless of whether
+    // Mutagen exposes a setter on the property. RACE.Starting / RACE.Regen /
+    // RACE.BipedObjectNames are the v2.7.1 targets (all setter-less, indexer-only).
+    //
+    // Scope locks (per PLAN.md):
+    //   - Final-segment only. `Foo[Key].Sub` (chained dict access) → ArgumentException.
+    //   - Merge semantics, not replace — only the keys named in the JSON object are
+    //     touched; existing keys preserved.
+    //   - Key types: enums (Enum.Parse, ignoreCase) and common primitives (int/uint/
+    //     short/ushort/byte/long/string). Other key types → ArgumentException.
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Parse a path segment of the form "Property" or "Property[Key]".
+    /// Returns (name, null) for plain names, (name, keyText) for bracket form.
+    /// Throws on malformed brackets ("Foo[", "Foo]", "Foo[]", "[Foo]", "Foo[a]b").
+    /// </summary>
+    private static (string name, string? key) ParsePathSegment(string segment)
+    {
+        var openIdx = segment.IndexOf('[');
+        if (openIdx < 0)
+        {
+            if (segment.IndexOf(']') >= 0)
+                throw new ArgumentException($"Malformed path segment '{segment}': stray ']' without '['.");
+            return (segment, null);
+        }
+
+        var closeIdx = segment.IndexOf(']', openIdx + 1);
+        if (closeIdx < 0)
+            throw new ArgumentException($"Malformed path segment '{segment}': missing ']' to match '['.");
+        if (closeIdx != segment.Length - 1)
+            throw new ArgumentException($"Malformed path segment '{segment}': content after ']'.");
+        if (openIdx == 0)
+            throw new ArgumentException($"Malformed path segment '{segment}': missing property name before '['.");
+
+        var name = segment.Substring(0, openIdx);
+        var key = segment.Substring(openIdx + 1, closeIdx - openIdx - 1).Trim();
+        if (key.Length == 0)
+            throw new ArgumentException($"Malformed path segment '{segment}': empty key inside brackets.");
+
+        return (name, key);
+    }
+
+    /// <summary>
+    /// Test whether <paramref name="t"/> is (or implements) a closed
+    /// <c>IDictionary&lt;TKey, TValue&gt;</c>. Returns the generic arguments via out
+    /// parameters when true.
+    /// </summary>
+    private static bool IsClosedDictionary(Type t, out Type? keyType, out Type? valueType)
+    {
+        keyType = null;
+        valueType = null;
+
+        if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(IDictionary<,>))
+        {
+            var args = t.GetGenericArguments();
+            keyType = args[0];
+            valueType = args[1];
+            return true;
+        }
+
+        foreach (var iface in t.GetInterfaces())
+        {
+            if (iface.IsGenericType && iface.GetGenericTypeDefinition() == typeof(IDictionary<,>))
+            {
+                var args = iface.GetGenericArguments();
+                keyType = args[0];
+                valueType = args[1];
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Parse a bracket-key string into the dict's <c>TKey</c> type. Enums use
+    /// case-insensitive name parsing; common integer primitives use invariant culture.
+    /// </summary>
+    private static object ParseDictKey(string keyText, Type keyType)
+    {
+        if (keyType.IsEnum)
+            return Enum.Parse(keyType, keyText, ignoreCase: true);
+
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        if (keyType == typeof(string)) return keyText;
+        if (keyType == typeof(int))    return int.Parse(keyText, ci);
+        if (keyType == typeof(uint))   return uint.Parse(keyText, ci);
+        if (keyType == typeof(short))  return short.Parse(keyText, ci);
+        if (keyType == typeof(ushort)) return ushort.Parse(keyText, ci);
+        if (keyType == typeof(byte))   return byte.Parse(keyText, ci);
+        if (keyType == typeof(long))   return long.Parse(keyText, ci);
+
+        throw new ArgumentException(
+            $"Unsupported dict key type '{FriendlyTypeName(keyType)}' " +
+            "(supported: enum, string, int, uint, short, ushort, byte, long).");
+    }
+
+    /// <summary>
+    /// Locate the single-arg indexer on <paramref name="dictInstance"/> whose parameter
+    /// type matches <paramref name="expectedKeyType"/>.
+    /// </summary>
+    private static PropertyInfo GetDictIndexer(object dictInstance, Type expectedKeyType)
+    {
+        foreach (var prop in dictInstance.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            var indexParams = prop.GetIndexParameters();
+            if (indexParams.Length == 1 && indexParams[0].ParameterType == expectedKeyType)
+                return prop;
+        }
+        throw new ArgumentException(
+            $"Could not locate IDictionary<,> indexer on {FriendlyTypeName(dictInstance.GetType())}.");
+    }
+
+    /// <summary>
+    /// Write a single dict entry via the property's indexer (bracket-key form).
+    /// </summary>
+    private static void WriteDictEntry(PropertyInfo prop, object owner, string keyText, JsonElement value)
+    {
+        if (!IsClosedDictionary(prop.PropertyType, out var keyType, out var valueType))
+            throw new ArgumentException(
+                $"Bracket syntax requires an IDictionary<,> property; {prop.Name} is " +
+                $"{FriendlyTypeName(prop.PropertyType)}.");
+
+        var dict = prop.GetValue(owner);
+        if (dict == null)
+            throw new ArgumentException(
+                $"Dict-typed property {prop.Name} is null at write time " +
+                "(no auto-init path — Mutagen typically initializes these).");
+
+        var parsedKey = ParseDictKey(keyText, keyType!);
+        var convertedValue = ConvertJsonValue(value, valueType!);
+        var indexer = GetDictIndexer(dict, keyType!);
+        indexer.SetValue(dict, convertedValue, new[] { parsedKey });
+    }
+
+    /// <summary>
+    /// Merge each member of a JSON object into the property's dict via the indexer.
+    /// Only the named keys are touched — existing keys are preserved (merge, not replace).
+    /// </summary>
+    private static void WriteDictMerge(PropertyInfo prop, object owner, JsonElement objectValue)
+    {
+        if (!IsClosedDictionary(prop.PropertyType, out var keyType, out var valueType))
+            throw new ArgumentException(
+                $"JSON object form requires an IDictionary<,> property; {prop.Name} is " +
+                $"{FriendlyTypeName(prop.PropertyType)}.");
+
+        var dict = prop.GetValue(owner);
+        if (dict == null)
+            throw new ArgumentException(
+                $"Dict-typed property {prop.Name} is null at write time " +
+                "(no auto-init path — Mutagen typically initializes these).");
+
+        var indexer = GetDictIndexer(dict, keyType!);
+        foreach (var member in objectValue.EnumerateObject())
+        {
+            var parsedKey = ParseDictKey(member.Name, keyType!);
+            var convertedValue = ConvertJsonValue(member.Value, valueType!);
+            indexer.SetValue(dict, convertedValue, new[] { parsedKey });
+        }
     }
 
     private static object? ConvertJsonValue(JsonElement value, Type targetType)

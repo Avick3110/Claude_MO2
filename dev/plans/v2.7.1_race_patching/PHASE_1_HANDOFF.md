@@ -4,7 +4,7 @@
 **Status:** Complete
 **Date:** 2026-04-25
 **Session length:** ~1.5h
-**Commits made:** TBD (single commit at the end of this phase, hash will be added when pushed)
+**Commits made:** `da658e5` (`[v2.7.1 P1] Tier D — silent-failure detection`), pushed to `origin/main`.
 **Live install synced:** No (Phase 1 doesn't sync — Phase 5 does the only live sync of v2.7.1).
 
 ## What was done

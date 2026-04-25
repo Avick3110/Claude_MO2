@@ -146,19 +146,19 @@ Aaron's review post-Batch-6 flagged that the OTFT/SPEL skip wording (`"concrete 
 
 **Verdict: Case (A) — for both OTFT and SPEL, Mutagen 0.53.1 genuinely lacks the property** at the concrete-class level, on every interface, and across the entire base-class chain. The bridge's reflection guard at `PatchEngine.cs:1732-1734` is correct; no bridge bug.
 
-**Required documentation correction (Phase 5 docs roll-up — NOT a bug fix):**
+**Required documentation correction (Phase 4 docs pass — same session as `perk_quest_adapter_subclass` fix):**
 
-Aaron's sign-off placement: Phase 5 docs cleanup, alongside the CHANGELOG ship-date insertion.
+Aaron's amended sign-off placement (post-Case-(A)-verdict review): fold into the Phase 4 PerkAdapter/QuestAdapter fix session. Same operator family (attach_scripts hygiene); the session touches `PatchEngine.cs` + `coverage-smoke/Program.cs` regression test + `CHANGELOG.md` + `KNOWN_ISSUES.md` already, so the docs-correction edits cost ~3 extra lines of attention. Phase 5 stays clean — just CHANGELOG ship-date insertion + final cleanup, no docs edits to coordinate.
 
 `Claude_MO2/mo2_mcp/tools_patching.py:104` currently reads:
 
 > *"Supported on records with a VirtualMachineAdapter property (NPC, Quest, Armor, Weapon, Outfit, Container, Door, Activator, Furniture, Light, MagicEffect, Spell, etc.)"*
 
-Remove `Outfit` and `Spell` from the list. Per Phase 2's verified set, the supported types in Mutagen 0.53.1 are: NPC, Quest (modulo bug 1), Armor, Weapon, Container, Door, Activator, Furniture, Light, MagicEffect, Perk (modulo bug 1).
+Remove `Outfit` and `Spell` from the list. Per Phase 2's verified set, the supported types in Mutagen 0.53.1 are: NPC, Quest (post-fix), Armor, Weapon, Container, Door, Activator, Furniture, Light, MagicEffect, Perk (post-fix).
 
 `Claude_MO2/KNOWN_ISSUES.md` — add an entry under v2.8.0 noting that Outfit and Spell don't support attach_scripts in Mutagen 0.53.1 (would require an upstream Mutagen schema change). Same posture as the v2.7.1-era AMMO enchantment limitation.
 
-**Phase 5 cross-check suggestion (Aaron's recommendation post-Case-(A)-verdict):** while Phase 5 is editing `tools_patching.py:104`, run the race-probe-style `typeof(X).GetProperty("VirtualMachineAdapter")` reflection check against EVERY type currently in the supported list — not just Outfit/Spell. If those two were wrong, others may be too. The check is cheap: extend `tools/race-probe/Program.cs`'s VMAD disambiguator block (already wired at `Section("v2.8 P2 Batch 7 — VMAD case (A) vs (B) disambiguator …")`) to walk the full list (NPC, Quest, Armor, Weapon, Container, Door, Activator, Furniture, Light, MagicEffect, Perk) and emit Case (A)/(B) verdict per type. Phase 5 doesn't owe a deep audit — just one pass with the same probe — but it closes the loop on the schema description's accuracy and avoids shipping v2.8.0 with another silent overstatement that a future consumer might hit.
+**Phase 4 cross-check (carried into the same session per Aaron):** while editing `tools_patching.py:104`, run the race-probe-style `typeof(X).GetProperty("VirtualMachineAdapter")` reflection check against EVERY type currently in the supported list — not just Outfit/Spell. If those two were wrong, others may be too. The check is cheap: extend `tools/race-probe/Program.cs`'s VMAD disambiguator block (already wired at `Section("v2.8 P2 Batch 7 — VMAD case (A) vs (B) disambiguator …")`) to walk the full list (NPC, Quest, Armor, Weapon, Container, Door, Activator, Furniture, Light, MagicEffect, Perk) and emit Case (A)/(B) verdict per type. If anything else is wrong, fix it inline in the same docs-edit pass; if everything checks out, that's a clean closure of the schema description's accuracy.
 
 Additional within-test SKIPs (counted as PASS-doc, not in skip table):
 - **4.i.02** would SKIP if `pickedRace.Keywords` was empty (it isn't in vanilla, so this didn't fire).
@@ -193,7 +193,7 @@ These are scratch-output diagnostic data points for future MATRIX maintenance, n
 ## Known issues / open questions
 
 1. **PerkAdapter/QuestAdapter bug** (`perk_quest_adapter_subclass`) — confirmed; one Phase 4 fix session.
-2. **`tools_patching.py:104` schema description correction** — Outfit and Spell shouldn't be in the VMAD-supported list (Case (A) confirmed by race-probe Batch 7 disambiguator). **Aaron's placement: Phase 5 docs roll-up** alongside the CHANGELOG ship-date insertion. Plus a cross-check suggestion (see § "Required documentation correction" above): one-pass reflection probe against every type currently in the schema list, to catch any other Mutagen-schema overstatements before v2.8.0 ships.
+2. **`tools_patching.py:104` schema description correction** — Outfit and Spell shouldn't be in the VMAD-supported list (Case (A) confirmed by race-probe Batch 7 disambiguator). **Aaron's amended placement: Phase 4 PerkAdapter/QuestAdapter session** (same operator family; the session already touches `PatchEngine.cs` + tests + CHANGELOG + KNOWN_ISSUES). Plus a cross-check carried into the same session: one-pass reflection probe against every type currently in the schema list, to catch any other Mutagen-schema overstatements before v2.8.0 ships. Phase 5 stays clean — just CHANGELOG ship-date insertion + final cleanup.
 3. **MATRIX Mutagen-schema overstatements** — 1.r.40, 1.r.47, 1.D.04 each represent a MATRIX cell that can't be fulfilled because Mutagen 0.53.1's concrete record type doesn't expose the required property. Phase 5 should:
    - Update MATRIX.md to mark these as schema-deferred.
    - Add KNOWN_ISSUES.md entry alongside the existing v2.7.1-era AMMO enchantment limitation (same shape: Mutagen schema gap, requires upstream change to lift).

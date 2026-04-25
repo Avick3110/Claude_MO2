@@ -4,6 +4,14 @@ Current as of v2.7.0. These are known limitations, not bugs — all reported bug
 
 ---
 
+## v2.7.1 in flight (placeholder — finalized in Phase 4)
+
+A bridge coverage expansion is in development per `dev/plans/v2.7.1_race_patching/PLAN.md`. The release expands the write surface for `add_keywords`, `add_spells`, and `add_items` (per `AUDIT.md`), eliminates the silent-failure bug class for any unmatched (operator, record-type) pair, and adds bracket-indexer dict syntax to `set_fields` so RACE per-stat fields (`Starting[Health]`, `Regen[Magicka]`, etc.) become writable.
+
+Phase 4 finalizes this section with: the full new write-surface matrix, the explicit-error response shape for unsupported requests, and the carry-overs preserved into v2.8 (chained dict access, replace-semantics whole-dict assignment, Quest condition-list disambiguation, adapter-subclass attach_scripts, AMMO enchantment).
+
+---
+
 ## User-provided prerequisites
 
 These are by design — we don't bundle proprietary or license-undecidable tools. Missing any of these disables only the capabilities that depend on them; everything else continues to work.

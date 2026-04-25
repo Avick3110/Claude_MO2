@@ -4,6 +4,16 @@ All plugin changes are made in the Dev Build copy first. Once tested and stable,
 
 ---
 
+## v2.7.1 — TBD
+
+Phase 4 finalizes this entry. Expected sections per the v2.7.1 plan (`dev/plans/v2.7.1_race_patching/PLAN.md`):
+
+- **Fixed — bridge:** RACE silent failures (keywords, actor effects, dict-stat unsettable on `Starting`/`Regen`); silent-failure bug class (any unmatched (operator, record-type) pair now errors explicitly with rollback); other gaps closed per `dev/plans/v2.7.1_race_patching/AUDIT.md`.
+- **Added — bridge:** silent-failure detection (Tier D); bracket-indexer + JSON-object dict syntax in `set_fields` (Tier C); comprehensive operator wire-ups per AUDIT.md (Tier A — keywords on Race/Furniture/Activator/Location/Spell/MagicEffect; spells on Race; `add_items` on LVLN/LVSP); RACE field aliases (Tier B).
+- **Note:** v2.8 is the verification/hardening release — no new capabilities, real-world exercise of every wire-up landed in v2.7.1.
+
+---
+
 ## v2.7.0 — 2026-04-24
 
 Installer overhaul. Four user-provided tool surfaces (BSArch, nif-tool, PapyrusCompiler, Papyrus Scripts sources) are now configured through a single installer wizard page — no more silent README stubs. The path-persistence regression that landed users in the wrong MO2 instance on reinstall is fixed. .NET 8 Runtime is now a hard install gate.

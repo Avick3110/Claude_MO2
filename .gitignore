@@ -10,6 +10,8 @@ __pycache__/
 build-output/
 tools/mutagen-bridge/bin/
 tools/mutagen-bridge/obj/
+tools/race-probe/bin/
+tools/race-probe/obj/
 
 # Spooky toolkit submodule build state
 spooky-toolkit/**/bin/

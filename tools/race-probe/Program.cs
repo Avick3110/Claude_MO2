@@ -792,6 +792,284 @@ ProbeEffectCarrier<Ingredient>(
     (m, r) => m.Ingredients.Add(r),
     (rb, fk) => rb.Ingredients.FirstOrDefault(i => i.FormKey == fk));
 
+// ═══════════════════════════════════════════════════════════════════════════
+// v2.8 Phase 2 / Batch 7 — VMAD case (A) vs (B) disambiguator + adapter probe
+//
+// Aaron's clarification (2026-04-25, post-Batch-6 review): tools_patching.py
+// schema description claims VMAD is supported on Outfit + Spell, but Phase 2
+// found bridge errors "Record type Outfit/Spell does not support scripts"
+// originating from the existing reflection guard at PatchEngine.cs:1732-1734
+// (the `vmadProp == null` branch). Two competing hypotheses:
+//
+//   Case (A): Mutagen 0.53.1 genuinely doesn't expose VMAD on the concrete
+//             Outfit/Spell classes. Then the v2.7.1 schema description is
+//             wrong and these are MATRIX-only SKIPs (no bridge bug).
+//
+//   Case (B): Mutagen exposes VMAD via interface (e.g. via explicit interface
+//             implementation, or only on a parent interface like
+//             IHaveVirtualMachineAdapter). Then the bridge's reflection
+//             lookup `record.GetType().GetProperty(...)` misses it and
+//             real consumers can't attach scripts on Outfit/Spell.
+//             That's a NEW Phase 4 bridge bug.
+//
+// Disambiguator: probe `typeof(Outfit).GetProperty("VirtualMachineAdapter")`
+// AND walk all interfaces of Outfit for any "VirtualMachineAdapter" property.
+// Same for Spell. Then the verdict goes in PHASE_2_HANDOFF.md.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Flow per record type (PERK, QUST):
+//   1. Pick a vanilla Skyrim.esm record with VMAD == null (auto-create path).
+//   2. Call mutagen-bridge.exe with attach_scripts on that record.
+//   3. Read the output ESP back via SkyrimMod.CreateFromBinary (NOT overlay)
+//      so all properties + concrete types are exposed.
+//   4. Inspect output.<Records>[0].VirtualMachineAdapter.GetType().
+//   5. Document. PerkAdapter / QuestAdapter → bug doesn't reproduce.
+//      Base VirtualMachineAdapter → BUG CONFIRMED for Phase 4.
+//
+// Note: Mutagen's binary readback may schema-coerce the runtime type back to
+// the correct subclass even if the bridge wrote the base type. If the runtime
+// type IS the correct subclass, that's still useful data — it means the bug
+// (if it exists in-memory in the bridge process) doesn't manifest in the
+// written ESP.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const string SkyrimEsmForBatch7 = @"E:\SteamLibrary\steamapps\common\Skyrim Special Edition\Data\Skyrim.esm";
+
+Section("v2.8 P2 Batch 7 — VMAD case (A) vs (B) disambiguator (Outfit / Spell)");
+
+// Probe whether Mutagen 0.53.1 declares "VirtualMachineAdapter" on the
+// concrete Outfit and Spell classes — and via any of their interfaces.
+void ProbeVmadDisambiguator(string label, Type concreteType)
+{
+    var classProp = concreteType.GetProperty("VirtualMachineAdapter",
+        BindingFlags.Public | BindingFlags.Instance);
+    Console.WriteLine($"  {label}.GetProperty(\"VirtualMachineAdapter\"): {(classProp == null ? "null" : "non-null, declared type=" + FriendlyType(classProp.PropertyType))}");
+
+    // DeclaredOnly — does the concrete class itself declare it (vs inherited)?
+    var classPropDeclared = concreteType.GetProperty("VirtualMachineAdapter",
+        BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+    Console.WriteLine($"  {label} declares VMAD itself (DeclaredOnly): {classPropDeclared != null}");
+
+    // Walk every interface looking for VirtualMachineAdapter.
+    var interfaceHits = new List<string>();
+    foreach (var iface in concreteType.GetInterfaces())
+    {
+        var ifaceProp = iface.GetProperty("VirtualMachineAdapter",
+            BindingFlags.Public | BindingFlags.Instance);
+        if (ifaceProp != null)
+            interfaceHits.Add($"{FriendlyType(iface)} → {FriendlyType(ifaceProp.PropertyType)}");
+    }
+    if (interfaceHits.Count == 0)
+        Console.WriteLine($"  {label} interfaces declaring VMAD: <none>");
+    else
+    {
+        Console.WriteLine($"  {label} interfaces declaring VMAD ({interfaceHits.Count}):");
+        foreach (var hit in interfaceHits) Console.WriteLine($"    - {hit}");
+    }
+
+    // Walk base-class chain. Mutagen often uses MajorRecord parents.
+    var baseChain = new List<string>();
+    var t = concreteType.BaseType;
+    while (t != null && t != typeof(object))
+    {
+        var bp = t.GetProperty("VirtualMachineAdapter",
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+        if (bp != null)
+            baseChain.Add($"{FriendlyType(t)} declares VMAD as {FriendlyType(bp.PropertyType)}");
+        t = t.BaseType;
+    }
+    if (baseChain.Count == 0)
+        Console.WriteLine($"  {label} base-class chain declaring VMAD: <none>");
+    else
+    {
+        Console.WriteLine($"  {label} base-class chain declaring VMAD:");
+        foreach (var b in baseChain) Console.WriteLine($"    - {b}");
+    }
+
+    // Verdict heuristic.
+    string verdict;
+    if (classProp != null) verdict = "Case (B) — concrete class exposes VMAD; bridge reflection lookup ought to find it. If bridge errors, that's a separate Phase 4 bug.";
+    else if (interfaceHits.Count == 0 && baseChain.Count == 0) verdict = "Case (A) — Mutagen 0.53.1 genuinely doesn't expose VMAD on this record type. v2.7.1 schema description was incorrect.";
+    else verdict = "Case (B) — VMAD declared on interface or base class but NOT visible via concrete-class reflection. Bridge's reflection lookup needs to walk interfaces/base-chain. NEW BRIDGE BUG.";
+    Console.WriteLine($"  >>> verdict for {label}: {verdict}");
+}
+
+ProbeVmadDisambiguator("typeof(Outfit)", typeof(Outfit));
+ProbeVmadDisambiguator("typeof(Spell)", typeof(Spell));
+
+Section("v2.8 P2 Batch 7 — PerkAdapter / QuestAdapter functional probe");
+
+if (!File.Exists(SkyrimEsmForBatch7))
+{
+    Console.WriteLine($"  SKIP: Skyrim.esm not found at {SkyrimEsmForBatch7}");
+}
+else
+{
+    var thisDir = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location)!;
+    var bridgeExe = Path.GetFullPath(Path.Combine(thisDir,
+        "..", "..", "..", "..", "mutagen-bridge", "bin", "Release", "net8.0", "mutagen-bridge.exe"));
+    if (!File.Exists(bridgeExe))
+    {
+        Console.WriteLine($"  SKIP: mutagen-bridge.exe not found at {bridgeExe}");
+    }
+    else
+    {
+        Console.WriteLine($"  bridge: {bridgeExe}");
+        Console.WriteLine($"  source: {SkyrimEsmForBatch7}");
+
+        // Local helper: invoke bridge.
+        (string stdout, string stderr, int exit) RunBridge(string exe, string stdinJson)
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(exe)
+            {
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            var p = System.Diagnostics.Process.Start(psi)!;
+            p.StandardInput.Write(stdinJson);
+            p.StandardInput.Close();
+            var so = p.StandardOutput.ReadToEnd();
+            var se = p.StandardError.ReadToEnd();
+            p.WaitForExit();
+            return (so, se, p.ExitCode);
+        }
+
+        string FormatFormKey(FormKey fk) => $"{fk.ModKey.FileName}:{fk.ID:X6}";
+
+        var batch7OutDir = Path.Combine(Path.GetTempPath(), "race-probe-batch7");
+        Directory.CreateDirectory(batch7OutDir);
+
+        using var srcMod = SkyrimMod.CreateFromBinaryOverlay(SkyrimEsmForBatch7, SkyrimRelease.SkyrimSE);
+
+        // Local helper: probe a single record type.
+        void ProbeAdapter(string recordTypeLabel, string expectedSubclassName,
+                          FormKey? targetFk,
+                          Func<SkyrimMod, FormKey, ISkyrimMajorRecordGetter?> readbackByFormKey)
+        {
+            Section($"v2.8 P2 Batch 7 — {recordTypeLabel} adapter probe");
+            if (targetFk == null)
+            {
+                Console.WriteLine($"  SKIP: no {recordTypeLabel} w/o VMAD in Skyrim.esm");
+                return;
+            }
+            var fk = targetFk.Value;
+            Console.WriteLine($"  Source {recordTypeLabel}: {fk}");
+            var outPath = Path.Combine(batch7OutDir, $"{recordTypeLabel.ToLower()}-probe.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "race-probe-batch7",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = FormatFormKey(fk),
+                        source_path = SkyrimEsmForBatch7,
+                        attach_scripts = new[]
+                        {
+                            new { name = "TestScript", properties = Array.Empty<object>() }
+                        },
+                    }
+                },
+                load_order = new
+                {
+                    game_release = "SkyrimSE",
+                    listings = new[]
+                    {
+                        new { mod_key = "Skyrim.esm", path = SkyrimEsmForBatch7, enabled = true }
+                    }
+                }
+            };
+
+            var reqJson = System.Text.Json.JsonSerializer.Serialize(req);
+            var (stdout, stderr, exit) = RunBridge(bridgeExe, reqJson);
+            Console.WriteLine($"  bridge response (exit={exit}):");
+            foreach (var line in stdout.Split('\n')) Console.WriteLine($"    {line.TrimEnd('\r')}");
+
+            if (exit != 0 || !File.Exists(outPath))
+            {
+                Console.WriteLine($"  *** FAIL: bridge call did not produce output ESP (exit={exit}, file exists={File.Exists(outPath)})");
+                if (!string.IsNullOrEmpty(stderr)) Console.WriteLine($"  stderr: {stderr}");
+                return;
+            }
+
+            // CreateFromBinary (not overlay) — full record reconstitution so
+            // VMAD subclass runtime type is observable.
+            var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+            var rec = readbackByFormKey(outMod, fk);
+            if (rec == null)
+            {
+                Console.WriteLine($"  *** FAIL: {recordTypeLabel} record missing in output ESP");
+                return;
+            }
+
+            var vmadProp = rec.GetType().GetProperty("VirtualMachineAdapter",
+                BindingFlags.Public | BindingFlags.Instance);
+            if (vmadProp == null)
+            {
+                Console.WriteLine($"  *** UNEXPECTED: {recordTypeLabel} record exposes no VirtualMachineAdapter property via reflection");
+                return;
+            }
+            var vmad = vmadProp.GetValue(rec);
+            if (vmad == null)
+            {
+                Console.WriteLine($"  *** UNEXPECTED: VirtualMachineAdapter is null after attach_scripts (bridge claimed success)");
+                return;
+            }
+
+            var typeName = vmad.GetType().Name;
+            var fullName = vmad.GetType().FullName;
+            Console.WriteLine($"  >>> output.{recordTypeLabel}.VirtualMachineAdapter runtime type: {typeName}");
+            Console.WriteLine($"      full name: {fullName}");
+
+            // Report subclass detection. Note: Mutagen wraps records in *BinaryOverlay
+            // when read via CreateFromBinaryOverlay, but CreateFromBinary should
+            // produce the concrete (non-overlay) type. The expected subclass for
+            // PERK is `PerkAdapter`; for QUST is `QuestAdapter`.
+            if (typeName == expectedSubclassName)
+                Console.WriteLine($"  ✓ {expectedSubclassName} constructed correctly — bug DOES NOT reproduce on this code path");
+            else if (typeName.StartsWith("VirtualMachineAdapter"))
+                Console.WriteLine($"  ✗ BUG CONFIRMED: bridge constructed base VirtualMachineAdapter instead of {expectedSubclassName}");
+            else if (typeName.Contains(expectedSubclassName))
+                Console.WriteLine($"  ~ runtime type contains \"{expectedSubclassName}\" (overlay/wrapper variant?) — likely correct");
+            else
+                Console.WriteLine($"  ? unexpected runtime type \"{typeName}\" for {recordTypeLabel}.VirtualMachineAdapter — investigate");
+
+            // Bonus diagnostic: count Scripts and the runtime type of script element.
+            var scriptsProp = vmad.GetType().GetProperty("Scripts",
+                BindingFlags.Public | BindingFlags.Instance);
+            var scriptsObj = scriptsProp?.GetValue(vmad) as System.Collections.IEnumerable;
+            int scriptCount = 0;
+            string? firstScriptType = null;
+            if (scriptsObj != null)
+                foreach (var s in scriptsObj)
+                {
+                    if (firstScriptType == null && s != null) firstScriptType = s.GetType().Name;
+                    scriptCount++;
+                }
+            Console.WriteLine($"      VMAD.Scripts count: {scriptCount}; first script runtime type: {firstScriptType ?? "<none>"}");
+        }
+
+        // PERK probe (4.c.06).
+        var perkNoVmad = srcMod.Perks.FirstOrDefault(p => p.VirtualMachineAdapter == null);
+        ProbeAdapter("PERK", "PerkAdapter", perkNoVmad?.FormKey,
+            (m, fk) => m.Perks.FirstOrDefault(p => p.FormKey == fk));
+
+        // QUST probe (4.c.07).
+        var questNoVmad = srcMod.Quests.FirstOrDefault(q => q.VirtualMachineAdapter == null);
+        ProbeAdapter("QUST", "QuestAdapter", questNoVmad?.FormKey,
+            (m, fk) => m.Quests.FirstOrDefault(q => q.FormKey == fk));
+    }
+}
+
 Console.WriteLine();
 int totalFailures = auditFailures + effectsAuditFailures;
 if (totalFailures > 0)

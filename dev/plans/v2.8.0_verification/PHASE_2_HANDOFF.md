@@ -109,8 +109,8 @@ Per the MATRIX skip-with-reason convention, Phase 2 logged 4 SKIPs. Each is a MA
 
 | Cell | Reason |
 |---|---|
-| **1.r.40** (attach_scripts OTFT) | **Case (A) confirmed** — Mutagen 0.53.1 genuinely doesn't expose `VirtualMachineAdapter` on Outfit. See § "OTFT/SPEL Case (A) vs (B) disambiguator" below for evidence. Bridge's `ApplyAttachScripts` reflection guard at `PatchEngine.cs:1732-1734` correctly errors with `"Record type Outfit does not support scripts"`. |
-| **1.r.47** (attach_scripts SPEL) | **Case (A) confirmed** — same as 1.r.40, Mutagen 0.53.1 doesn't expose VMAD on Spell. Bridge errors `"Record type Spell does not support scripts"`. |
+| **1.r.40** (attach_scripts OTFT) | **Case (A) provisional** — Phase 2's reflection probe (`GetProperty("VirtualMachineAdapter")` on concrete class + interfaces + base chain) returned null, suggesting Mutagen 0.53.1 doesn't expose VMAD on Outfit. **Full disambiguation deferred to Phase 4** — see § "OTFT/SPEL Case (A) vs (B) disambiguator" below for current evidence + what the Phase 4 extended probe (full property name dump + Mutagen round-trip test) will check. Bridge's `ApplyAttachScripts` reflection guard at `PatchEngine.cs:1732-1734` errors with `"Record type Outfit does not support scripts"` regardless of the final verdict. |
+| **1.r.47** (attach_scripts SPEL) | **Case (A) provisional** — same as 1.r.40, Phase 2 evidence suggests Mutagen 0.53.1 doesn't expose VMAD on Spell; Phase 4 extended probe definitively resolves. Bridge errors `"Record type Spell does not support scripts"` regardless of verdict. |
 | **1.D.04** (add_keywords CELL Tier D negative) | Mutagen 0.53.1's `CellBinaryOverlay` can't be overridden via the simple `GetOrAddAsOverride` path the bridge uses — CELL records require worldspace/cell-block context. Bridge errors `"Could not create override for CellBinaryOverlay"` BEFORE Tier D dispatch can run. The Tier D negative shape can't be observed for CELL because override creation fails earlier. **Architectural note:** `GetOrAddAsOverride` is the bridge's universal override path; expanding CELL support would require a worldspace-aware code path. Out of scope for v2.8.0; flag for future MATRIX maintenance. |
 | **4.esl.01** (ESL master interaction) | Layer 4 ESL master interaction explicitly defers to Phase 3 per MATRIX scope (live modlist required — vanilla Skyrim.esm has no ESPFE plugins). |
 
@@ -144,11 +144,27 @@ Aaron's review post-Batch-6 flagged that the OTFT/SPEL skip wording (`"concrete 
   >>> verdict for typeof(Spell): Case (A) — Mutagen 0.53.1 genuinely doesn't expose VMAD on this record type. v2.7.1 schema description was incorrect.
 ```
 
-**Verdict: Case (A) — for both OTFT and SPEL, Mutagen 0.53.1 genuinely lacks the property** at the concrete-class level, on every interface, and across the entire base-class chain. The bridge's reflection guard at `PatchEngine.cs:1732-1734` is correct; no bridge bug.
+**Verdict (provisional): Case (A) suggested but not conclusive.** The disambiguator above checked one specific property name ("VirtualMachineAdapter") on concrete class + all interfaces + full base-class chain — all null. This rules out the simplest case (Mutagen exposes VMAD under that exact name on those types) but does NOT rule out:
 
-**Required documentation correction (Phase 4 docs pass — same session as `perk_quest_adapter_subclass` fix):**
+1. **A different property name** on Outfit/Spell — the bridge's reflection hardcodes the literal `"VirtualMachineAdapter"`; a renamed property is invisible to it.
+2. **Interface-based or extension-method access** — `GetProperty()` and `GetInterfaces()` won't surface extension methods or static helpers.
+3. **Round-trip preservation under a non-property mechanism** — if a vanilla SPEL with VMAD round-trips through Mutagen and the VMAD survives, Mutagen knows about it somewhere we haven't checked. Phase 2 didn't run this test.
 
-Aaron's amended sign-off placement (post-Case-(A)-verdict review): fold into the Phase 4 PerkAdapter/QuestAdapter fix session. Same operator family (attach_scripts hygiene); the session touches `PatchEngine.cs` + `coverage-smoke/Program.cs` regression test + `CHANGELOG.md` + `KNOWN_ISSUES.md` already, so the docs-correction edits cost ~3 extra lines of attention. Phase 5 stays clean — just CHANGELOG ship-date insertion + final cleanup, no docs edits to coordinate.
+**Full disambiguation deferred to Phase 4** (per Aaron's 2026-04-25 conductor decision after reviewing this verdict). The `perk_quest_adapter_subclass` session (priority-zero bug fix) runs an extended probe as its first action: full property name dump on `typeof(Outfit)` + `typeof(Spell)` looking for any VMAD-shaped property under any name; plus a Mutagen-direct round-trip on a real vanilla SPEL with attached scripts to verify whether VMAD is preserved through write+read. See PLAN.md § Phase 4 for the deferred-probe specification and verdict-driven scope branches.
+
+**Three possible Phase 4 outcomes:**
+
+- **Case (A) confirmed** (Mutagen genuinely lacks support) → docs-only cleanup proceeds — remove Outfit + Spell from `tools_patching.py:104` + KNOWN_ISSUES limitation entry as planned below.
+- **Case (B): different property name** → bridge fix in scope (adjust `ApplyAttachScripts` reflection to find the actual property); coverage-smoke regression tests for OTFT/SPEL flip from SKIP to positive PASS.
+- **Case (C): interface/extension exposure** → bridge fix in scope (interface-based reflection); same coverage-smoke flip.
+
+The bridge's reflection guard at `PatchEngine.cs:1732-1734` is correct under (A) and would need adjustment under (B)/(C).
+
+**Documentation + scope correction guidance (Phase 4 — same session as `perk_quest_adapter_subclass` fix):**
+
+Aaron's amended sign-off placement (post-Case-(A)-verdict review): fold into the Phase 4 PerkAdapter/QuestAdapter fix session. Same operator family (attach_scripts hygiene); the session touches `PatchEngine.cs` + `coverage-smoke/Program.cs` regression test + `CHANGELOG.md` + `KNOWN_ISSUES.md` already, so the OTFT/SPEL work folds in cleanly. Under Case (A) it's ~3 lines of docs editing; under (B)/(C) it's a bridge fix + regression-test flip in addition. Phase 5 stays clean — just CHANGELOG ship-date insertion + final cleanup, no OTFT/SPEL hygiene to coordinate.
+
+The instructions below describe the Case (A) docs-correction path. If the deferred probe surfaces (B) or (C), the session's scope expands to include the bridge fix; document the broader scope in the work commit message and the Phase 4 handoff.
 
 `Claude_MO2/mo2_mcp/tools_patching.py:104` currently reads:
 

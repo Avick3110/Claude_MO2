@@ -541,6 +541,31 @@ The PerkAdapter/QuestAdapter bug is the priority-zero entry — known concrete f
 
 **No version bump in Phase 4** — Phase 1 already bumped to v2.8.0.
 
+### Pre-fix probe — `perk_quest_adapter_subclass` session ONLY
+
+Before applying the priority-zero bug fix, the `perk_quest_adapter_subclass` session must run an OTFT/SPEL VMAD disambiguation probe to definitively resolve whether Phase 2's Case (A) verdict (Mutagen lacks VMAD on Outfit/Spell) is correct. **Phase 2's evidence was suggestive but not conclusive** — the disambiguator checked one specific property name ("VirtualMachineAdapter") on concrete class + interfaces + base chain; all null. That rules out the simplest case but does NOT rule out (a) a different property name, (b) interface-based or extension-method access, or (c) Mutagen preserving VMAD on round-trip via a non-property mechanism.
+
+**Three verdicts, three scope branches:**
+
+- **Case (A) confirmed** (Mutagen genuinely lacks support) → docs-only cleanup proceeds — remove Outfit + Spell from `tools_patching.py:104`, add KNOWN_ISSUES limitation entry. Coverage-smoke 1.r.40 + 1.r.47 stay as SKIP-with-Case-(A)-confirmed.
+- **Case (B): different property name** → bridge fix in scope. Adjust `ApplyAttachScripts`'s reflection lookup to find the actual property; coverage-smoke 1.r.40 + 1.r.47 flip from SKIP to positive PASS (regression tests added). Schema description updated to reflect what's actually supported.
+- **Case (C): interface-based or extension-method exposure** → bridge fix in scope. Adjust reflection to detect via interface check; same coverage-smoke flip + schema update.
+
+**Probe specification** (extend `tools/race-probe/Program.cs`'s existing Batch 7 disambiguator block at `Section("v2.8 P2 Batch 7 — VMAD case (A) vs (B) disambiguator …")`):
+
+1. **Full property name dump on `typeof(Outfit)` and `typeof(Spell)`.** Print every public instance property name + property type. Scan for anything VMAD-shaped — names containing "Vmad", "Adapter", "VM", "Script"; types deriving from or assignable to `VirtualMachineAdapter`. If found under a different name → Case (B). If a non-property exposure (e.g. an interface method with a getter pattern) is implied → flag for Case (C) follow-up.
+2. **Mutagen-direct round-trip on a vanilla SPEL with VMAD.** Pick a SPEL whose binary form carries a VMAD subrecord — e.g. `Skyrim.esm:SummonFlameAtronachLeftHand` or any SPEL where `mo2_record_detail` shows `Scripts: [...]` (run a quick `mo2_query_records` filtered to Skyrim.esm SPEL records and pick one with attached scripts as reconnaissance). Round-trip via `SkyrimMod.CreateFromBinaryOverlay` → `WriteToBinary` → `CreateFromBinary`; inspect whether the round-tripped record retains the VMAD in any reflection-accessible form. If retained → Mutagen knows about VMAD somewhere; pursue (B)/(C) bridge fix. If lost → Mutagen genuinely lacks the schema entry; Case (A) confirmed.
+3. **Same probe pattern for OTFT.** Vanilla Skyrim.esm has fewer scripted Outfits, but the round-trip can be tested with a Mutagen-constructed Outfit + manually-set VMAD if no vanilla OTFT has scripts.
+
+**Capture the verdict in the work commit message and `PHASE_4_perk_quest_adapter_subclass_HANDOFF.md`.** Include the full probe output (property dump excerpts + round-trip evidence). The verdict drives the session's scope:
+
+- Under Case (A): bug fix + docs-only OTFT/SPEL cleanup. Estimated ~30 minutes additional work over the bare PerkAdapter/QuestAdapter fix.
+- Under Case (B)/(C): bug fix + bridge VMAD-reflection fix + regression-test flip + schema update. Estimated ~2 hours additional work.
+
+**Cross-check carried into the same session (regardless of verdict):** while editing `tools_patching.py:104` (or the schema description), run the existing race-probe `typeof(X).GetProperty(...)` reflection probe against EVERY type currently in the supported list (NPC, Quest, Armor, Weapon, Container, Door, Activator, Furniture, Light, MagicEffect, Perk). Phase 2 found OTFT/SPEL questionable; cross-check ensures no other type in the list is a similar overstatement. If any are, fix inline in the same docs-edit pass; if all check out, that's a clean closure of the schema description's accuracy.
+
+The disambiguation probe is the **first action** of the `perk_quest_adapter_subclass` session — before step 3 of the generic per-bug flow below. The bug fix proper (Activator-based subclass construction) proceeds after the probe verdict is captured.
+
 ### Steps (per Phase 4 session)
 
 1. **Identify your bug.** Read `PHASE_3_HANDOFF.md` (or `PHASE_2_HANDOFF.md` if Phase 3 didn't surface bugs). Pick the next un-fixed entry.

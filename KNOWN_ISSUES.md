@@ -1,14 +1,33 @@
 # Known Issues & Limitations
 
-Current as of v2.7.0. These are known limitations, not bugs — all reported bugs have been resolved. For the full version history see `mo2_mcp/CHANGELOG.md`.
+Current as of v2.7.1. These are known limitations, not bugs — all reported bugs have been resolved. For the full version history see `mo2_mcp/CHANGELOG.md`.
 
 ---
 
-## v2.7.1 in flight (placeholder — finalized in Phase 4)
+## v2.7.1 patching write surface
 
-A bridge coverage expansion is in development per `dev/plans/v2.7.1_race_patching/PLAN.md`. The release expands the write surface for `add_keywords`, `add_spells`, and `add_items` (per `AUDIT.md`), eliminates the silent-failure bug class for any unmatched (operator, record-type) pair, and adds bracket-indexer dict syntax to `set_fields` so RACE per-stat fields (`Starting[Health]`, `Regen[Magicka]`, etc.) become writable.
+v2.7.1 expanded the operator × record-type matrix driven by an audit of every (operator, record-type) pair Mutagen 0.53.1's Skyrim schemas support. See `dev/plans/v2.7.1_race_patching/AUDIT.md` for the complete matrix.
 
-Phase 4 finalizes this section with: the full new write-surface matrix, the explicit-error response shape for unsupported requests, and the carry-overs preserved into v2.8 (chained dict access, replace-semantics whole-dict assignment, Quest condition-list disambiguation, adapter-subclass attach_scripts, AMMO enchantment).
+### What's new
+
+- **RACE patching is fully wired.** `add_keywords`/`remove_keywords` and `add_spells`/`remove_spells` work on RACE records. Per-stat starting values and regen rates (`Starting[Health]`, `Regen[Magicka]`, etc.) are writable via `set_fields` either in bracket form or as a JSON object. Field aliases shorten the common cases: `BaseHealth`, `BaseMagicka`, `BaseStamina`, `HealthRegen`, `MagickaRegen`, `StaminaRegen`.
+- **Keyword writes expanded** to Furniture, Activator, Location, Spell, MagicEffect — plus Race. The 10 prior types (Armor, Weapon, NPC, Ingestible, Ammunition, Book, Flora, Ingredient, MiscItem, Scroll) are unchanged.
+- **Leveled-list `add_items` expanded** to LVLN and LVSP. LVLI is unchanged.
+- **Bracket-indexer + JSON-object dict syntax** in `set_fields` works against any Mutagen `IDictionary<,>` property — RACE's stat dicts are the headline use case but the path is generic.
+- **Silent drops eliminated.** Per-record errors now include an `unmatched_operators` field listing every requested operator the bridge could not dispatch on the target record type. Failed records roll back from the patch before write — no silent successes that report `success: true` but produce no actual mutation.
+
+### Carried-over limitations (v2.8 candidates)
+
+- **Replace-semantics whole-dict assignment.** Today the JSON-object form (`Starting: {Health: 100, Magicka: 200}`) is merge-only — keys not present in the JSON are preserved at their source values. v2.7.1 ships with **uniform merge semantics regardless of whether the target Mutagen property exposes a setter**, so behavior doesn't depend on which specific dict you target. A future replace-semantics surface (clear-then-set) would need a new operator parameter or sentinel value; v2.7.1 was scope-locked at "no new operators."
+- **Chained dict access.** `Foo[Key].Sub` paths are not supported — Tier C is terminal-bracket-only. `set_fields` rejects chained brackets explicitly with a clear error rather than producing wrong behavior.
+- **Quest condition disambiguation.** QUST records carry `DialogConditions` and `EventConditions` rather than a single `Conditions` list. `add_conditions`/`remove_conditions` cannot disambiguate without a new operator parameter (e.g. `condition_target: "dialog" | "event"`). v2.8 candidate.
+- **Per-effect spell conditions.** SPEL records have no top-level `Conditions` list — conditions live nested inside each `Effects[i].Conditions`. Tier C's terminal-bracket scope can't reach them. To condition a spell, target its MGEF directly. (See "Spell conditions apply at effect level" below for the user-facing framing.)
+- **Adapter-subclass `attach_scripts` on PERK/QUST.** Both record types extend `VirtualMachineAdapter` with their own subclass (`PerkAdapter`, `QuestAdapter`). The bridge's reflection cast on the base class succeeds, but the auto-create path constructs the wrong adapter type when the record has no existing scripts. If the record already has a script adapter, attach succeeds correctly; the failure mode is "first script ever attached on a fresh PERK/QUST." Tier D will not surface this since the property exists and the bridge reports `scripts_attached: N`. v2.8 needs a per-type adapter factory.
+- **AMMO enchantment.** Mutagen's schema does not expose an `ObjectEffect` slot on Ammunition records. `set_enchantment`/`clear_enchantment` are restricted to ARMO/WEAP. Resolving this requires an upstream Mutagen schema change.
+
+### v2.8 = verification release
+
+v2.7.1 lands a substantial expansion of the bridge's write surface — 16 (operator, record-type) pairs across 9 record types, plus the Tier D / Tier C generic infrastructure. v2.8 is planned as a verification/hardening release: real-world workflows exercise every wire-up landed in v2.7.1, and v2.8 fixes whatever surfaces. No new operator surface or record-type expansion is planned for v2.8 outside of the carry-overs listed above.
 
 ---
 

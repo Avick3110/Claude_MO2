@@ -978,6 +978,15 @@ public class PatchEngine
             ["Value"] = "Value",
             ["Weight"] = "Weight",
         },
+        ["RACE"] = new()
+        {
+            ["BaseHealth"]   = "Starting[Health]",
+            ["BaseMagicka"]  = "Starting[Magicka]",
+            ["BaseStamina"]  = "Starting[Stamina]",
+            ["HealthRegen"]  = "Regen[Health]",
+            ["MagickaRegen"] = "Regen[Magicka]",
+            ["StaminaRegen"] = "Regen[Stamina]",
+        },
     };
 
     private int ApplySetFields(IMajorRecord record, Dictionary<string, JsonElement> fields)
@@ -1693,6 +1702,7 @@ public class PatchEngine
         IKeywordGetter => "KYWD", IGlobalGetter => "GLOB", IEncounterZoneGetter => "ECZN",
         IFormListGetter => "FLST", IMagicEffectGetter => "MGEF",
         IContainerGetter => "CONT", IPackageGetter => "PACK",
+        IFurnitureGetter => "FURN", IActivatorGetter => "ACTI", ILocationGetter => "LCTN",
         _ => record.Registration.ClassType.Name.ToUpperInvariant(),
     };
 

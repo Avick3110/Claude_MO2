@@ -12,6 +12,8 @@ tools/mutagen-bridge/bin/
 tools/mutagen-bridge/obj/
 tools/race-probe/bin/
 tools/race-probe/obj/
+tools/coverage-smoke/bin/
+tools/coverage-smoke/obj/
 
 # Spooky toolkit submodule build state
 spooky-toolkit/**/bin/

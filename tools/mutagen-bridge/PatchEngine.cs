@@ -190,6 +190,20 @@ public class PatchEngine
         {
             ApplyModifications(overrideRecord, op, detail);
         }
+        catch (UnsupportedOperatorException ex)
+        {
+            // Tier D (v2.7.1): one or more requested operators have no
+            // handler for this record type. Roll back the override so
+            // the output ESP doesn't ship a no-op record, populate the
+            // structured fields, and return without re-throwing — the
+            // outer Process loop counts this as a failed record but
+            // continues processing the remaining records in the patch.
+            TryRemoveOverride(patchMod, overrideRecord);
+            detail.Modifications = null;
+            detail.UnmatchedOperators = ex.UnmatchedOperators;
+            detail.Error = ex.Message;
+            return detail;
+        }
         catch
         {
             // Roll back the no-op override so the output ESP and the
@@ -387,6 +401,116 @@ public class PatchEngine
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // Tier D — Silent-Failure Detection (v2.7.1)
+    // ═══════════════════════════════════════════════════════════════
+    //
+    // Canonical operator → mods-key mapping. After ApplyModifications
+    // runs, an operator is considered "matched" iff its mods-key is
+    // present in RecordDetail.Modifications. Multiple operators can
+    // share a mods-key (set_flags / clear_flags both → "flags_changed")
+    // — both are satisfied by the shared key.
+    //
+    // Tier D's coverage check (in ApplyModifications) compares this
+    // request's populated operators against the mods-keys actually
+    // written by the handlers. Any requested operator without its
+    // mods-key present after handlers run is unsupported on this
+    // (record-type, operator) pair → UnsupportedOperatorException →
+    // ProcessOverride rolls back the override and the per-record
+    // detail surfaces the structured `unmatched_operators` field.
+    //
+    // This dict is the source of truth for AUDIT.md's mapping table at
+    // dev/plans/v2.7.1_race_patching/AUDIT.md. Phase 3 wire-ups add
+    // (operator, record-type) coverage; this table itself does not
+    // change unless a NEW operator is introduced.
+    private static readonly Dictionary<string, string> OperatorModsKeys = new()
+    {
+        ["add_keywords"]            = "keywords_added",
+        ["remove_keywords"]         = "keywords_removed",
+        ["add_spells"]              = "spells_added",
+        ["remove_spells"]           = "spells_removed",
+        ["add_perks"]               = "perks_added",
+        ["remove_perks"]            = "perks_removed",
+        ["add_packages"]            = "packages_added",
+        ["remove_packages"]         = "packages_removed",
+        ["add_factions"]            = "factions_added",
+        ["remove_factions"]         = "factions_removed",
+        ["add_inventory"]           = "inventory_added",
+        ["remove_inventory"]        = "inventory_removed",
+        ["add_outfit_items"]        = "outfit_items_added",
+        ["remove_outfit_items"]     = "outfit_items_removed",
+        ["add_form_list_entries"]   = "form_list_added",
+        ["remove_form_list_entries"]= "form_list_removed",
+        ["add_items"]               = "items_added",
+        ["add_conditions"]          = "conditions_added",
+        ["remove_conditions"]       = "conditions_removed",
+        ["attach_scripts"]          = "scripts_attached",
+        ["set_enchantment"]         = "enchantment_set",
+        ["clear_enchantment"]       = "enchantment_cleared",
+        ["set_fields"]              = "fields_set",
+        ["set_flags"]               = "flags_changed",
+        ["clear_flags"]             = "flags_changed",
+    };
+
+    /// <summary>
+    /// Build a map from user-facing operator name → mods-key for every
+    /// operator field populated on this request. Operators with shared
+    /// mods-keys (set_flags / clear_flags) appear as separate entries —
+    /// the unmatched check treats the shared key as satisfying both.
+    /// </summary>
+    private static Dictionary<string, string> RequestedOperatorsOf(RecordOperation op)
+    {
+        var requested = new Dictionary<string, string>();
+        void Mark(string operatorName) => requested[operatorName] = OperatorModsKeys[operatorName];
+
+        if (op.AddKeywords?.Count > 0)           Mark("add_keywords");
+        if (op.RemoveKeywords?.Count > 0)        Mark("remove_keywords");
+        if (op.AddSpells?.Count > 0)             Mark("add_spells");
+        if (op.RemoveSpells?.Count > 0)          Mark("remove_spells");
+        if (op.AddPerks?.Count > 0)              Mark("add_perks");
+        if (op.RemovePerks?.Count > 0)           Mark("remove_perks");
+        if (op.AddPackages?.Count > 0)           Mark("add_packages");
+        if (op.RemovePackages?.Count > 0)        Mark("remove_packages");
+        if (op.AddFactions?.Count > 0)           Mark("add_factions");
+        if (op.RemoveFactions?.Count > 0)        Mark("remove_factions");
+        if (op.AddInventory?.Count > 0)          Mark("add_inventory");
+        if (op.RemoveInventory?.Count > 0)       Mark("remove_inventory");
+        if (op.AddOutfitItems?.Count > 0)        Mark("add_outfit_items");
+        if (op.RemoveOutfitItems?.Count > 0)     Mark("remove_outfit_items");
+        if (op.AddFormListEntries?.Count > 0)    Mark("add_form_list_entries");
+        if (op.RemoveFormListEntries?.Count > 0) Mark("remove_form_list_entries");
+        if (op.AddItems?.Count > 0)              Mark("add_items");
+        if (op.AddConditions?.Count > 0)         Mark("add_conditions");
+        if (op.RemoveConditions?.Count > 0)      Mark("remove_conditions");
+        if (op.AttachScripts?.Count > 0)         Mark("attach_scripts");
+        if (op.SetEnchantment != null)           Mark("set_enchantment");
+        if (op.ClearEnchantment == true)         Mark("clear_enchantment");
+        if (op.SetFields?.Count > 0)             Mark("set_fields");
+        if (op.SetFlags?.Count > 0)              Mark("set_flags");
+        if (op.ClearFlags?.Count > 0)            Mark("clear_flags");
+
+        return requested;
+    }
+
+    /// <summary>
+    /// Thrown by ApplyModifications when one or more requested operators
+    /// have no matching handler for the override's record type.
+    /// ProcessOverride catches this, rolls back the override, and
+    /// populates the per-record detail's structured error fields.
+    /// </summary>
+    private class UnsupportedOperatorException : InvalidOperationException
+    {
+        public string RecordType { get; }
+        public List<string> UnmatchedOperators { get; }
+
+        public UnsupportedOperatorException(string recordType, List<string> unmatchedOperators)
+            : base($"Record type {recordType} does not support: {string.Join(", ", unmatchedOperators)}")
+        {
+            RecordType = recordType;
+            UnmatchedOperators = unmatchedOperators;
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // Apply All Modifications to an Override Record
     // ═══════════════════════════════════════════════════════════════
 
@@ -394,6 +518,14 @@ public class PatchEngine
         IMajorRecord record, RecordOperation op, RecordDetail detail)
     {
         var mods = detail.Modifications!;
+        var requested = RequestedOperatorsOf(op);
+
+        // Tier D contract: a mods-key is written iff the corresponding
+        // handler ran for this record type. "Ran with 0 changes" is
+        // success (e.g. all items already present and dedup'd); "no
+        // matching arm at all" is failure → unmatched check below.
+        // Conditional `if (added > 0) mods[...] = added` writes were
+        // scrubbed in v2.7.1 so the present-iff-ran rule holds.
 
         // ── set_fields ──
         if (op.SetFields?.Count > 0)
@@ -421,8 +553,12 @@ public class PatchEngine
                 npc.ActorEffect ??= new ExtendedList<IFormLinkGetter<ISpellRecordGetter>>();
                 mods["spells_added"] = AddFormLinks(npc.ActorEffect, op.AddSpells);
             }
-            if (op.RemoveSpells?.Count > 0 && npc.ActorEffect != null)
-                mods["spells_removed"] = RemoveFormLinks(npc.ActorEffect, op.RemoveSpells);
+            if (op.RemoveSpells?.Count > 0)
+            {
+                mods["spells_removed"] = npc.ActorEffect != null
+                    ? RemoveFormLinks(npc.ActorEffect, op.RemoveSpells)
+                    : 0;
+            }
 
             if (op.AddPerks?.Count > 0)
             {
@@ -437,17 +573,20 @@ public class PatchEngine
                         added++;
                     }
                 }
-                if (added > 0) mods["perks_added"] = added;
+                mods["perks_added"] = added;
             }
-            if (op.RemovePerks?.Count > 0 && npc.Perks != null)
+            if (op.RemovePerks?.Count > 0)
             {
                 int removed = 0;
-                foreach (var pk in op.RemovePerks)
+                if (npc.Perks != null)
                 {
-                    var fk = FormIdHelper.Parse(pk);
-                    removed += npc.Perks.RemoveAll(p => p.Perk.FormKey == fk);
+                    foreach (var pk in op.RemovePerks)
+                    {
+                        var fk = FormIdHelper.Parse(pk);
+                        removed += npc.Perks.RemoveAll(p => p.Perk.FormKey == fk);
+                    }
                 }
-                if (removed > 0) mods["perks_removed"] = removed;
+                mods["perks_removed"] = removed;
             }
 
             // ── Packages ──
@@ -464,7 +603,7 @@ public class PatchEngine
                         added++;
                     }
                 }
-                if (added > 0) mods["packages_added"] = added;
+                mods["packages_added"] = added;
             }
             if (op.RemovePackages?.Count > 0)
             {
@@ -475,7 +614,7 @@ public class PatchEngine
                     var link = fk.ToLink<IPackageGetter>();
                     if (npc.Packages.Remove(link)) removed++;
                 }
-                if (removed > 0) mods["packages_removed"] = removed;
+                mods["packages_removed"] = removed;
             }
 
             // ── Factions ──
@@ -495,17 +634,20 @@ public class PatchEngine
                         added++;
                     }
                 }
-                if (added > 0) mods["factions_added"] = added;
+                mods["factions_added"] = added;
             }
-            if (op.RemoveFactions?.Count > 0 && npc.Factions != null)
+            if (op.RemoveFactions?.Count > 0)
             {
                 int removed = 0;
-                foreach (var fac in op.RemoveFactions)
+                if (npc.Factions != null)
                 {
-                    var fk = FormIdHelper.Parse(fac);
-                    removed += npc.Factions.RemoveAll(f => f.Faction.FormKey == fk);
+                    foreach (var fac in op.RemoveFactions)
+                    {
+                        var fk = FormIdHelper.Parse(fac);
+                        removed += npc.Factions.RemoveAll(f => f.Faction.FormKey == fk);
+                    }
                 }
-                if (removed > 0) mods["factions_removed"] = removed;
+                mods["factions_removed"] = removed;
             }
 
             // ── NPC Inventory ──
@@ -526,17 +668,20 @@ public class PatchEngine
                     });
                     added++;
                 }
-                if (added > 0) mods["inventory_added"] = added;
+                mods["inventory_added"] = added;
             }
-            if (op.RemoveInventory?.Count > 0 && npc.Items != null)
+            if (op.RemoveInventory?.Count > 0)
             {
                 int removed = 0;
-                foreach (var inv in op.RemoveInventory)
+                if (npc.Items != null)
                 {
-                    var fk = FormIdHelper.Parse(inv);
-                    removed += npc.Items.RemoveAll(i => i.Item.Item.FormKey == fk);
+                    foreach (var inv in op.RemoveInventory)
+                    {
+                        var fk = FormIdHelper.Parse(inv);
+                        removed += npc.Items.RemoveAll(i => i.Item.Item.FormKey == fk);
+                    }
                 }
-                if (removed > 0) mods["inventory_removed"] = removed;
+                mods["inventory_removed"] = removed;
             }
         }
 
@@ -560,17 +705,20 @@ public class PatchEngine
                     });
                     added++;
                 }
-                if (added > 0) mods["inventory_added"] = added;
+                mods["inventory_added"] = added;
             }
-            if (op.RemoveInventory?.Count > 0 && container.Items != null)
+            if (op.RemoveInventory?.Count > 0)
             {
                 int removed = 0;
-                foreach (var inv in op.RemoveInventory)
+                if (container.Items != null)
                 {
-                    var fk = FormIdHelper.Parse(inv);
-                    removed += container.Items.RemoveAll(i => i.Item.Item.FormKey == fk);
+                    foreach (var inv in op.RemoveInventory)
+                    {
+                        var fk = FormIdHelper.Parse(inv);
+                        removed += container.Items.RemoveAll(i => i.Item.Item.FormKey == fk);
+                    }
                 }
-                if (removed > 0) mods["inventory_removed"] = removed;
+                mods["inventory_removed"] = removed;
             }
         }
 
@@ -592,7 +740,7 @@ public class PatchEngine
                 });
                 added++;
             }
-            if (added > 0) mods["items_added"] = added;
+            mods["items_added"] = added;
         }
 
         // ── Outfit items ──
@@ -608,18 +756,21 @@ public class PatchEngine
                     outfit.Items.Add(fk.ToLink<IOutfitTargetGetter>());
                     added++;
                 }
-                if (added > 0) mods["outfit_items_added"] = added;
+                mods["outfit_items_added"] = added;
             }
-            if (op.RemoveOutfitItems?.Count > 0 && outfit.Items != null)
+            if (op.RemoveOutfitItems?.Count > 0)
             {
                 int removed = 0;
-                foreach (var oi in op.RemoveOutfitItems)
+                if (outfit.Items != null)
                 {
-                    var fk = FormIdHelper.Parse(oi);
-                    var link = fk.ToLink<IOutfitTargetGetter>();
-                    if (outfit.Items.Remove(link)) removed++;
+                    foreach (var oi in op.RemoveOutfitItems)
+                    {
+                        var fk = FormIdHelper.Parse(oi);
+                        var link = fk.ToLink<IOutfitTargetGetter>();
+                        if (outfit.Items.Remove(link)) removed++;
+                    }
                 }
-                if (removed > 0) mods["outfit_items_removed"] = removed;
+                mods["outfit_items_removed"] = removed;
             }
         }
 
@@ -635,18 +786,21 @@ public class PatchEngine
                     formList.Items.Add(fk.ToLink<ISkyrimMajorRecordGetter>());
                     added++;
                 }
-                if (added > 0) mods["form_list_added"] = added;
+                mods["form_list_added"] = added;
             }
-            if (op.RemoveFormListEntries?.Count > 0 && formList.Items != null)
+            if (op.RemoveFormListEntries?.Count > 0)
             {
                 int removed = 0;
-                foreach (var fle in op.RemoveFormListEntries)
+                if (formList.Items != null)
                 {
-                    var fk = FormIdHelper.Parse(fle);
-                    var link = fk.ToLink<ISkyrimMajorRecordGetter>();
-                    if (formList.Items.Remove(link)) removed++;
+                    foreach (var fle in op.RemoveFormListEntries)
+                    {
+                        var fk = FormIdHelper.Parse(fle);
+                        var link = fk.ToLink<ISkyrimMajorRecordGetter>();
+                        if (formList.Items.Remove(link)) removed++;
+                    }
                 }
-                if (removed > 0) mods["form_list_removed"] = removed;
+                mods["form_list_removed"] = removed;
             }
         }
 
@@ -662,22 +816,57 @@ public class PatchEngine
             mods["scripts_attached"] = ApplyAttachScripts(record, op.AttachScripts);
 
         // ── Enchantment ──
+        // Only Armor and Weapon carry ObjectEffect — write the mods key
+        // iff one of those arms actually fired. Tier D treats absent
+        // mods key as "no handler matched" → unmatched-operator error.
         if (op.SetEnchantment != null)
         {
             var enchFk = FormIdHelper.Parse(op.SetEnchantment);
+            bool applied = false;
             if (record is Armor armor)
+            {
                 armor.ObjectEffect.SetTo(enchFk);
+                applied = true;
+            }
             else if (record is Weapon weapon)
+            {
                 weapon.ObjectEffect.SetTo(enchFk);
-            mods["enchantment_set"] = op.SetEnchantment;
+                applied = true;
+            }
+            if (applied)
+                mods["enchantment_set"] = op.SetEnchantment;
         }
         if (op.ClearEnchantment == true)
         {
+            bool applied = false;
             if (record is Armor armor)
+            {
                 armor.ObjectEffect.Clear();
+                applied = true;
+            }
             else if (record is Weapon weapon)
+            {
                 weapon.ObjectEffect.Clear();
-            mods["enchantment_cleared"] = true;
+                applied = true;
+            }
+            if (applied)
+                mods["enchantment_cleared"] = true;
+        }
+
+        // ── Tier D — silent-failure detection ──
+        // Any requested operator whose mods-key is absent after every
+        // handler ran is unsupported on this record type. Throw with
+        // structured fields; ProcessOverride catches, rolls back the
+        // override, and surfaces the error in the per-record detail.
+        var unmatched = requested
+            .Where(kv => !mods.ContainsKey(kv.Value))
+            .Select(kv => kv.Key)
+            .ToList();
+        if (unmatched.Count > 0)
+        {
+            throw new UnsupportedOperatorException(
+                detail.RecordType ?? RecordTypeCode(record),
+                unmatched);
         }
 
         // Clean up empty modifications dict
@@ -1035,10 +1224,19 @@ public class PatchEngine
 
     private static int ApplyRemoveConditions(IMajorRecord record, List<ConditionRemoval> removals)
     {
+        // Aligned with ApplyAddConditions in v2.7.1: throw on missing
+        // Conditions property so Tier D's coverage check classifies
+        // the (record-type, remove_conditions) pair as unsupported.
+        // (Pre-v2.7.1 silently returned 0, which Tier D would have
+        // misread as "handler matched, removed 0".)
         var condProp = record.GetType().GetProperty("Conditions",
             BindingFlags.Public | BindingFlags.Instance);
-        if (condProp == null) return 0;
+        if (condProp == null)
+            throw new InvalidOperationException(
+                $"Record type {record.GetType().Name} does not support conditions");
 
+        // condList == null is the legitimate "supported but empty" state —
+        // 0 to remove is genuinely 0, NOT a coverage failure.
         var condList = condProp.GetValue(record) as ExtendedList<Condition>;
         if (condList == null) return 0;
 

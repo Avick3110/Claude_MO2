@@ -596,4 +596,11 @@ public class RecordDetail
 
     [JsonPropertyName("error")]
     public string? Error { get; set; }
+
+    // Populated by Tier D silent-failure detection (v2.7.1) when one or more
+    // requested operators have no handler for this record type. Each entry is
+    // a user-facing operator name (e.g. "add_perks"). When set, the override
+    // has been rolled back and Error carries the human-readable summary.
+    [JsonPropertyName("unmatched_operators")]
+    public List<string>? UnmatchedOperators { get; set; }
 }

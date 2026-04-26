@@ -502,6 +502,21 @@ public class ConditionEntry
     [JsonPropertyName("parameter_a")]
     public string? ParameterA { get; set; }
 
+    /// <summary>
+    /// v2.8.0 — optional ActorValue argument for Condition functions whose
+    /// underlying Mutagen ConditionData carries an `ActorValue` enum slot
+    /// (GetActorValue, GetBaseActorValue, GetActorValuePercent, etc.). When
+    /// supplied, the bridge parses this string via <c>Enum.Parse&lt;ActorValue&gt;</c>
+    /// and assigns it to the constructed ConditionData. Without it, the
+    /// underlying enum default (index 0 = Aggression) is preserved — the
+    /// pre-v2.8.0 behavior; this field is purely additive. Scope-locked
+    /// to ActorValue per Phase 4 plan; other Condition function parameter
+    /// slots (FormLink-typed args on GetIsID, GetInFaction, etc.) remain
+    /// v2.9 candidates.
+    /// </summary>
+    [JsonPropertyName("actor_value")]
+    public string? ActorValue { get; set; }
+
     [JsonPropertyName("or_flag")]
     public bool OrFlag { get; set; } = false;
 }

@@ -873,11 +873,25 @@ public class PatchEngine
         }
 
         // ── Conditions ──
+        // v2.8.0: ApplyAddConditions / ApplyRemoveConditions return int?;
+        // null signals the record type has no Conditions property. Skip
+        // writing the mods key in that case so Tier D's coverage check at
+        // the tail of this method surfaces a uniform
+        // unmatched_operators: ["add_conditions"] / ["remove_conditions"]
+        // shape — same as every other unsupported (operator, record-type)
+        // combo. Pre-v2.8.0 the helpers threw directly, producing a
+        // structurally different error path.
         if (op.AddConditions?.Count > 0)
-            mods["conditions_added"] = ApplyAddConditions(record, op.AddConditions);
+        {
+            var added = ApplyAddConditions(record, op.AddConditions);
+            if (added.HasValue) mods["conditions_added"] = added.Value;
+        }
 
         if (op.RemoveConditions?.Count > 0)
-            mods["conditions_removed"] = ApplyRemoveConditions(record, op.RemoveConditions);
+        {
+            var removed = ApplyRemoveConditions(record, op.RemoveConditions);
+            if (removed.HasValue) mods["conditions_removed"] = removed.Value;
+        }
 
         // ── VMAD script attachment ──
         if (op.AttachScripts?.Count > 0)
@@ -1546,14 +1560,22 @@ public class PatchEngine
     // Conditions
     // ═══════════════════════════════════════════════════════════════
 
-    private static int ApplyAddConditions(IMajorRecord record, List<ConditionEntry> conditions)
+    /// <summary>
+    /// v2.8.0 — return type changed from <c>int</c> to <c>int?</c>: null
+    /// signals "this record type has no Conditions property", letting the
+    /// caller skip writing the <c>conditions_added</c> mods key so Tier D's
+    /// coverage check at <c>Apply</c>'s tail surfaces a uniform
+    /// <c>unmatched_operators: ["add_conditions"]</c> error shape — same as
+    /// every other unsupported (operator, record-type) combo. Pre-v2.8.0
+    /// the helper threw <c>"Record type X does not support conditions"</c>
+    /// directly, producing a structurally different error response.
+    /// </summary>
+    private static int? ApplyAddConditions(IMajorRecord record, List<ConditionEntry> conditions)
     {
-        // Get the conditions list via reflection (many record types have it)
+        // Get the conditions list via reflection (many record types have it).
         var condProp = record.GetType().GetProperty("Conditions",
             BindingFlags.Public | BindingFlags.Instance);
-        if (condProp == null)
-            throw new InvalidOperationException(
-                $"Record type {record.GetType().Name} does not support conditions");
+        if (condProp == null) return null; // unsupported — let Tier D fire
 
         var condList = condProp.GetValue(record) as ExtendedList<Condition>;
         if (condList == null)
@@ -1597,6 +1619,30 @@ public class PatchEngine
         // Set RunOnType
         if (Enum.TryParse<Condition.RunOnType>(ce.RunOn, true, out var runOn))
             condData.RunOnType = runOn;
+
+        // v2.8.0 — optional ActorValue argument. ConditionData subclasses
+        // for GetActorValue / GetBaseActorValue / GetActorValuePercent etc.
+        // expose an `ActorValue` enum property on the data record. Without
+        // this routing, the enum defaults to index 0 (Aggression), which is
+        // semantically meaningless for typical "GetActorValue Health >= 50"
+        // checks. Scope-locked to ActorValue per Phase 4 plan; other
+        // Condition-function parameter slots (FormLink-typed args on
+        // GetIsID / GetInFaction / GetInCell / etc.) stay v2.9 candidates.
+        if (!string.IsNullOrEmpty(ce.ActorValue))
+        {
+            var avProp = condDataType.GetProperty("ActorValue",
+                BindingFlags.Public | BindingFlags.Instance);
+            if (avProp == null)
+                throw new ArgumentException(
+                    $"Condition function '{ce.Function}' has no ActorValue parameter slot — drop the actor_value field, or use a function that takes one (GetActorValue, GetBaseActorValue, etc.).");
+            if (!avProp.PropertyType.IsEnum)
+                throw new InvalidOperationException(
+                    $"ActorValue property on {typeName} is not an enum (got {avProp.PropertyType.FullName}).");
+            if (!Enum.TryParse(avProp.PropertyType, ce.ActorValue, ignoreCase: true, out var avValue))
+                throw new ArgumentException(
+                    $"Unknown actor_value: '{ce.ActorValue}' — must be a Mutagen ActorValue enum name (e.g. 'Health', 'Magicka', 'Stamina', 'OneHanded', 'Sneak').");
+            avProp.SetValue(condData, avValue);
+        }
 
         Condition condition;
         if (!string.IsNullOrEmpty(ce.Global))
@@ -1668,18 +1714,21 @@ public class PatchEngine
         return BuildCondition(ce);
     }
 
-    private static int ApplyRemoveConditions(IMajorRecord record, List<ConditionRemoval> removals)
+    /// <summary>
+    /// v2.8.0 — return type changed from <c>int</c> to <c>int?</c> matching
+    /// <see cref="ApplyAddConditions"/>. Null signals "this record type has
+    /// no Conditions property"; the caller skips writing the
+    /// <c>conditions_removed</c> mods key so Tier D's coverage check fires
+    /// with uniform <c>unmatched_operators</c> shape. Pre-v2.7.1 silently
+    /// returned 0 (Tier D misread as "supported but empty"); v2.7.1 threw
+    /// directly (Tier D bypassed); v2.8.0 returns null (Tier D fires
+    /// uniformly across every unsupported combo).
+    /// </summary>
+    private static int? ApplyRemoveConditions(IMajorRecord record, List<ConditionRemoval> removals)
     {
-        // Aligned with ApplyAddConditions in v2.7.1: throw on missing
-        // Conditions property so Tier D's coverage check classifies
-        // the (record-type, remove_conditions) pair as unsupported.
-        // (Pre-v2.7.1 silently returned 0, which Tier D would have
-        // misread as "handler matched, removed 0".)
         var condProp = record.GetType().GetProperty("Conditions",
             BindingFlags.Public | BindingFlags.Instance);
-        if (condProp == null)
-            throw new InvalidOperationException(
-                $"Record type {record.GetType().Name} does not support conditions");
+        if (condProp == null) return null; // unsupported — let Tier D fire
 
         // condList == null is the legitimate "supported but empty" state —
         // 0 to remove is genuinely 0, NOT a coverage failure.
@@ -1733,10 +1782,24 @@ public class PatchEngine
             throw new InvalidOperationException(
                 $"Record type {record.GetType().Name} does not support scripts");
 
-        var vmad = vmadProp.GetValue(record) as VirtualMachineAdapter;
+        // v2.8.0 — type the local as the abstract base AVirtualMachineAdapter.
+        // race-probe Phase 4 inheritance probe found that Mutagen 0.53.1's three
+        // concrete adapters (VirtualMachineAdapter, PerkAdapter, QuestAdapter)
+        // are siblings under the abstract AVirtualMachineAdapter, not subclasses
+        // of one another. Pre-v2.8.0 typed the local as VirtualMachineAdapter,
+        // so the `as` cast returned null on PERK/QUST values (PerkAdapter is
+        // not a VirtualMachineAdapter) and the auto-create path then built
+        // a base VirtualMachineAdapter that the SetValue cast rejected. Using
+        // the common abstract base accommodates all three concretes.
+        var vmad = vmadProp.GetValue(record) as AVirtualMachineAdapter;
         if (vmad == null)
         {
-            vmad = new VirtualMachineAdapter();
+            // Construct the matching concrete via the property's declared
+            // type — PerkAdapter for PERK, QuestAdapter for QUST,
+            // VirtualMachineAdapter for everyone else. EFFECTS_AUDIT.md
+            // § Constructibility (Phase 1) confirmed all three are
+            // activator-creatable and auto-initialize their Scripts collection.
+            vmad = (AVirtualMachineAdapter)System.Activator.CreateInstance(vmadProp.PropertyType)!;
             vmadProp.SetValue(record, vmad);
         }
 

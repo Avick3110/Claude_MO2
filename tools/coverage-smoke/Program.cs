@@ -265,17 +265,21 @@ int failures = 0;
     Console.WriteLine();
 }
 
-// ── Test 3: aligned-throw case — remove_conditions on Armor (no Conditions property) ──
+// ── Test 3: Tier D unification — remove_conditions on Armor (no Conditions property) ──
 //
-// Pre-v2.7.1: ApplyRemoveConditions silently returned 0 → mods["conditions_removed"]
-// would not have been written under the old conditional pattern, but the body in
-// ApplyModifications writes it unconditionally on the supported path. After the
-// v2.7.1 alignment, ApplyRemoveConditions throws InvalidOperationException
-// ("does not support conditions") on missing Conditions property → the existing
-// ProcessOverride catch-all rolls back the override and surfaces the error message.
-//
-// Tier D's UnsupportedOperatorException path does NOT fire here — the helper
-// itself throws first, so this exercises the OTHER catch arm.
+// Behavior history:
+//   Pre-v2.7.1: ApplyRemoveConditions silently returned 0 → mods key written
+//               with value 0 → bridge falsely reported "supported but empty".
+//   v2.7.1:     Helper threw InvalidOperationException ("does not support
+//               conditions") on missing Conditions property → ProcessOverride
+//               catch-all rolled back and surfaced the helper-throw message.
+//               Tier D's unmatched_operators path was bypassed.
+//   v2.8.0:     Helper returns int? (null on missing Conditions); call site
+//               skips writing the mods key; Tier D's coverage check fires
+//               with uniform unmatched_operators: ["remove_conditions"]
+//               shape — same shape as every other unsupported (operator,
+//               record-type) combo. The v2.7.1 helper-throw was structurally
+//               inconsistent with Tier D; v2.8.0 unifies the two paths.
 {
     var outPath = Path.Combine(outDir, "test3-conditions-aligned-throw.esp");
     if (File.Exists(outPath)) File.Delete(outPath);
@@ -307,7 +311,7 @@ int failures = 0;
     };
 
     var (stdout, stderr, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
-    Console.WriteLine("── Test 3: remove_conditions on ARMO (expected: aligned-throw error) ──");
+    Console.WriteLine("── Test 3: remove_conditions on ARMO (expected: Tier D unmatched_operators=[remove_conditions]) ──");
     Console.WriteLine($"  exit code: {exit}");
     Console.WriteLine($"  response:");
     foreach (var line in stdout.Split('\n')) Console.WriteLine($"    {line.TrimEnd('\r')}");
@@ -322,15 +326,19 @@ int failures = 0;
     if (details.GetArrayLength() == 1)
     {
         var d0 = details[0];
-        if (!d0.TryGetProperty("error", out var err) || string.IsNullOrEmpty(err.GetString()))
+        if (!d0.TryGetProperty("unmatched_operators", out var unm) || unm.ValueKind != JsonValueKind.Array)
         {
-            Console.WriteLine("  FAIL: error field should be set");
+            Console.WriteLine("  FAIL: per-record detail should carry unmatched_operators array (Tier D shape)");
             ok = false;
         }
-        else if (!err.GetString()!.Contains("does not support conditions"))
+        else
         {
-            Console.WriteLine($"  FAIL: error should mention 'does not support conditions', got: {err.GetString()}");
-            ok = false;
+            var ops = unm.EnumerateArray().Select(e => e.GetString()).Where(s => s != null).ToList();
+            if (ops.Count != 1 || ops[0] != "remove_conditions")
+            {
+                Console.WriteLine($"  FAIL: unmatched_operators should equal [\"remove_conditions\"], got [{string.Join(", ", ops)}]");
+                ok = false;
+            }
         }
     }
     else { Console.WriteLine("  FAIL: details should have 1 entry"); ok = false; }
@@ -803,34 +811,43 @@ int KwRemoveTest(int testNum, string recordTypeLabel, FormKey targetFk, FormKey 
     return ok ? 0 : 1;
 }
 
-// ── Tests 7-12: add_keywords on RACE/FURN/ACTI/LCTN/SPEL/MGEF ──
-failures += KwAddTest(7,  "RACE", firstRaceWithKw.FormKey,        FreshKwFor(firstRaceWithKw.Keywords),
+// ── Tests 7-12: add_keywords on RACE/FURN/ACTI/LCTN/SPEL/MGEF (MATRIX 1.A.01/07/10/13/16/19) ──
+//
+// Phase 3 finding #1 noted that MATRIX.md's pre-correction 1.A.01 cell
+// labeled `Skyrim.esm:08F95E` as VendorItemFood, but that FormID resolves
+// to `AMBWindloopMountainsHills01LP` (audio category record). The harness
+// was always correct — these cells use FreshKwFor against the source's
+// Keywords list, which selects a real KYWD by predicate, not by literal.
+// Phase 4 alignment: tag each cell with its MATRIX cell ID in the type
+// label so the printed output and skipReasons traceback match the matrix
+// numbering Phase 2 introduced for tests 31+.
+failures += KwAddTest(7,  "RACE [1.A.01]", firstRaceWithKw.FormKey,        FreshKwFor(firstRaceWithKw.Keywords),
     om => om.Races.FirstOrDefault(r => r.FormKey == firstRaceWithKw.FormKey)?.Keywords);
-failures += KwAddTest(8,  "FURN", firstFurnitureWithKw.FormKey,   FreshKwFor(firstFurnitureWithKw.Keywords),
+failures += KwAddTest(8,  "FURN [1.A.07]", firstFurnitureWithKw.FormKey,   FreshKwFor(firstFurnitureWithKw.Keywords),
     om => om.Furniture.FirstOrDefault(f => f.FormKey == firstFurnitureWithKw.FormKey)?.Keywords);
-failures += KwAddTest(9,  "ACTI", firstActivatorWithKw.FormKey,   FreshKwFor(firstActivatorWithKw.Keywords),
+failures += KwAddTest(9,  "ACTI [1.A.10]", firstActivatorWithKw.FormKey,   FreshKwFor(firstActivatorWithKw.Keywords),
     om => om.Activators.FirstOrDefault(a => a.FormKey == firstActivatorWithKw.FormKey)?.Keywords);
-failures += KwAddTest(10, "LCTN", firstLocationWithKw.FormKey,    FreshKwFor(firstLocationWithKw.Keywords),
+failures += KwAddTest(10, "LCTN [1.A.13]", firstLocationWithKw.FormKey,    FreshKwFor(firstLocationWithKw.Keywords),
     om => om.Locations.FirstOrDefault(l => l.FormKey == firstLocationWithKw.FormKey)?.Keywords);
-failures += KwAddTest(11, "SPEL", firstSpellWithKw.FormKey,       FreshKwFor(firstSpellWithKw.Keywords),
+failures += KwAddTest(11, "SPEL [1.A.16]", firstSpellWithKw.FormKey,       FreshKwFor(firstSpellWithKw.Keywords),
     om => om.Spells.FirstOrDefault(s => s.FormKey == firstSpellWithKw.FormKey)?.Keywords);
-failures += KwAddTest(12, "MGEF", firstMagicEffectWithKw.FormKey, FreshKwFor(firstMagicEffectWithKw.Keywords),
+failures += KwAddTest(12, "MGEF [1.A.19]", firstMagicEffectWithKw.FormKey, FreshKwFor(firstMagicEffectWithKw.Keywords),
     om => om.MagicEffects.FirstOrDefault(m => m.FormKey == firstMagicEffectWithKw.FormKey)?.Keywords);
 
-// ── Tests 13-18: remove_keywords on RACE/FURN/ACTI/LCTN/SPEL/MGEF ──
-failures += KwRemoveTest(13, "RACE", firstRaceWithKw.FormKey,        firstRaceWithKw.Keywords![0].FormKey,
+// ── Tests 13-18: remove_keywords on RACE/FURN/ACTI/LCTN/SPEL/MGEF (MATRIX 1.A.02/08/11/14/17/20) ──
+failures += KwRemoveTest(13, "RACE [1.A.02]", firstRaceWithKw.FormKey,        firstRaceWithKw.Keywords![0].FormKey,
     om => om.Races.FirstOrDefault(r => r.FormKey == firstRaceWithKw.FormKey)?.Keywords);
-failures += KwRemoveTest(14, "FURN", firstFurnitureWithKw.FormKey,   firstFurnitureWithKw.Keywords![0].FormKey,
+failures += KwRemoveTest(14, "FURN [1.A.08]", firstFurnitureWithKw.FormKey,   firstFurnitureWithKw.Keywords![0].FormKey,
     om => om.Furniture.FirstOrDefault(f => f.FormKey == firstFurnitureWithKw.FormKey)?.Keywords);
-failures += KwRemoveTest(15, "ACTI", firstActivatorWithKw.FormKey,   firstActivatorWithKw.Keywords![0].FormKey,
+failures += KwRemoveTest(15, "ACTI [1.A.11]", firstActivatorWithKw.FormKey,   firstActivatorWithKw.Keywords![0].FormKey,
     om => om.Activators.FirstOrDefault(a => a.FormKey == firstActivatorWithKw.FormKey)?.Keywords);
-failures += KwRemoveTest(16, "LCTN", firstLocationWithKw.FormKey,    firstLocationWithKw.Keywords![0].FormKey,
+failures += KwRemoveTest(16, "LCTN [1.A.14]", firstLocationWithKw.FormKey,    firstLocationWithKw.Keywords![0].FormKey,
     om => om.Locations.FirstOrDefault(l => l.FormKey == firstLocationWithKw.FormKey)?.Keywords);
-failures += KwRemoveTest(17, "SPEL", firstSpellWithKw.FormKey,
+failures += KwRemoveTest(17, "SPEL [1.A.17]", firstSpellWithKw.FormKey,
     spellHasExistingKw ? firstSpellWithKw.Keywords![0].FormKey : source.Keywords.First().FormKey,
     om => om.Spells.FirstOrDefault(s => s.FormKey == firstSpellWithKw.FormKey)?.Keywords,
     expectedRemoved: spellHasExistingKw ? 1 : 0);
-failures += KwRemoveTest(18, "MGEF", firstMagicEffectWithKw.FormKey, firstMagicEffectWithKw.Keywords![0].FormKey,
+failures += KwRemoveTest(18, "MGEF [1.A.20]", firstMagicEffectWithKw.FormKey, firstMagicEffectWithKw.Keywords![0].FormKey,
     om => om.MagicEffects.FirstOrDefault(m => m.FormKey == firstMagicEffectWithKw.FormKey)?.Keywords);
 
 // ── Test 19: add_spells on RACE ──
@@ -2606,13 +2623,29 @@ int AttachScriptTest(int testNum, string cellId, string typeLabel, FormKey targe
         // class doesn't expose a VirtualMachineAdapter property. In Mutagen
         // 0.53.1, Outfit and Spell fall into this bucket. Convert to SKIP
         // (Mutagen schema fact, not a bridge bug; MATRIX overstates wire-up).
+        //
+        // Phase 4 strengthened the SKIP rationale with 3 independent evidence
+        // streams (race-probe Batch 7 + Phase 4 extension):
+        //   (1) typeof reflection null on concrete class + every interface +
+        //       full base-class chain (no property named "VirtualMachineAdapter"
+        //       declared anywhere reachable by reflection),
+        //   (2) full public-instance property dump finds zero VMAD-shaped
+        //       properties under any name (Outfit: 11 props, Spell: 26 props,
+        //       case-sensitive PascalCase match against Vmad/VMad/VMAD/Adapter
+        //       plus type-assignability check to VirtualMachineAdapter),
+        //   (3) byte-scan of vanilla Skyrim.esm's SPEL + OTFT GRUP byte ranges
+        //       finds zero VMAD subrecord signatures (Bethesda's own data has
+        //       no precedent for VMAD on these record types).
+        // Future re-investigation isn't worth doing without a Mutagen schema
+        // upgrade or new Bethesda data introducing VMAD on SPEL/OTFT.
         var detailsArr = root.GetProperty("details");
         var errMsg = detailsArr.GetArrayLength() > 0 && detailsArr[0].TryGetProperty("error", out var e)
             ? e.GetString() ?? "" : "";
         if (errMsg.Contains("does not support scripts"))
         {
-            Console.WriteLine($"  [{cellId}] SKIP: bridge reports \"{errMsg}\" — Mutagen 0.53.1 {typeLabel} type doesn't expose VirtualMachineAdapter");
-            skipReasons.Add($"{cellId} — Mutagen 0.53.1 {typeLabel} doesn't expose VMAD: bridge says \"{errMsg}\"");
+            const string CaseAReason = "Case (A) confirmed Phase 4 via 3 evidence streams (typeof reflection null on concrete + interfaces + base chain; full property dump finds zero VMAD-shaped properties; vanilla Skyrim.esm SPEL/OTFT GRUP byte-scan shows zero VMAD subrecords)";
+            Console.WriteLine($"  [{cellId}] SKIP: {CaseAReason}. Bridge reports \"{errMsg}\".");
+            skipReasons.Add($"{cellId} — {typeLabel}: {CaseAReason}; bridge says \"{errMsg}\"");
             Console.WriteLine();
             return 0;
         }
@@ -4899,15 +4932,14 @@ Skip("4.esl.01", "Layer 4 ESL master interaction requires live modlist; deferred
 // ── 4.carry — carry-over candidate probes ──
 //
 // 4.c.01 carry — Quest condition disambiguation: QUST + add_conditions → expect rejection.
-// MATRIX expected Tier D `unmatched_operators=["add_conditions"]`, but the bridge
-// actually errors via ApplyAddConditions's "does not support conditions" helper-throw
-// path (same shape as existing test 3 — remove_conditions on ARMO). The CONTRACT is
-// satisfied (request rejected, ESP rolled back, clean error message); only the error
-// SHAPE differs from MATRIX. Asserting on "rejected with clean error" rather than
-// strictly on the Tier D field name. MATRIX correction noted in handoff.
+// Phase 4 item 6 unified the helper-throw path with Tier D: ApplyAddConditions
+// returns int? (null on missing Conditions property), the call site skips the
+// mods key, and Tier D's coverage check fires uniformly. Phase 2's harness
+// accepted EITHER shape (Tier D OR helper-throw); Phase 4 tightens to
+// Tier D only.
 if (firstQuest != null)
 {
-    Console.WriteLine($"── Test 157 [4.c.01-carry]: QUST + add_conditions (carry-over confirmation) ──");
+    Console.WriteLine($"── Test 157 [4.c.01-carry]: QUST + add_conditions (Tier D unification) ──");
     var record = new Dictionary<string, object>
     {
         ["op"] = "override",
@@ -4925,17 +4957,20 @@ if (firstQuest != null)
     else
     {
         var d0 = details[0];
-        if (!d0.TryGetProperty("error", out var errEl)) { Console.WriteLine("  FAIL: error field missing"); ok = false; }
+        if (!d0.TryGetProperty("unmatched_operators", out var unm) || unm.ValueKind != JsonValueKind.Array)
+        {
+            Console.WriteLine("  FAIL: per-record detail should carry unmatched_operators array (Tier D shape)");
+            ok = false;
+        }
         else
         {
-            var err = errEl.GetString() ?? "";
-            // Accept either Tier D ("unmatched_operators") or helper-throw
-            // ("does not support conditions") shape — both indicate clean rejection.
-            bool tierDShape = d0.TryGetProperty("unmatched_operators", out _);
-            bool helperShape = err.Contains("does not support conditions", StringComparison.OrdinalIgnoreCase);
-            if (!tierDShape && !helperShape)
-            { Console.WriteLine($"  FAIL: error shape unrecognized (neither Tier D nor helper-throw): {err}"); ok = false; }
-            else Console.WriteLine($"  rejection confirmed via {(tierDShape ? "Tier D" : "helper-throw")}: \"{err}\"");
+            var ops = unm.EnumerateArray().Select(e => e.GetString()).Where(s => s != null).ToList();
+            if (ops.Count != 1 || ops[0] != "add_conditions")
+            {
+                Console.WriteLine($"  FAIL: unmatched_operators should equal [\"add_conditions\"], got [{string.Join(", ", ops)}]");
+                ok = false;
+            }
+            else Console.WriteLine($"  rejection confirmed: unmatched_operators=[\"add_conditions\"] (Tier D unified shape)");
         }
     }
     Console.WriteLine(ok ? "  PASS" : "  FAIL");
@@ -4948,7 +4983,213 @@ else Skip("4.c.01-carry", "no QUST");
 // 4.c.03 carry — AMMO enchantment Tier D. Equivalent to 1.D.12 (test 121). Documented, not retested.
 // 4.c.04 carry — Replace-semantics. Covered by 4.r.01-03 above.
 // 4.c.05 carry — Chained dict access. Covered by 4.c.*chain above.
-// 4.c.06/07 carry — PerkAdapter/QuestAdapter functional probes. In race-probe (Batch 7).
+// 4.c.06/07 carry — PerkAdapter/QuestAdapter functional probes. Phase 4 lifted
+//                   into coverage-smoke as positive regression cells 158/159
+//                   (item 4 fix at PatchEngine.cs ApplyAttachScripts).
+
+// ── v2.8 Phase 4 regression tests (items 4, 5, 6) ──
+//
+// Test 158 (4.c.06-rgr) — PERK + attach_scripts positive case.
+//   Item 4 fix at PatchEngine.cs:1739: subclass-aware adapter construction
+//   via Activator.CreateInstance(vmadProp.PropertyType) typed against the
+//   common abstract base AVirtualMachineAdapter. Pre-Phase-4 reproducibly
+//   failed with "Object of type 'VirtualMachineAdapter' cannot be converted
+//   to type 'PerkAdapter'". Asserts the readback's VirtualMachineAdapter
+//   runtime type is exactly "PerkAdapter".
+{
+    Console.WriteLine($"── Test 158 [4.c.06-rgr]: PERK + attach_scripts (item 4 regression — PerkAdapter constructed correctly) ──");
+    var perkNoVmad = source.Perks.FirstOrDefault(p => p.VirtualMachineAdapter == null);
+    if (perkNoVmad == null) { Skip("4.c.06-rgr", "no PERK w/o VMAD in vanilla Skyrim.esm"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test158-rgr-attach-perk.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(perkNoVmad.FormKey),
+                    source_path = SkyrimEsm,
+                    attach_scripts = new[] { new { name = "TestScript", properties = Array.Empty<object>() } },
+                }
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        Console.WriteLine($"  source: {FormatFormKey(perkNoVmad.FormKey)} ({perkNoVmad.EditorID})");
+        Console.WriteLine($"  exit: {exit}");
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        bool ok = root.GetProperty("success").GetBoolean();
+        if (!ok) { Console.WriteLine($"  FAIL: bridge reported success=false: {stdout}"); }
+        else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+        else
+        {
+            var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+            var rec = outMod.Perks.FirstOrDefault(p => p.FormKey == perkNoVmad.FormKey);
+            if (rec == null) { Console.WriteLine("  FAIL: PERK record missing on readback"); ok = false; }
+            else if (rec.VirtualMachineAdapter == null) { Console.WriteLine("  FAIL: VirtualMachineAdapter null on readback"); ok = false; }
+            else
+            {
+                var rtType = rec.VirtualMachineAdapter.GetType().Name;
+                if (rtType != "PerkAdapter")
+                {
+                    Console.WriteLine($"  FAIL: VirtualMachineAdapter runtime type was \"{rtType}\", expected \"PerkAdapter\"");
+                    ok = false;
+                }
+                else Console.WriteLine($"  readback: VirtualMachineAdapter runtime type = PerkAdapter ✓ (item 4 fix verified)");
+            }
+        }
+        Console.WriteLine(ok ? "  PASS" : "  FAIL");
+        if (!ok) failures++;
+        Console.WriteLine();
+    }
+}
+
+// Test 159 (4.c.07-rgr) — QUST + attach_scripts positive case (mirror of 158).
+{
+    Console.WriteLine($"── Test 159 [4.c.07-rgr]: QUST + attach_scripts (item 4 regression — QuestAdapter constructed correctly) ──");
+    var questNoVmad = source.Quests.FirstOrDefault(q => q.VirtualMachineAdapter == null);
+    if (questNoVmad == null) { Skip("4.c.07-rgr", "no QUST w/o VMAD in vanilla Skyrim.esm"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test159-rgr-attach-qust.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(questNoVmad.FormKey),
+                    source_path = SkyrimEsm,
+                    attach_scripts = new[] { new { name = "TestScript", properties = Array.Empty<object>() } },
+                }
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        Console.WriteLine($"  source: {FormatFormKey(questNoVmad.FormKey)} ({questNoVmad.EditorID})");
+        Console.WriteLine($"  exit: {exit}");
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        bool ok = root.GetProperty("success").GetBoolean();
+        if (!ok) { Console.WriteLine($"  FAIL: bridge reported success=false: {stdout}"); }
+        else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+        else
+        {
+            var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+            var rec = outMod.Quests.FirstOrDefault(q => q.FormKey == questNoVmad.FormKey);
+            if (rec == null) { Console.WriteLine("  FAIL: QUST record missing on readback"); ok = false; }
+            else if (rec.VirtualMachineAdapter == null) { Console.WriteLine("  FAIL: VirtualMachineAdapter null on readback"); ok = false; }
+            else
+            {
+                var rtType = rec.VirtualMachineAdapter.GetType().Name;
+                if (rtType != "QuestAdapter")
+                {
+                    Console.WriteLine($"  FAIL: VirtualMachineAdapter runtime type was \"{rtType}\", expected \"QuestAdapter\"");
+                    ok = false;
+                }
+                else Console.WriteLine($"  readback: VirtualMachineAdapter runtime type = QuestAdapter ✓ (item 4 fix verified)");
+            }
+        }
+        Console.WriteLine(ok ? "  PASS" : "  FAIL");
+        if (!ok) failures++;
+        Console.WriteLine();
+    }
+}
+
+// Test 160 (4.regr.av) — MGEF + add_conditions with actor_value parameter (item 5 regression).
+//   Pre-Phase-4: function="GetActorValue" without actor_value defaulted to
+//   ActorValue index 0 (Aggression). Phase 4 added the actor_value field;
+//   this test exercises it with "Health" and verifies the readback's
+//   GetActorValueConditionData.ActorValue == ActorValue.Health.
+{
+    Console.WriteLine($"── Test 160 [4.regr.av]: MGEF + add_conditions w/ actor_value (item 5 regression — ActorValue routes correctly) ──");
+    var mgefForCond = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefForCond == null) { Skip("4.regr.av", "no MGEF with Conditions container in vanilla Skyrim.esm"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test160-rgr-add-cond-actor-value.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefForCond.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new[]
+                    {
+                        new { function = "GetActorValue", actor_value = "Health", @operator = ">=", value = 50f }
+                    },
+                }
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        Console.WriteLine($"  source: {FormatFormKey(mgefForCond.FormKey)} ({mgefForCond.EditorID})");
+        Console.WriteLine($"  exit: {exit}");
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        bool ok = root.GetProperty("success").GetBoolean();
+        if (!ok) { Console.WriteLine($"  FAIL: bridge reported success=false: {stdout}"); }
+        else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+        else
+        {
+            var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+            var rec = outMod.MagicEffects.FirstOrDefault(m => m.FormKey == mgefForCond.FormKey);
+            if (rec?.Conditions == null || rec.Conditions.Count == 0)
+            { Console.WriteLine("  FAIL: MGEF Conditions missing or empty"); ok = false; }
+            else
+            {
+                // The bridge appends to the existing Conditions list. Source
+                // MGEFs may carry pre-existing conditions, so the new
+                // GetActorValue entry isn't necessarily at index 0; find by
+                // ConditionData type.
+                var addedCond = rec.Conditions.FirstOrDefault(c =>
+                    c.Data?.GetType().Name == "GetActorValueConditionData");
+                if (addedCond == null)
+                { Console.WriteLine($"  FAIL: no Conditions entry of type GetActorValueConditionData in readback ({rec.Conditions.Count} conditions present)"); ok = false; }
+                else
+                {
+                    // Reflect addedCond.Data.ActorValue and verify it parsed to Health.
+                    var avProp = addedCond.Data!.GetType().GetProperty("ActorValue", BindingFlags.Public | BindingFlags.Instance);
+                    if (avProp == null) { Console.WriteLine("  FAIL: GetActorValueConditionData has no ActorValue property"); ok = false; }
+                    else
+                    {
+                        var av = avProp.GetValue(addedCond.Data);
+                        var avName = av?.ToString() ?? "<null>";
+                        if (avName != "Health")
+                        { Console.WriteLine($"  FAIL: GetActorValueConditionData.ActorValue was \"{avName}\", expected \"Health\""); ok = false; }
+                        else Console.WriteLine($"  readback: appended condition is GetActorValueConditionData with ActorValue=Health ✓ (item 5 wire-up verified)");
+                    }
+                }
+            }
+        }
+        Console.WriteLine(ok ? "  PASS" : "  FAIL");
+        if (!ok) failures++;
+        Console.WriteLine();
+    }
+}
 
 if (skipReasons.Count > 0)
 {

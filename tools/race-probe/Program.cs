@@ -897,6 +897,422 @@ void ProbeVmadDisambiguator(string label, Type concreteType)
 ProbeVmadDisambiguator("typeof(Outfit)", typeof(Outfit));
 ProbeVmadDisambiguator("typeof(Spell)", typeof(Spell));
 
+// ═══════════════════════════════════════════════════════════════════════════
+// v2.8 Phase 4 — VMAD deeper disambiguation
+//
+// Phase 2's disambiguator above checked one specific property name
+// ("VirtualMachineAdapter") on concrete class + interfaces + base chain — all
+// null. That rules out the simplest case but does NOT rule out:
+//   (a) a different property name (e.g. "VMad", "ScriptAdapter", "Scripts"),
+//   (b) interface-based or extension-method exposure under a different name,
+//   (c) Mutagen preserving VMAD opaquely in the binary serialization layer
+//       even when no typed property surfaces it.
+//
+// Phase 4 probes both: (1) full property name dump on Outfit + Spell looking
+// for any VMAD-shaped property under any name, and (2) Mutagen-direct
+// round-trip preservation test — read Skyrim.esm via SkyrimMod.CreateFromBinary
+// (FULL, not overlay), write back via WriteToBinary, scan SPEL/OTFT group
+// bytes for the "VMAD" subrecord signature pre/post and compare counts. If
+// the input has VMAD-in-SPEL bytes and the output has zero, Mutagen drops
+// VMAD on round-trip → Case (A) confirmed. If counts match, Mutagen
+// preserves VMAD via some non-property mechanism → Case (C) suspected.
+// ═══════════════════════════════════════════════════════════════════════════
+
+Section("v2.8 P4 — VMAD deeper disambiguation: full property dump (Outfit / Spell)");
+
+void DumpAllPropertiesLookingForVmad(string label, Type t)
+{
+    var props = t.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                 .OrderBy(p => p.Name)
+                 .ToList();
+    Console.WriteLine($"  {label} — {props.Count} public instance properties:");
+    var hits = new List<string>();
+    foreach (var p in props)
+    {
+        // Case-sensitive PascalCase whole-word matches. "Description" once
+        // false-flagged because "description".Contains("script") is true;
+        // restrict to markers unique to the VMAD hierarchy. Type-level check
+        // catches anything assignable to VirtualMachineAdapter under any name.
+        bool nameShaped = p.Name.Contains("Vmad") || p.Name.Contains("VMad") || p.Name.Contains("VMAD")
+                       || p.Name.Contains("Adapter")
+                       || p.Name == "VM" || p.Name == "Scripts";
+        bool typeShaped = typeof(VirtualMachineAdapter).IsAssignableFrom(p.PropertyType);
+        bool isShaped = nameShaped || typeShaped;
+        var marker = isShaped ? "  <<< VMAD-SHAPED >>>" : "";
+        Console.WriteLine($"    {p.Name,-40} : {FriendlyType(p.PropertyType)}{marker}");
+        if (isShaped) hits.Add($"{p.Name} ({FriendlyType(p.PropertyType)})");
+    }
+    Console.WriteLine($"  {label} VMAD-shaped property hits: {hits.Count}");
+    foreach (var h in hits) Console.WriteLine($"    - {h}");
+}
+
+DumpAllPropertiesLookingForVmad("typeof(Outfit)", typeof(Outfit));
+DumpAllPropertiesLookingForVmad("typeof(Spell)", typeof(Spell));
+
+Section("v2.8 P4 — VMAD round-trip preservation test (Mutagen-direct, no bridge)");
+
+// Count occurrences of byte sequence `needle` in `hay[start..end)`.
+int CountByteSeq(byte[] hay, int start, int end, byte[] needle)
+{
+    int n = 0;
+    int last = Math.Min(end, hay.Length) - needle.Length;
+    for (int i = start; i <= last; i++)
+    {
+        bool match = true;
+        for (int j = 0; j < needle.Length; j++)
+            if (hay[i + j] != needle[j]) { match = false; break; }
+        if (match) n++;
+    }
+    return n;
+}
+
+// Walk top-level GRUPs of an ESM, find the GRUP whose label matches
+// `groupLabel` (e.g. "SPEL"), and count "VMAD" byte-signature occurrences
+// inside its 24-byte-header-skipped body. Heuristic — false positives
+// possible if VMAD bytes appear inside subrecord data, but rare in
+// vanilla ESM data and we compare input vs output (any FPs appear in both).
+(int count, long bodyBytes, bool foundGroup) CountVmadSigInGroup(string path, string groupLabel)
+{
+    var bytes = File.ReadAllBytes(path);
+    if (bytes.Length < 24) return (0, 0, false);
+    if (System.Text.Encoding.ASCII.GetString(bytes, 0, 4) != "TES4") return (0, 0, false);
+    int tes4BodySize = BitConverter.ToInt32(bytes, 4);
+    int pos = 24 + tes4BodySize; // 24-byte record header + body
+    var needle = new byte[] { 0x56, 0x4D, 0x41, 0x44 }; // "VMAD"
+    while (pos + 24 <= bytes.Length)
+    {
+        var sig = System.Text.Encoding.ASCII.GetString(bytes, pos, 4);
+        if (sig != "GRUP") break;
+        int grupSize = BitConverter.ToInt32(bytes, pos + 4);
+        if (grupSize < 24 || pos + grupSize > bytes.Length) break;
+        var label = System.Text.Encoding.ASCII.GetString(bytes, pos + 8, 4);
+        int grupEnd = pos + grupSize;
+        if (label == groupLabel)
+        {
+            int regionStart = pos + 24;
+            int regionEnd = grupEnd;
+            int count = CountByteSeq(bytes, regionStart, regionEnd, needle);
+            return (count, regionEnd - regionStart, true);
+        }
+        pos = grupEnd;
+    }
+    return (0, 0, false);
+}
+
+if (!File.Exists(SkyrimEsmForBatch7))
+{
+    Console.WriteLine($"  SKIP: Skyrim.esm not found at {SkyrimEsmForBatch7}");
+}
+else
+{
+    var roundTripDir = Path.Combine(Path.GetTempPath(), "race-probe-vmad-roundtrip");
+    Directory.CreateDirectory(roundTripDir);
+    // Mutagen's WriteToBinary requires the output filename to match the mod's
+    // ModKey ("Skyrim.esm"); writing to a different basename triggers
+    // "ModKeys were misaligned". Use the original name in a separate temp dir.
+    var roundTripOutput = Path.Combine(roundTripDir, "Skyrim.esm");
+    if (File.Exists(roundTripOutput)) File.Delete(roundTripOutput);
+
+    // Discover BinaryWriteParameters surface so we can disable Mutagen's
+    // lower-FormKey-range guard (which fires on round-tripping Skyrim.esm
+    // because vanilla 00005B:Skyrim.esm sits below the non-master 0x800 floor).
+    Type? bwpType = null;
+    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+    {
+        foreach (var t in asm.GetTypes())
+        {
+            if (t.Name == "BinaryWriteParameters") { bwpType = t; break; }
+        }
+        if (bwpType != null) break;
+    }
+    if (bwpType != null)
+    {
+        Console.WriteLine($"  found {bwpType.FullName}; exposed properties:");
+        foreach (var p in bwpType.GetProperties(BindingFlags.Public | BindingFlags.Instance).OrderBy(p => p.Name))
+            Console.WriteLine($"    {p.Name,-32} : {FriendlyType(p.PropertyType)}");
+    }
+
+    // Discover concrete subclasses of ALowerRangeDisallowedHandlerOption so we
+    // can pick the "skip" / "ignore" / "no-check" variant for the round-trip.
+    Type? lrdhBase = null;
+    var lrdhConcretes = new List<Type>();
+    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+    {
+        foreach (var t in asm.GetTypes())
+        {
+            if (t.Name == "ALowerRangeDisallowedHandlerOption") { lrdhBase = t; break; }
+        }
+        if (lrdhBase != null) break;
+    }
+    if (lrdhBase != null)
+    {
+        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            foreach (var t in asm.GetTypes())
+            {
+                if (lrdhBase.IsAssignableFrom(t) && !t.IsAbstract && t != lrdhBase)
+                    lrdhConcretes.Add(t);
+            }
+        }
+        Console.WriteLine($"  ALowerRangeDisallowedHandlerOption concrete subclasses: {lrdhConcretes.Count}");
+        foreach (var c in lrdhConcretes) Console.WriteLine($"    - {c.FullName}");
+    }
+
+    Console.WriteLine($"  Reading Skyrim.esm via SkyrimMod.CreateFromBinary (FULL read, not overlay)...");
+    Console.WriteLine($"    source: {SkyrimEsmForBatch7}");
+    Console.WriteLine($"    output: {roundTripOutput}");
+    bool roundTripOk = false;
+    try
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var srcFull = SkyrimMod.CreateFromBinary(SkyrimEsmForBatch7, SkyrimRelease.SkyrimSE);
+        sw.Stop();
+        Console.WriteLine($"    read OK in {sw.ElapsedMilliseconds:N0} ms — Spells.Count={srcFull.Spells.Count}, Outfits.Count={srcFull.Outfits.Count}");
+        sw.Restart();
+
+        // Build a BinaryWriteParameters that disables every can't-write-this
+        // guard (master-flag sync, lower-range, etc.) so the round-trip
+        // succeeds against vanilla Skyrim.esm. Set every public enum property
+        // whose enum has a "NoCheck" / "Disabled" / "Skip" / "Ignore" value.
+        object? param = null;
+        if (bwpType != null)
+        {
+            param = System.Activator.CreateInstance(bwpType);
+            foreach (var p in bwpType.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (p.PropertyType.IsEnum)
+                {
+                    foreach (var v in Enum.GetNames(p.PropertyType))
+                    {
+                        var lv = v.ToLowerInvariant();
+                        if (lv == "nocheck" || lv == "disabled" || lv == "skip" || lv == "ignore" || lv == "off")
+                        {
+                            try
+                            {
+                                var enumVal = Enum.Parse(p.PropertyType, v);
+                                p.SetValue(param, enumVal);
+                                Console.WriteLine($"    BinaryWriteParameters.{p.Name} = {p.PropertyType.Name}.{v}");
+                                break;
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                else if (lrdhBase != null && p.PropertyType == lrdhBase)
+                {
+                    // Pick a concrete subclass with "AddPlaceholderToMasters",
+                    // "SetToZero", "Skip", or "Ignore" semantics — anything
+                    // that disables the throw on lower-FormKey range.
+                    // Prefer "AddPlaceholderMaster" — it's the only concrete
+                    // whose name suggests actually allowing low-range FormIDs
+                    // through (by injecting a placeholder master entry).
+                    // "NoCheck" turned out to still throw on Skyrim.esm round-trip.
+                    Type? pick = lrdhConcretes.FirstOrDefault(c => c.Name.Contains("Placeholder"))
+                              ?? lrdhConcretes.FirstOrDefault(c => c.Name.Contains("NoCheck"))
+                              ?? lrdhConcretes.FirstOrDefault();
+                    if (pick != null)
+                    {
+                        try
+                        {
+                            var inst = System.Activator.CreateInstance(pick);
+                            p.SetValue(param, inst);
+                            Console.WriteLine($"    BinaryWriteParameters.{p.Name} = {pick.Name}");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"    BinaryWriteParameters.{p.Name} construction FAILED: {ex.GetType().Name}: {ex.Message}");
+                        }
+                    }
+                }
+            }
+        }
+
+        // Find an overload of WriteToBinary that takes (string, BinaryWriteParameters)
+        // — typically an extension method on IModExt or similar.
+        bool wroteWithParams = false;
+        if (param != null)
+        {
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                foreach (var t in asm.GetTypes())
+                {
+                    if (!t.IsAbstract || !t.IsSealed) continue; // static
+                    foreach (var m in t.GetMethods(BindingFlags.Public | BindingFlags.Static))
+                    {
+                        if (m.Name != "WriteToBinary") continue;
+                        var ps = m.GetParameters();
+                        if (ps.Length != 3) continue;
+                        // (this IMod, string path, BinaryWriteParameters)
+                        if (ps[0].ParameterType.IsAssignableFrom(srcFull.GetType())
+                            && ps[1].ParameterType == typeof(string)
+                            && ps[2].ParameterType == bwpType)
+                        {
+                            m.Invoke(null, new[] { srcFull, (object)roundTripOutput, param });
+                            wroteWithParams = true;
+                            break;
+                        }
+                    }
+                    if (wroteWithParams) break;
+                }
+                if (wroteWithParams) break;
+            }
+        }
+        if (!wroteWithParams)
+        {
+            // Fall back to the default WriteToBinary; will likely fail again.
+            srcFull.WriteToBinary(roundTripOutput);
+        }
+        sw.Stop();
+        var outSize = new FileInfo(roundTripOutput).Length;
+        Console.WriteLine($"    write OK in {sw.ElapsedMilliseconds:N0} ms — output size = {outSize:N0} bytes");
+        roundTripOk = true;
+    }
+    catch (Exception ex)
+    {
+        var inner = ex.InnerException ?? ex;
+        Console.WriteLine($"    *** FAIL during read/write: {inner.GetType().Name}: {inner.Message}");
+    }
+
+    // Always emit the input-side byte scan — independent of round-trip
+    // success, this tells us whether vanilla Skyrim.esm even contains VMAD
+    // subrecords in the SPEL/OTFT groups (a separate diagnostic from the
+    // API-surface verdict above).
+    foreach (var (label, friendlyName) in new[] { ("SPEL", "Spell"), ("OTFT", "Outfit") })
+    {
+        var (srcCount, srcBytes, srcFound) = CountVmadSigInGroup(SkyrimEsmForBatch7, label);
+        Console.WriteLine($"  {label} group VMAD signature scan (vanilla Skyrim.esm):");
+        Console.WriteLine($"    source ({(srcFound ? srcBytes.ToString("N0") + " bytes" : "GROUP NOT FOUND")}): {srcCount} VMAD occurrence(s)");
+        if (roundTripOk)
+        {
+            var (outCount, outBytes, outFound) = CountVmadSigInGroup(roundTripOutput, label);
+            Console.WriteLine($"    output ({(outFound ? outBytes.ToString("N0") + " bytes" : "GROUP NOT FOUND")}): {outCount} VMAD occurrence(s)");
+            string verdictRT;
+            if (srcCount == 0 && outCount == 0)
+                verdictRT = $"INCONCLUSIVE — vanilla Skyrim.esm has no VMAD signature in {label} group; round-trip can't disambiguate";
+            else if (srcCount > 0 && outCount == 0)
+                verdictRT = $"Case (A) CONFIRMED for {friendlyName} — Mutagen drops VMAD on round-trip ({srcCount} → 0)";
+            else if (srcCount > 0 && outCount == srcCount)
+                verdictRT = $"Case (C) SUSPECTED for {friendlyName} — Mutagen preserves VMAD count on round-trip ({srcCount} → {outCount}) via non-property mechanism";
+            else
+                verdictRT = $"PARTIAL for {friendlyName} — VMAD count changed ({srcCount} → {outCount}); investigate (compression, opaque preservation of subset, etc.)";
+            Console.WriteLine($"  >>> {label} round-trip verdict: {verdictRT}");
+        }
+        else
+        {
+            Console.WriteLine($"    output: SKIPPED (round-trip write failed; see error above — Mutagen rejects whole-Skyrim.esm round-trip due to master/lower-range invariants)");
+            if (srcCount == 0)
+                Console.WriteLine($"  >>> {label} input-scan verdict: vanilla Skyrim.esm contains 0 VMAD in {label} group — consumers cannot encounter the preservation question on vanilla data for this record type.");
+            else
+                Console.WriteLine($"  >>> {label} input-scan verdict: vanilla Skyrim.esm contains {srcCount} VMAD occurrence(s) in {label} group — preservation under round-trip is unanswered (write failed). API-surface evidence (above: 0 VMAD-shaped properties on typeof({friendlyName})) rules out reflection access regardless.");
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v2.8 Phase 4 item 2 — Cross-check VMAD reflection probe on every type
+// currently in tools_patching.py:104's attach_scripts supported list.
+//
+// Phase 2 found Outfit + Spell were schema overstatements (Case A, item 1
+// confirmed). This cross-check ensures no other type in the supported list is
+// a similar overstatement — for each of {NPC, Quest, Armor, Weapon, Container,
+// Door, Activator, Furniture, Light, MagicEffect, Perk}, confirm that
+// reflection finds a VirtualMachineAdapter property reachable via the
+// concrete class, an interface, or the base-class chain. Anything that comes
+// back null is a docs-edit candidate to fold into item 3 inline (or, if many
+// surface, halt-and-report for scope decision).
+// ═══════════════════════════════════════════════════════════════════════════
+
+Section("v2.8 P4 — Cross-check VMAD reflection probe on every attach_scripts supported type");
+
+var attachScriptsCrossCheckTypes = new (string label, Type t)[]
+{
+    ("Npc",         typeof(Npc)),
+    ("Quest",       typeof(Quest)),
+    ("Armor",       typeof(Armor)),
+    ("Weapon",      typeof(Weapon)),
+    ("Container",   typeof(Container)),
+    ("Door",        typeof(Door)),
+    ("Activator",   typeof(SkActivator)),
+    ("Furniture",   typeof(Furniture)),
+    ("Light",       typeof(Light)),
+    ("MagicEffect", typeof(MagicEffect)),
+    ("Perk",        typeof(Perk)),
+};
+
+var crossCheckResults = new List<(string label, bool hasVmad, string evidence)>();
+foreach (var (label, t) in attachScriptsCrossCheckTypes)
+{
+    var p = t.GetProperty("VirtualMachineAdapter",
+        BindingFlags.Public | BindingFlags.Instance);
+    if (p != null)
+    {
+        var declared = FriendlyType(p.PropertyType);
+        crossCheckResults.Add((label, true, $"declared type = {declared}"));
+        Console.WriteLine($"  typeof({label,-12}) → VirtualMachineAdapter PRESENT, declared type = {declared}");
+        continue;
+    }
+
+    // Fall back to interface/base-chain walk (Phase 2 disambiguator pattern).
+    var hits = new List<string>();
+    foreach (var i in t.GetInterfaces())
+    {
+        var ip = i.GetProperty("VirtualMachineAdapter",
+            BindingFlags.Public | BindingFlags.Instance);
+        if (ip != null) hits.Add($"interface {FriendlyType(i)}");
+    }
+    var bt = t.BaseType;
+    while (bt != null && bt != typeof(object))
+    {
+        var bp = bt.GetProperty("VirtualMachineAdapter",
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+        if (bp != null) hits.Add($"base {FriendlyType(bt)}");
+        bt = bt.BaseType;
+    }
+    if (hits.Count > 0)
+    {
+        crossCheckResults.Add((label, true, $"via {string.Join(", ", hits)}"));
+        Console.WriteLine($"  typeof({label,-12}) → VirtualMachineAdapter via {string.Join(", ", hits)}");
+    }
+    else
+    {
+        crossCheckResults.Add((label, false, "<not reachable by reflection>"));
+        Console.WriteLine($"  typeof({label,-12}) → *** OVERSTATEMENT *** no VirtualMachineAdapter reachable by reflection");
+    }
+}
+
+// Probe inheritance hierarchy of VirtualMachineAdapter / PerkAdapter / QuestAdapter
+// to find a common base/interface for the bridge cast. Item 4 fix attempt 1
+// assumed PerkAdapter : VirtualMachineAdapter; the runtime says otherwise.
+foreach (var label in new[] { "VirtualMachineAdapter", "PerkAdapter", "QuestAdapter" })
+{
+    var t = typeof(ISkyrimMod).Assembly.GetType($"Mutagen.Bethesda.Skyrim.{label}");
+    if (t == null) { Console.WriteLine($"  NOT FOUND: {label}"); continue; }
+    Console.WriteLine($"  {label} — base chain:");
+    var bt = t;
+    while (bt != null)
+    {
+        Console.WriteLine($"    {FriendlyType(bt)}");
+        bt = bt.BaseType;
+    }
+    Console.WriteLine($"  {label} — implemented interfaces:");
+    foreach (var i in t.GetInterfaces().OrderBy(i => i.FullName))
+        Console.WriteLine($"    {FriendlyType(i)}");
+}
+
+int overstatementCount = crossCheckResults.Count(r => !r.hasVmad);
+Console.WriteLine($"  Cross-check summary: {crossCheckResults.Count} types probed, {overstatementCount} overstatement(s)");
+if (overstatementCount == 0)
+{
+    Console.WriteLine($"  >>> Cross-check verdict: schema list is accurate post-Outfit/Spell removal. No further docs corrections needed.");
+}
+else
+{
+    Console.WriteLine($"  Overstatements (need removal from tools_patching.py:104):");
+    foreach (var r in crossCheckResults.Where(r => !r.hasVmad))
+        Console.WriteLine($"    - {r.label}");
+    Console.WriteLine($"  >>> Cross-check verdict: {overstatementCount} additional schema overstatement(s) found.");
+}
+
 Section("v2.8 P2 Batch 7 — PerkAdapter / QuestAdapter functional probe");
 
 if (!File.Exists(SkyrimEsmForBatch7))

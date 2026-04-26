@@ -4,7 +4,7 @@ All plugin changes are made in the Dev Build copy first. Once tested and stable,
 
 ---
 
-## v2.8.0 — TBD
+## v2.8.0 — 2026-04-26
 
 Verification + Effects-list write capability + Phase 4 bridge fixes & matrix-accuracy hygiene. Bridge support for `set_fields: {Effects: [...]}` on SPEL/ALCH/ENCH/SCRL/INGR records — surfaced from a real consumer's custom-race rebuild patch hitting the gap during v2.7.1's first-day use. Plus a bonus-catch fix for single-field FormLink writes via `set_fields`, surfaced deterministically by Phase 1's smoke. v2.8 was originally scoped as pure verification; the Effects-list addition is a bounded re-scope (one new mechanism, five record types). Phase 2/3/4 ran the verification matrix and folded the surfaced bridge bugs and matrix-accuracy findings into this release rather than punting to v2.9 — single bridge SHA, single ship.
 

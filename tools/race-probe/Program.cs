@@ -1486,11 +1486,400 @@ else
     }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// v2.9 P1 — ConditionData inventory dump
+// ═══════════════════════════════════════════════════════════════
+//
+// Goal: enumerate every concrete Mutagen.Bethesda.Skyrim.*ConditionData
+// subclass with its non-base, non-padding reflection slots, categorized
+// by parameter shape (NoParam / Enum / FormLinkOrIndex / MultiSlot /
+// PrimitiveOnly / Exotic). Output drives Phase 1's Pareto proposal in
+// CONDITIONS_AUDIT.md.
+//
+// Two filter axes:
+//
+// 1) Skip-list discipline (DYNAMIC, not PLAN.md's static list).
+//    A property is "base" iff its DeclaringType is the abstract
+//    ConditionData class or any of its ancestors. Everything declared
+//    below the base is function-specific. PLAN.md § Phase 1 step 2's
+//    static skip list (RunOnType / Reference / Function / Unknown1/2/3)
+//    is logged as a diff target only — disagreement is captured in
+//    CONDITIONS_AUDIT.md (per the conductor's mid-halt resolution after
+//    the first probe run surfaced the wrong-skip-list issue).
+//
+// 2) CTDA padding-slot filter (NEW per conductor mid-halt resolution
+//    Option C). Mutagen 0.53.1's *ConditionData classes universally
+//    expose 4 function-specific properties to mirror CTDA's 4-parameter
+//    binary format. Slots a function doesn't actually use are named
+//    *Unused*Parameter* (e.g. SecondUnusedIntParameter). They are never
+//    set in practice and never appear in user-supplied 'parameters'
+//    maps — the dispatcher's reflection lookup ignores them implicitly.
+//    Without filtering them out of the categorizer, every function lands
+//    in Exotic (their String typing isn't routable per § A) and the
+//    per-shape distribution becomes useless for Pareto. We filter by
+//    name (contains "Unused") AND record the universal pattern as a
+//    statistical roll-up so CONDITIONS_AUDIT.md can document it as a
+//    fact for Phase 2's schema-doc text and any future v2.9.x contributor.
+//
+// Conductor adjudications already inherited (these no longer halt):
+//   - Reference is a BASE property (used for RunOnType: Reference mode);
+//     GetIsID's actual function-specific slot is "Object" — captured as
+//     ARCH NOTE so Phase 2's plan-amend writes itself from this dump.
+//   - GetActorValuePercentage doesn't exist; GetActorValuePercent does
+//     — dropped from the floor-AV list, captured as ARCH NOTE alongside.
+
+int inventoryFailures = 0;
+
+Section("v2.9 P1 — ConditionData inventory dump");
+{
+    var asm = typeof(ISkyrimMod).Assembly;
+    var conditionDataBase = typeof(ConditionData);
+    Console.WriteLine($"  ConditionData base: {conditionDataBase.FullName}  IsAbstract={conditionDataBase.IsAbstract}");
+
+    var concrete = asm.GetTypes()
+        .Where(t => t.IsClass && !t.IsAbstract
+                 && (t.Namespace?.StartsWith("Mutagen.Bethesda.Skyrim") ?? false)
+                 && t.Name.EndsWith("ConditionData")
+                 && !t.Name.EndsWith("BinaryOverlay")
+                 && conditionDataBase.IsAssignableFrom(t))
+        .OrderBy(t => t.Name)
+        .ToList();
+
+    Console.WriteLine($"  Concrete *ConditionData count: {concrete.Count}");
+
+    // Predicate: a property is "base" iff its DeclaringType is conditionDataBase
+    // or any of its ancestors. Function-specific = !base. Indexers filtered.
+    bool IsBaseProp(PropertyInfo p)
+    {
+        if (p.GetIndexParameters().Length > 0) return true;
+        if (p.DeclaringType == null) return true;
+        if (p.DeclaringType == conditionDataBase) return true;
+        return conditionDataBase.IsSubclassOf(p.DeclaringType);
+    }
+
+    // CTDA padding-slot filter — Mutagen names unused CTDA params with
+    // "Unused" in the property name (FirstUnusedStringParameter,
+    // SecondUnusedIntParameter, etc.). Never set in practice; never
+    // surfaced in user 'parameters' maps. Filtered from categorization
+    // and per-function detail dump. See CONDITIONS_AUDIT.md.
+    bool IsPaddingSlot(PropertyInfo p) => p.Name.Contains("Unused");
+
+    // ─── PLAN-vs-dynamic skip-list diff ──────────────────────────────
+    var planStaticSkip = new HashSet<string> { "RunOnType", "Reference", "Function", "Unknown1", "Unknown2", "Unknown3" };
+    var dynamicBaseProps = conditionDataBase
+        .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+        .Where(p => p.GetIndexParameters().Length == 0)
+        .Select(p => p.Name)
+        .ToHashSet();
+    var inPlanNotDynamic = planStaticSkip.Except(dynamicBaseProps).OrderBy(s => s).ToList();
+    var inDynamicNotPlan = dynamicBaseProps.Except(planStaticSkip).OrderBy(s => s).ToList();
+
+    Console.WriteLine();
+    Console.WriteLine($"  Dynamic base props ({dynamicBaseProps.Count}): {string.Join(", ", dynamicBaseProps.OrderBy(s => s))}");
+    Console.WriteLine($"  PLAN static skip ({planStaticSkip.Count}): {string.Join(", ", planStaticSkip.OrderBy(s => s))}");
+    if (inPlanNotDynamic.Count > 0)
+        Console.WriteLine($"  ARCH NOTE: PLAN names as base but dynamic says function-specific (or absent): {string.Join(", ", inPlanNotDynamic)}");
+    if (inDynamicNotPlan.Count > 0)
+        Console.WriteLine($"  ARCH NOTE: dynamic base has props PLAN didn't list: {string.Join(", ", inDynamicNotPlan)}");
+
+    // ─── GetIsIDConditionData sanity-check anchor ────────────────────
+    Console.WriteLine();
+    Console.WriteLine("  GetIsIDConditionData anchor — every property annotated [base] / [padding] / [function-specific]:");
+    var getIsIdType = asm.GetType("Mutagen.Bethesda.Skyrim.GetIsIDConditionData");
+    if (getIsIdType == null)
+    {
+        Console.WriteLine($"  *** ARCH SURPRISE: GetIsIDConditionData not found in Mutagen 0.53.1 — floor pick is built around it; halt-worthy");
+        inventoryFailures++;
+    }
+    else
+    {
+        bool referenceFound = false;
+        bool referenceIsBase = false;
+        bool objectFound = false;
+        bool objectIsFunctionSpecific = false;
+        Type? objectSlotType = null;
+        foreach (var p in getIsIdType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => p.GetIndexParameters().Length == 0)
+            .OrderBy(p => p.Name))
+        {
+            string tag = IsBaseProp(p) ? "[base]"
+                       : IsPaddingSlot(p) ? "[padding]"
+                       : "[function-specific]";
+            Console.WriteLine($"    {p.Name,-32} {tag,-22} {FriendlyType(p.PropertyType)}  (declared on {p.DeclaringType?.Name})");
+            if (p.Name == "Reference")
+            {
+                referenceFound = true;
+                referenceIsBase = IsBaseProp(p);
+            }
+            if (p.Name == "Object")
+            {
+                objectFound = true;
+                objectIsFunctionSpecific = !IsBaseProp(p) && !IsPaddingSlot(p);
+                objectSlotType = p.PropertyType;
+            }
+        }
+        // Reference: conductor adjudicated as a BASE prop (RunOnType: Reference mode).
+        // Failures here mean Mutagen schema changed since adjudication — halt-worthy.
+        if (!referenceFound)
+        {
+            Console.WriteLine($"  *** ARCH SURPRISE: GetIsIDConditionData has no 'Reference' property — Mutagen schema rebased since conductor adjudication; halt-worthy");
+            inventoryFailures++;
+        }
+        else if (!referenceIsBase)
+        {
+            Console.WriteLine($"  *** ARCH SURPRISE: GetIsIDConditionData.Reference is NOT base — conductor adjudication assumed it was; halt-worthy");
+            inventoryFailures++;
+        }
+        else
+        {
+            Console.WriteLine($"  ARCH NOTE: GetIsIDConditionData.Reference is BASE (RunOnType: Reference-mode dispatch slot, inherited universally); GetIsID's function-specific parameter slot is 'Object'. PLAN.md § Architecture B example needs Phase 2 plan-amend correction. Captured in CONDITIONS_AUDIT.md.");
+        }
+        // Object: per conductor, the actual GetIsID parameter slot.
+        if (!objectFound)
+        {
+            Console.WriteLine($"  *** ARCH SURPRISE: GetIsIDConditionData has no 'Object' property — slot-name correction unfounded; halt-worthy");
+            inventoryFailures++;
+        }
+        else if (!objectIsFunctionSpecific)
+        {
+            Console.WriteLine($"  *** ARCH SURPRISE: GetIsIDConditionData.Object is base or padding — slot-name correction wrong; halt-worthy");
+            inventoryFailures++;
+        }
+        else
+        {
+            Console.WriteLine($"  ARCH NOTE: GetIsIDConditionData.Object is function-specific ({FriendlyType(objectSlotType!)}) — confirmed correct slot for the GetIsID 'parameters' map.");
+        }
+    }
+
+    // ─── GetEventData re-triage anchor (per conductor mid-halt ask) ──
+    // EventFunction + EventMember appear as nested types on
+    // GetEventDataConditionData. The absorb-vs-defer call:
+    //   - Both System.Enum → absorb (MultiSlot routable, given Phase 2's
+    //     IFormLink<T> sub-A extension covers the Record slot).
+    //   - Either is a custom Loqui sub-object → defer (would need
+    //     chained-slot DSL, explicit OOS per PLAN.md § Carry-overs #4).
+    Console.WriteLine();
+    Console.WriteLine("  GetEventData re-triage anchor — nested EventFunction / EventMember inspection:");
+    var getEventDataType = asm.GetType("Mutagen.Bethesda.Skyrim.GetEventDataConditionData");
+    if (getEventDataType == null)
+    {
+        Console.WriteLine($"    GetEventDataConditionData NOT FOUND in Mutagen 0.53.1");
+    }
+    else
+    {
+        foreach (var nestedName in new[] { "EventFunction", "EventMember" })
+        {
+            var nestedType = getEventDataType.GetNestedType(nestedName);
+            if (nestedType == null)
+            {
+                Console.WriteLine($"    {nestedName,-16} NOT FOUND as nested type on GetEventDataConditionData");
+                continue;
+            }
+            Console.WriteLine($"    {nestedName,-16} FullName={nestedType.FullName}");
+            Console.WriteLine($"    {"",-16} IsEnum={nestedType.IsEnum}  BaseType={nestedType.BaseType?.FullName}");
+            if (nestedType.IsEnum)
+            {
+                var values = Enum.GetNames(nestedType);
+                var preview = string.Join(", ", values.Take(8));
+                var ellipsis = values.Length > 8 ? $", ... ({values.Length} total)" : $" ({values.Length} total)";
+                Console.WriteLine($"    {"",-16} Values: {preview}{ellipsis}");
+            }
+            else
+            {
+                Console.WriteLine($"    {"",-16} Public properties (top 10):");
+                foreach (var p in nestedType.GetProperties(BindingFlags.Public | BindingFlags.Instance).Take(10))
+                    Console.WriteLine($"    {"",-18}- {p.Name,-20} {FriendlyType(p.PropertyType)}");
+            }
+        }
+    }
+
+    // ─── Categorization ──────────────────────────────────────────────
+    bool IsFormLinkOrIndex(Type t) => t.IsGenericType
+        && t.GetGenericTypeDefinition().Name.StartsWith("IFormLinkOrIndex");
+    bool IsRoutablePrimitive(Type t) => t == typeof(int) || t == typeof(float) || t == typeof(bool);
+    bool IsRoutable(Type t) => IsFormLinkOrIndex(t) || t.IsEnum || IsRoutablePrimitive(t);
+
+    string Categorize(List<PropertyInfo> slots)
+    {
+        if (slots.Count == 0) return "NoParam";
+        if (slots.Any(p => !IsRoutable(p.PropertyType))) return "Exotic";
+
+        bool allEnum = slots.All(p => p.PropertyType.IsEnum);
+        bool allPrim = slots.All(p => IsRoutablePrimitive(p.PropertyType));
+        bool allFormLink = slots.All(p => IsFormLinkOrIndex(p.PropertyType));
+
+        if (slots.Count == 1)
+        {
+            if (allFormLink) return "FormLinkOrIndex";
+            if (allEnum) return "Enum";
+            if (allPrim) return "PrimitiveOnly";
+        }
+        else
+        {
+            // PLAN.md § Phase 1 step 2: "Enum — one or more enum-typed slots",
+            // "PrimitiveOnly — one or more int/float/bool slots only", but
+            // "FormLinkOrIndex — ONE IFormLinkOrIndex<T> slot". So multi-FormLink
+            // (rare) goes to MultiSlot, while multi-enum and multi-primitive
+            // stay in their single-shape buckets.
+            if (allEnum) return "Enum";
+            if (allPrim) return "PrimitiveOnly";
+            return "MultiSlot"; // multi-FormLink, or any mix of routable shapes
+        }
+        return "Exotic"; // unreachable
+    }
+
+    var perTypeSlots = new Dictionary<Type, List<PropertyInfo>>();
+    var byShape = new Dictionary<string, List<string>>
+    {
+        ["NoParam"] = new(),
+        ["Enum"] = new(),
+        ["FormLinkOrIndex"] = new(),
+        ["MultiSlot"] = new(),
+        ["PrimitiveOnly"] = new(),
+        ["Exotic"] = new(),
+    };
+
+    // Padding-pattern stats for the audit doc (CTDA universal shape).
+    int totalPaddingSlotsFiltered = 0;
+    var paddingCountHistogram = new Dictionary<int, int>(); // padding-count → # functions
+    var usefulCountHistogram = new Dictionary<int, int>();  // useful-count  → # functions
+    var nonUniformFunctions = new List<string>();           // total-fn-props != 4 (GetEventData-class outliers)
+
+    foreach (var t in concrete)
+    {
+        var allFnSpecific = t.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => !IsBaseProp(p))
+            .ToList();
+        int paddingCount = allFnSpecific.Count(p => IsPaddingSlot(p));
+        int usefulCount = allFnSpecific.Count - paddingCount;
+        totalPaddingSlotsFiltered += paddingCount;
+        paddingCountHistogram[paddingCount] = paddingCountHistogram.GetValueOrDefault(paddingCount, 0) + 1;
+        usefulCountHistogram[usefulCount] = usefulCountHistogram.GetValueOrDefault(usefulCount, 0) + 1;
+        if (allFnSpecific.Count != 4)
+            nonUniformFunctions.Add($"{t.Name.Substring(0, t.Name.Length - "ConditionData".Length)} ({allFnSpecific.Count} total: {usefulCount} useful + {paddingCount} padding)");
+
+        var slots = allFnSpecific
+            .Where(p => !IsPaddingSlot(p))
+            .OrderBy(p => p.Name)
+            .ToList();
+        perTypeSlots[t] = slots;
+        var shape = Categorize(slots);
+        var fnName = t.Name.Substring(0, t.Name.Length - "ConditionData".Length);
+        byShape[shape].Add(fnName);
+    }
+
+    Console.WriteLine();
+    Console.WriteLine($"  ─── CTDA padding pattern ─────────────────────────");
+    Console.WriteLine($"  {totalPaddingSlotsFiltered} *Unused* slots filtered across {concrete.Count} functions");
+    Console.WriteLine($"  Padding-slot histogram:");
+    foreach (var kv in paddingCountHistogram.OrderBy(kv => kv.Key))
+        Console.WriteLine($"    {kv.Value,4} functions have {kv.Key} padding slot(s)");
+    Console.WriteLine($"  Useful-slot histogram:");
+    foreach (var kv in usefulCountHistogram.OrderBy(kv => kv.Key))
+        Console.WriteLine($"    {kv.Value,4} functions have {kv.Key} useful slot(s)");
+    if (nonUniformFunctions.Count > 0)
+    {
+        Console.WriteLine($"  Non-uniform function-property count (breaks the 4-property universal shape):");
+        foreach (var fn in nonUniformFunctions)
+            Console.WriteLine($"    {fn}");
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("  ─── Per-shape summary (post-filter) ──────────────");
+    foreach (var shape in new[] { "NoParam", "Enum", "FormLinkOrIndex", "MultiSlot", "PrimitiveOnly", "Exotic" })
+        Console.WriteLine($"  {shape,-18} count={byShape[shape].Count,3}");
+
+    Console.WriteLine();
+    foreach (var shape in new[] { "NoParam", "Enum", "FormLinkOrIndex", "MultiSlot", "PrimitiveOnly", "Exotic" })
+    {
+        if (byShape[shape].Count == 0) continue;
+        Console.WriteLine($"  ─── {shape} ({byShape[shape].Count}) ────");
+        foreach (var fn in byShape[shape].OrderBy(s => s))
+            Console.WriteLine($"    {fn}");
+    }
+
+    // ─── Full slot detail per shape (post-filter, all non-NoParam) ───
+    // Phase 2's coverage-smoke + dispatcher-validation reads these
+    // signatures directly from this scratch file; they are the
+    // authoritative source-of-truth for the v2.9.0 in-scope function set.
+    // NoParam functions are deliberately omitted (no slots to dispatch).
+    foreach (var shape in new[] { "Enum", "FormLinkOrIndex", "MultiSlot", "PrimitiveOnly" })
+    {
+        if (byShape[shape].Count == 0) continue;
+        Console.WriteLine();
+        Console.WriteLine($"  ─── {shape} full slot detail ({byShape[shape].Count}) ────");
+        foreach (var fn in byShape[shape].OrderBy(s => s))
+        {
+            var t = asm.GetType($"Mutagen.Bethesda.Skyrim.{fn}ConditionData");
+            if (t == null) continue;
+            var slots = perTypeSlots[t];
+            Console.WriteLine($"    {fn} ({slots.Count} useful slot(s)):");
+            foreach (var p in slots)
+                Console.WriteLine($"      - {p.Name,-32} {FriendlyType(p.PropertyType)}");
+        }
+    }
+
+    // ─── Floor + stretch detailed slot signatures ────────────────────
+    // GetActorValuePercentage dropped per conductor mid-halt resolution
+    // (doesn't exist in Mutagen 0.53.1; GetActorValuePercent is the
+    // canonical name and is already in this list).
+    Console.WriteLine();
+    Console.WriteLine("  ─── Floor + stretch detailed slot signatures (post-filter) ────");
+    var floorAndStretch = new[]
+    {
+        ("FLOOR",    "GetIsID"),
+        ("FLOOR",    "GetInFaction"),
+        ("FLOOR",    "GetInCell"),
+        ("FLOOR",    "HasMagicEffect"),
+        ("FLOOR",    "HasPerk"),
+        ("FLOOR",    "HasSpell"),
+        ("FLOOR",    "GetIsRace"),
+        ("FLOOR-AV", "GetActorValue"),
+        ("FLOOR-AV", "GetBaseActorValue"),
+        ("FLOOR-AV", "GetActorValuePercent"),
+        ("STRETCH",  "GetItemCount"),
+        ("STRETCH",  "IsInList"),
+        ("STRETCH",  "WornHasKeyword"),
+        ("STRETCH",  "GetEquipped"),
+    };
+    foreach (var (band, fn) in floorAndStretch)
+    {
+        var typeName = $"Mutagen.Bethesda.Skyrim.{fn}ConditionData";
+        var t = asm.GetType(typeName);
+        if (t == null)
+        {
+            Console.WriteLine($"  [{band,-8}] {fn,-28} *** NOT FOUND in Mutagen 0.53.1");
+            continue;
+        }
+        var slots = perTypeSlots.TryGetValue(t, out var s) ? s : new List<PropertyInfo>();
+        var shape = Categorize(slots);
+        Console.WriteLine($"  [{band,-8}] {fn,-28} shape={shape,-15} useful_slots={slots.Count}");
+        foreach (var p in slots)
+            Console.WriteLine($"               - {p.Name,-20} {FriendlyType(p.PropertyType)}");
+    }
+
+    // ─── Exotic detail dump (these need Aaron's call) ────────────────
+    if (byShape["Exotic"].Count > 0)
+    {
+        Console.WriteLine();
+        Console.WriteLine($"  ─── Exotic shape detail (post-filter, {byShape["Exotic"].Count}) — pre-auth absorbability check needed ────");
+        foreach (var fn in byShape["Exotic"].OrderBy(s => s))
+        {
+            var t = asm.GetType($"Mutagen.Bethesda.Skyrim.{fn}ConditionData");
+            if (t == null) continue;
+            var slots = perTypeSlots[t];
+            Console.WriteLine($"    {fn} ({slots.Count} useful slot(s)):");
+            foreach (var p in slots)
+                Console.WriteLine($"      - {p.Name,-20} {FriendlyType(p.PropertyType)}");
+        }
+    }
+}
+
 Console.WriteLine();
-int totalFailures = auditFailures + effectsAuditFailures;
+int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures;
 if (totalFailures > 0)
 {
-    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1) — reclassify in AUDIT/EFFECTS_AUDIT ===");
+    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
     Environment.Exit(1);
 }
 Console.WriteLine("=== probe complete ===");

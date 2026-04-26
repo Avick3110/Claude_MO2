@@ -195,19 +195,19 @@ Run via `mo2_create_patch` against the live Authoria modlist. Output filenames `
 
 ### Scenario 3.1 — Dialog `GetIsID` topic gating
 
-**Use case.** Real-world dialog patcher: a dialog topic (DIAL/INFO record, surfaced via DialogConditions on the INFO) gates a topic to a specific NPC by adding a `GetIsID` Condition with `Reference` pointing at the target NPC. Today the bridge accepts `function: "GetIsID"` but leaves Reference at FormID 0 — the condition is structurally-valid but functionally always-false, so the dialog never fires for the target NPC. v2.9 lands the Reference slot via the generic dispatcher.
+**Use case.** Real-world dialog patcher: a dialog topic (DIAL/INFO record, surfaced via DialogConditions on the INFO) gates a topic to a specific NPC by adding a `GetIsID` Condition with `Object` pointing at the target NPC. Today the bridge accepts `function: "GetIsID"` but leaves the `Object` slot at FormID 0 — the condition is structurally-valid but functionally always-false, so the dialog never fires for the target NPC. v2.9 lands the `Object` slot via the generic dispatcher. (`Object` is GetIsID's function-specific slot — `Reference` is a base prop used for `RunOnType: Reference` mode; see CONDITIONS_AUDIT.md § Architectural surprises §1.)
 
 **Target (Phase 3 picks):**
 - 1 INFO record from the live modlist with an existing DialogConditions list (or empty — bridge's `add_conditions` works either way).
-- 1 NPC_ FormID for the GetIsID Reference slot.
+- 1 NPC_ FormID for the GetIsID `Object` slot.
 
 **Operations:**
-- `add_conditions` on the INFO record: one ConditionFloat with `function: "GetIsID"`, `operator: "=="`, `value: 1`, `parameters: {Reference: "<plugin>:<localID-of-NPC>"}`.
+- `add_conditions` on the INFO record: one ConditionFloat with `function: "GetIsID"`, `operator: "=="`, `value: 1`, `parameters: {Object: "<plugin>:<localID-of-NPC>"}`.
 
 **Assertions:**
 - mods.conditions_added=1.
 - Readback `condition.Data.GetType() == GetIsIDConditionData`.
-- Readback `condition.Data.Reference.FormKey` matches the supplied NPC FormKey (NOT FormID 0).
+- Readback `condition.Data.Object.FormKey` matches the supplied NPC FormKey (NOT FormID 0).
 - Existing DialogConditions on the INFO are preserved (add, not replace).
 - Output ESP contains the INFO override; xEdit reads cleanly with no unresolved-FormID warning.
 
@@ -258,9 +258,9 @@ Architectural edges of the v2.9 dispatcher that don't fit Layer 1's per-function
 
 | # | Setup | Expected |
 |---|-------|----------|
-| `4.formid.01` | `parameters: {Reference: "Skyrim.esm:DOESNOTEXIST"}` (malformed FormID — non-hex) | record-level error: clean message identifying the malformed FormID and the slot |
-| `4.formid.02` | `parameters: {Reference: "NotARealPlugin.esp:0001A696"}` (plugin not in load order) | record-level error: clean message identifying the unresolved plugin |
-| `4.formid.03` | `parameters: {Reference: "Skyrim.esm:00FFFFFF"}` (well-formed but record absent) | document behavior: bridge writes the FormKey as supplied; readback shows the FormID; xEdit may flag at runtime but bridge does not validate record existence (matches v2.8.0's FormLink-bonus-catch behavior — write-time, not validate-time) |
+| `4.formid.01` | GetIsID + `parameters: {Object: "Skyrim.esm:DOESNOTEXIST"}` (malformed FormID — non-hex) | record-level error: clean message identifying the malformed FormID and the slot |
+| `4.formid.02` | GetIsID + `parameters: {Object: "NotARealPlugin.esp:0001A696"}` (plugin not in load order at write-time) | document behavior: bridge writes the FormKey as supplied (Mutagen accepts unresolved plugins; load-order validation happens at WriteToBinary time, not at FormKey-construction time). Matches v2.8.0's write-time-not-validate-time posture. |
+| `4.formid.03` | GetIsID + `parameters: {Object: "Skyrim.esm:00FFFFFF"}` (well-formed but record absent) | document behavior: bridge writes the FormKey as supplied; readback shows the FormID; xEdit may flag at runtime but bridge does not validate record existence (matches v2.8.0's FormLink-bonus-catch behavior — write-time, not validate-time) |
 
 ### 4.enum — enum slot edges
 
@@ -337,13 +337,13 @@ Cell counts may shift slightly if Phase 2 dedupes / merges where the same code p
 `coverage-smoke/Program.cs` should print one line per assertion, mirroring v2.8.0:
 
 ```
-[1.P.GetIsID.MGEF]      add_conditions GetIsID    MGEF FirstMgef          PASS (Reference resolved to Skyrim.esm:000A2C8E)
+[1.P.GetIsID.MGEF]      add_conditions GetIsID    MGEF FirstMgef          PASS (Object resolved to Skyrim.esm:000A2C8E)
 [1.P.HasPerk.PERK]      add_conditions HasPerk    PERK FirstPerk          PASS (Perk resolved to Skyrim.esm:000C44C0)
 [1.P.GetActorValue.MGEF] add_conditions GetActorValue MGEF FirstMgef     PASS (ActorValue=Health via generic dispatcher)
 [1.D.50]                add_conditions OutOfScopeFunc + parameters       PASS (out-of-scope error rolled back; in-scope set named in error)
 [1.D.51]                add_conditions GetIsID + bad SlotName            PASS (no-such-slot error)
 [2.01]                  multi-slot GetStageDone(Quest+Stage)             PASS (both slots resolved)
-[3.1]                   dialog GetIsID gating                            PASS (Reference resolved on live INFO)
+[3.1]                   dialog GetIsID gating                            PASS (Object slot resolved on live INFO)
 [4.dsl.01]              both actor_value AND parameters supplied         FAIL: expected unambiguous-DSL error, got success
 [5.01]…[5.160]          v2.8.0 regression band                           160/160 PASS
 ```

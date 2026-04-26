@@ -100,6 +100,7 @@ For each (slotName, value) in conditionEntry.Parameters:
         throw "Function {function} has no parameter slot named '{slotName}' on its Mutagen ConditionData."
     Route value to prop based on prop.PropertyType:
         - IFormLinkOrIndex<T>      → existing Global-handler pattern (FormKey + ctor(condData, key))
+        - IFormLink<T>             → simpler ctor: FormLink<T>(formKey) (no parent — sub-A absorption per CONDITIONS_AUDIT.md)
         - Enum (any)               → Enum.Parse(prop.PropertyType, value, ignoreCase: true)
         - Int32 / Single / Boolean → direct conversion
         - Anything else            → "parameter slot type not yet supported" error
@@ -107,7 +108,7 @@ For each (slotName, value) in conditionEntry.Parameters:
 
 This is generic-by-slot-type, NOT a per-function dispatch table. Adding a new function to v2.9 scope is purely a probe + matrix update + coverage-smoke cell — no new bridge code.
 
-**Per-function table is the wrong abstraction here.** Mutagen's `{Function}ConditionData` types use uniform reflection conventions (slot name = property name, type drives marshalling), and the slot types are a small, closed set (`IFormLinkOrIndex<T>`, enum, int, float, bool). A per-function table would re-encode information already present in the type system. The generic router reads what's there.
+**Per-function table is the wrong abstraction here.** Mutagen's `{Function}ConditionData` types use uniform reflection conventions (slot name = property name, type drives marshalling), and the slot types are a small, closed set (`IFormLinkOrIndex<T>`, `IFormLink<T>`, enum, int, float, bool). A per-function table would re-encode information already present in the type system. The generic router reads what's there.
 
 **Hybrid kept:** the v2.8.0 `actor_value` JSON field stays as syntactic sugar for `parameters: {ActorValue: ...}`. Both forms route through the same dispatch. If both are supplied for ActorValue, the bridge errors (unambiguous DSL). The existing `global` JSON field stays as-is — different DSL (FormID string + comparison operator on the Condition itself, not on ConditionData), kept for back-compat.
 
@@ -121,7 +122,7 @@ ConditionEntry gains a new optional field:
   "operator": "==",
   "value": 1,
   "parameters": {
-    "Reference": "Skyrim.esm:0001A696"      // IFormLinkOrIndex<ISkyrimMajorRecordGetter>
+    "Object": "Skyrim.esm:0001A696"      // IFormLinkOrIndex<IReferenceableObjectGetter> — GetIsID's function-specific slot is `Object`, not `Reference` (Reference is a base prop, used for RunOnType: Reference mode). See CONDITIONS_AUDIT.md § Architectural surprises §1.
   }
 }
 ```
@@ -315,7 +316,7 @@ Keep handoffs short — under 400 lines.
 
 2. **Extend `tools/race-probe/Program.cs` with an inventory dump section** appended after the existing v2.8 P4 sections:
    - Enumerate every concrete `Mutagen.Bethesda.Skyrim.*ConditionData` (filter: class, not abstract, not `*BinaryOverlay`, not interface). v2.8.0's Condition Examples research note ~157 condition data types — Phase 1 produces the exact authoritative list.
-   - For each: print function name (= type name minus `ConditionData` suffix), every public-instance non-base property (skip `RunOnType`, `Reference`, `Function`, `Unknown1/2/3` — these are inherited base-class slots, not function parameters), with property type.
+   - For each: print function name (= type name minus `ConditionData` suffix), every public-instance non-base property — base-prop detection is **dynamic** (walk `DeclaringType` against `typeof(ConditionData)`, not a static skip list per CONDITIONS_AUDIT.md § Architectural surprises §2). Apply CTDA padding-slot filter `IsPaddingSlot(p) := p.Name.Contains("Unused")` per CONDITIONS_AUDIT.md § Architectural surprises §3. The actual base prop set the dynamic detector finds is `{Reference, RunOnType, RunOnTypeIndex, UseAliases, UsePackageData}` — different from PLAN's original static guess; the audit captures the discrepancy.
    - Categorize each function by parameter shape:
      - **NoParam** — function takes only base slots (parameterless).
      - **Enum** — one or more enum-typed slots (ActorValue family, Sex, etc.).
@@ -679,5 +680,6 @@ These are explicitly out of scope for v2.9.X unless real-world testing surfaces 
 4. **Chained dict access** (`Foo[Key].Sub`). Carried over.
 5. **QUST.Aliases / Stages / Objectives, PERK.Effects.** Out of scope for v2.8.0's bounded Effects-list mechanism — sub-class polymorphism harder; defer until real consumer surfaces.
 6. **Condition functions outside Phase 1's Pareto lock.** v2.9.X covers the locked set; further functions land in v2.9.x point releases as real consumers surface them. The dispatcher is generic — adding a function is purely a Pareto-update + matrix cell + coverage-smoke regression cell, no new bridge code.
-7. **Multi-FormLink slot types and other exotic ConditionData shapes** if Phase 1 surfaced them and Aaron deferred. Documented in CONDITIONS_AUDIT.md if applicable.
-8. **All v2.6.0 / v2.7.0 / v2.7.1 / v2.8.0 deferrals** — see prior plan handoffs.
+7. **Sub-B Condition functions with String-typed slots** — 6 functions: `GetGraphVariableFloat`, `GetGraphVariableInt`, `GetQuestVariable`, `GetScriptVariable`, `GetVMQuestVariable`, `GetVMScriptVariable`. Each carries a `VariableName: String` or `GraphVariable: String` slot referencing a Papyrus / Behavior-Graph runtime-only identifier. Defer until a real consumer surfaces and we have signal on the validation contract — routing them needs either a new accept-any-string operator surface (breaks the bridge's existing schema-validation posture) or a new MCP shape for Papyrus-introspection round-trip (out of scope). See CONDITIONS_AUDIT.md § Sub-B deferral.
+8. **Multi-FormLink slot types and other exotic ConditionData shapes** if Phase 1 surfaced them and Aaron deferred. Documented in CONDITIONS_AUDIT.md if applicable.
+9. **All v2.6.0 / v2.7.0 / v2.7.1 / v2.8.0 deferrals** — see prior plan handoffs.

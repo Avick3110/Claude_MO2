@@ -1,53 +1,24 @@
 # Known Issues & Limitations
 
-Current as of v2.8.0. These are known limitations, not bugs — all reported bugs have been resolved. For the full version history see `mo2_mcp/CHANGELOG.md`.
+Current as of v2.8.0. These are known limitations, not bugs. For the full version history see `mo2_mcp/CHANGELOG.md`.
 
 ---
 
-## v2.8.0 patching write surface
+## Patching write surface — current limitations
 
-v2.8.0 adds Effects-list writability to the bridge — surfaced from a real consumer's custom-race rebuild patch hitting the gap during v2.7.1's first-day use. Bounded scope: ONE new mechanism (JSON Array → list-of-LoquiObject in `set_fields`); FIVE record types (SPEL/ALCH/ENCH/SCRL/INGR Effects). The v2.8.0 Phase 2/3 verification matrix completes the v2.7.1 wire-up validation.
+These write-surface gaps are not yet covered by the bridge; v2.9 candidates.
 
-### What's new
-
-- **Effects array writable on SPEL/ALCH/ENCH/SCRL/INGR.** `set_fields: {Effects: [{BaseEffect, Data: {Magnitude, Area, Duration}, Conditions: [...]}]}` writes the whole array. Replace-semantics — the source list is cleared and the JSON-supplied entries written. Per-effect Conditions take the same `{function, operator, value, global, run_on, or_flag}` shape as the existing `add_conditions` operator (a shared `BuildCondition` factory keeps the two paths aligned).
-- **Per-effect spell conditions absorbed.** Pre-v2.8.0, `add_conditions` was rejected on SPEL records ("Spell conditions apply at effect level, not record level") because Mutagen models conditions per `Effect`, not per Spell. The Effects-array write surface above carries `Conditions` as a per-effect sub-field, so spell-level conditioning is now expressible without targeting the underlying MGEFs directly.
-
-### Carried-over limitations (v2.9 candidates)
-
-- **Replace-semantics whole-dict assignment** (Tier C dicts). v2.8.0's array-replace semantics for Effects is a separate code path; the Tier C dict form (`Starting: {Health: 100, Magicka: 200}`) remains uniform merge — keys not present in the JSON are preserved at their source values. A future replace-semantics surface for dicts (clear-then-set) would need a new operator parameter or sentinel value; v2.8.0 was scope-locked at "no new operators."
+- **Replace-semantics whole-dict assignment** (Tier C dicts). The Effects-list array path uses replace-semantics, but the Tier C dict form (`Starting: {Health: 100, Magicka: 200}`) is uniform merge — keys not present in the JSON are preserved at their source values. A clear-then-set surface for dicts would need a new operator parameter or sentinel value.
 - **Chained dict access.** `Foo[Key].Sub` paths are not supported — Tier C is terminal-bracket-only. `set_fields` rejects chained brackets explicitly with a clear error rather than producing wrong behavior.
-- **Quest condition disambiguation.** QUST records carry `DialogConditions` and `EventConditions` rather than a single `Conditions` list. `add_conditions`/`remove_conditions` cannot disambiguate without a new operator parameter (e.g. `condition_target: "dialog" | "event"`). v2.9 candidate.
-- **Outfit/Spell `attach_scripts`.** Mutagen 0.53.1 schema absence + Bethesda data has no precedent. The bridge errors with `"Record type Outfit/Spell does not support scripts"` because the concrete `Outfit` and `Spell` types don't expose a `VirtualMachineAdapter` property under any name reachable by reflection — Phase 4 verified via three independent evidence streams: (1) `typeof(X).GetProperty("VirtualMachineAdapter")` returns null on the concrete class plus every interface plus the full base-class chain; (2) full public-instance property dump finds zero VMAD-shaped properties (Outfit: 11 properties, Spell: 26 properties; case-sensitive PascalCase match against `Vmad`/`VMad`/`VMAD`/`Adapter` plus type-assignability check to `VirtualMachineAdapter`); (3) byte-scan of vanilla `Skyrim.esm`'s SPEL and OTFT GRUP byte ranges finds zero `VMAD` subrecord signatures (Bethesda's own data has no precedent for VMAD on these record types). Same posture as the AMMO enchantment limitation below — Mutagen schema gap, with the added observation that Bethesda's vanilla data doesn't exercise the question. Resolving requires an upstream Mutagen schema change.
-- **AMMO enchantment.** Mutagen's schema does not expose an `ObjectEffect` slot on Ammunition records. `set_enchantment`/`clear_enchantment` are restricted to ARMO/WEAP. Resolving this requires an upstream Mutagen schema change.
-- **QUST.Aliases / Stages / Objectives, PERK.Effects.** Out of scope for v2.8.0's Effects-list mechanism even though the schema shape is similar (sub-class polymorphism makes them harder; no real consumer surfaced yet).
+- **Quest condition disambiguation.** QUST records carry `DialogConditions` and `EventConditions` rather than a single `Conditions` list. `add_conditions`/`remove_conditions` cannot disambiguate without a new operator parameter (e.g. `condition_target: "dialog" | "event"`).
+- **Outfit/Spell `attach_scripts`.** The bridge errors with `"Record type Outfit/Spell does not support scripts"` because the concrete `Outfit` and `Spell` types don't expose a `VirtualMachineAdapter` property — Mutagen 0.53.1 schema gap, and Bethesda's vanilla data has no VMAD subrecord on SPEL or OTFT records. Resolving requires an upstream Mutagen schema change.
+- **AMMO enchantment.** Mutagen's schema does not expose an `ObjectEffect` slot on Ammunition records. `set_enchantment`/`clear_enchantment` are restricted to ARMO/WEAP. Resolving requires an upstream Mutagen schema change.
+- **QUST.Aliases / Stages / Objectives, PERK.Effects.** Out of scope for the current Effects-list mechanism even though the schema shape is similar — sub-class polymorphism makes them harder, and no real consumer has surfaced yet.
 
-### Schema observations (Phase 3 verification, useful when authoring patches)
+### Schema observations (useful when authoring patches)
 
 - **PERK has no `Configuration` sub-object.** Unlike NPC (where `set_fields: {Configuration: {Health: 200}}` works via Tier B aliases or sub-LoquiObject merge), Mutagen 0.53.1's PERK schema declares its writable scalars at the top level: `Level`, `NumRanks`, `Trait`, `Playable`, `Hidden`. Single-field FormLink: `NextPerk` (`IFormLinkNullable<IPerkGetter>`). For PERK reflection writes use `set_fields: {Level: 25, NumRanks: 3, NextPerk: "Skyrim.esm:058214"}` directly — there's no `Configuration.PerkType` path.
 - **LVSP merge data-shape constraint on Authoria-style modlists.** `merge_leveled_list` against LVSP records that carry uniform `SPEL References` across plugins (vanilla / USSEP / Requiem-style overhauls that rebalance levels but preserve the entry set) will correctly dedup to `entries_merged: 0`. This is the right outcome — the merge mechanism is verifying no new entries are introduced — but matrix expectations of `entries_merged > 0` won't be met against this modlist topology. Test patches should accept `entries_merged: 0` as a valid pass for LVSP, or use a modlist with diverse LVSP entry sets to exercise the additive path.
-
-### v2.8.0 = verification + Effects-list capability
-
-v2.8.0 ships one bounded capability addition (Effects-list write) and the verification matrix that v2.8 was originally scoped to deliver alone. Phase 2 runs Layers 1+2+4 of the matrix in `tools/coverage-smoke/`; Phase 3 runs Layer 3 workflow scenarios against a live modlist. Bugs surfaced in either phase get fixed in Phase 4 before the v2.8.0 ship.
-
----
-
-## v2.7.1 patching write surface
-
-v2.7.1 expanded the operator × record-type matrix driven by an audit of every (operator, record-type) pair Mutagen 0.53.1's Skyrim schemas support. See `dev/plans/v2.7.1_race_patching/AUDIT.md` for the complete matrix.
-
-### What's new
-
-- **RACE patching is fully wired.** `add_keywords`/`remove_keywords` and `add_spells`/`remove_spells` work on RACE records. Per-stat starting values and regen rates (`Starting[Health]`, `Regen[Magicka]`, etc.) are writable via `set_fields` either in bracket form or as a JSON object. Field aliases shorten the common cases: `BaseHealth`, `BaseMagicka`, `BaseStamina`, `HealthRegen`, `MagickaRegen`, `StaminaRegen`.
-- **Keyword writes expanded** to Furniture, Activator, Location, Spell, MagicEffect — plus Race. The 10 prior types (Armor, Weapon, NPC, Ingestible, Ammunition, Book, Flora, Ingredient, MiscItem, Scroll) are unchanged.
-- **Leveled-list `add_items` expanded** to LVLN and LVSP. LVLI is unchanged.
-- **Bracket-indexer + JSON-object dict syntax** in `set_fields` works against any Mutagen `IDictionary<,>` property — RACE's stat dicts are the headline use case but the path is generic.
-- **Silent drops eliminated.** Per-record errors now include an `unmatched_operators` field listing every requested operator the bridge could not dispatch on the target record type. Failed records roll back from the patch before write — no silent successes that report `success: true` but produce no actual mutation.
-
-### Carried-over limitations (now subsumed by v2.8.0)
-
-The v2.7.1 carry-over list pointed at v2.8 as the next-cycle candidate. v2.8.0 absorbed one item (per-effect spell conditions, via the new Effects-list write surface). The other items rolled forward and are listed under the v2.8.0 "Carried-over limitations (v2.9 candidates)" section above. The v2.7.1 narrative below is preserved for historical context only.
 
 ---
 
@@ -106,9 +77,9 @@ Since v2.7.0, all four user-provided tool surfaces are configurable through the 
 
 See the `leveled-list-patching` skill (`.claude/skills/leveled-list-patching/SKILL.md`) for the reasoning framework.
 
-### Spell conditions apply at effect level (now writable via set_fields Effects)
+### Spell conditions apply at effect level
 
-Skyrim spells carry conditions per magic effect, not on the spell record itself — `add_conditions` on a SPEL still throws "Record type Spell does not support conditions" (because the property doesn't exist at the record level). v2.8.0 makes per-effect conditions writable through the Effects-list surface: `set_fields: {Effects: [{BaseEffect: ..., Data: {...}, Conditions: [{function, operator, value, ...}]}]}` puts conditions on each effect entry. Conditioning the underlying MGEF directly still works as the alternative.
+Skyrim spells carry conditions per magic effect, not on the spell record itself — `add_conditions` on a SPEL throws "Record type Spell does not support conditions" because the property doesn't exist at the record level. Per-effect conditions are writable through the Effects-list surface: `set_fields: {Effects: [{BaseEffect: ..., Data: {...}, Conditions: [{function, operator, value, ...}]}]}` puts conditions on each effect entry. Conditioning the underlying MGEF directly works as the alternative.
 
 ### RecordReader depth limit
 
@@ -120,11 +91,11 @@ By default, FormIDs in the output are rendered as `Plugin:HexID`. Pass `resolve_
 
 ### Record queries default to enabled plugins only
 
-Since v2.5.6, the five query tools (`mo2_query_records`, `mo2_record_detail`, `mo2_conflict_chain`, `mo2_plugin_conflicts`, `mo2_conflict_summary`) filter out plugins whose right-pane checkbox is unticked. Rationale: "winning plugin" claims and conflict chains should reflect what the game actually loads at runtime, not every plugin that ever touched the record.
+By default, the five query tools (`mo2_query_records`, `mo2_record_detail`, `mo2_conflict_chain`, `mo2_plugin_conflicts`, `mo2_conflict_summary`) filter out plugins whose right-pane checkbox is unticked. Rationale: "winning plugin" claims and conflict chains should reflect what the game actually loads at runtime, not every plugin that ever touched the record.
 
 Pass `include_disabled: true` for diagnostic queries ("was this record ever overridden, even by disabled mods?", "what would change if I enabled this plugin?"). When a record only exists in disabled plugins, the error distinguishes "not found" from "found but disabled" and tells the caller how to recover.
 
-Implicit-load plugins (Skyrim.esm, DLC ESMs, Creation Club masters listed in `<game_root>/Skyrim.ccc`) are classified as enabled regardless of `plugins.txt` state — the engine auto-loads them. This was corrected in v2.5.7 after v2.5.6 initially missed the implicit-load case and reported `total_conflicts` off by ~2× on typical modlists.
+Implicit-load plugins (Skyrim.esm, DLC ESMs, Creation Club masters listed in `<game_root>/Skyrim.ccc`) are classified as enabled regardless of `plugins.txt` state — the engine auto-loads them.
 
 ---
 
@@ -137,7 +108,7 @@ Implicit-load plugins (Skyrim.esm, DLC ESMs, Creation Club masters listed in `<g
 - **External filesystem changes require a manual MO2 refresh.** MO2 does not auto-detect `rm`/`cp`/`mv` of plugin files made outside its API. After any external change to plugin files (via Bash, another tool, or manual intervention), press F5 in MO2 (or use the Refresh button) before calling `mo2_create_patch`, `mo2_build_record_index`, or any read-back against the affected plugin. Skipping this leaves orphans in `loadorder.txt` and new plugins may be missing from the index entirely — symptoms include read-back returning empty even with `include_disabled: true`. Prefer `mo2_write_file` (routes through MO2's output mod, detected immediately) over Bash for plugin-adjacent writes.
 - **Large modlists can exceed Claude Code's default MCP timeout on cold force-rebuild.** Claude Code's default MCP tool-call timeout is 60 s; `mo2_build_record_index(force_rebuild=true)` on ~3000+ plugin modlists takes roughly 76 s on reference hardware. The server-side build completes regardless — a follow-up `mo2_record_index_status` call will show `state: "done"` — but the client call appears to time out. **Set `MCP_TIMEOUT=120000` in your environment before launching Claude Code** to avoid the timeout entirely. Normal queries and cache-hit rebuilds stay well under the default.
 - **Some plugins are rejected by Mutagen's strict parser.** The record index builds by handing every plugin to Mutagen for enumeration. Mutagen is stricter than xEdit about format conformance — plugins with malformed records (e.g. `DATA` subrecord length mismatches) can scan clean in xEdit but fail in Mutagen. Those plugins are absent from the record index; `mo2_record_index_status` lists them in the `errors` array. If a plugin you care about doesn't appear in query results, run xEdit's **Check for Errors** on it to confirm the state, then have the mod author fix it (or auto-clean via xEdit if feasible). Two plugins in the reference test modlist (`TasteOfDeath_Addon_Dialogue.esp`, `ksws03_quest.esp`) are known to hit this — ~0.06% scan loss on a 3,384-plugin load order.
-- **Inno registry hygiene on multi-instance installs.** v2.7.0's installer uses a static `AppId` and `CreateUninstallRegKey=yes`, so each install to a different MO2 directory writes the same HKCU uninstall key. The most-recent install's path wins for "uninstall this" lookups. For users with one MO2 install: invisible. For users with multiple MO2 instances installing the plugin to each: a clean uninstall reads the latest install path, not necessarily the one being uninstalled. Workaround: uninstall via the MO2-instance-specific `unins000.exe` directly (the per-install copy in each plugin dir always points at the right target). Permanent fix candidate for v2.8: dynamic `AppId` per install path so each install gets its own registry entry.
+- **Inno registry hygiene on multi-instance installs.** v2.7.0's installer uses a static `AppId` and `CreateUninstallRegKey=yes`, so each install to a different MO2 directory writes the same HKCU uninstall key. The most-recent install's path wins for "uninstall this" lookups. For users with one MO2 install: invisible. For users with multiple MO2 instances installing the plugin to each: a clean uninstall reads the latest install path, not necessarily the one being uninstalled. Workaround: uninstall via the MO2-instance-specific `unins000.exe` directly (the per-install copy in each plugin dir always points at the right target). Permanent fix candidate for v2.9: dynamic `AppId` per install path so each install gets its own registry entry.
 - **Back-navigation from Dir → Optional Tools preserves user edits.** v2.7.0's Optional Tools picker page seeds its Edit fields once on first entry and keeps them populated through Back-navigation. If you click Back from the Optional Tools page, change the target MO2 directory, then click Next: the picker's Edit values stay populated from the original detection — they don't re-detect against the new target dir. This is intentional (edit survival across Back is the priority); to get fresh detection against a new target, Cancel and restart the installer.
 
 ---
@@ -155,43 +126,3 @@ These are reported or reportable to Spooky upstream; our wrappers already work a
 ## Not yet implemented
 
 **Papyrus save-file reading.** Can't yet read `.ess` save files to inspect script state at runtime — which scripts are loaded, variable values on suspended stacks, orphan script instances. Planned for Phase G of the roadmap. Static `.psc`/`.pex` analysis (via `mo2_compile_script` + Creation Kit) works today; only in-save runtime state is unavailable.
-
----
-
-## Resolved bugs (history)
-
-| Bug | Fixed in |
-|-----|----------|
-| `mo2_query_records` int/str type error | v1.0.1 |
-| `mo2_list_files` VFS leak | v1.0.1 / v1.0.6 |
-| `mo2_find_conflicts` parameter confusion | v1.0.1 |
-| Editor ID filter timeouts | v1.0.1 |
-| Record index build encoding error | v1.0.1 |
-| `mo2_list_files` root path empty | v1.0.6 |
-| `mo2_read_file` no pagination | v1.0.6 |
-| ESP writer master-limit (258 masters → invalid ESP) | v2.0.0 (Mutagen bridge) |
-| `add_inventory` broken on Container records | v2.0.0 |
-| CopyAsOverride missing ~25 record types | v2.0.0 |
-| Localized strings returned as `[lstring ID]` placeholders | v2.0.0 (Mutagen reads STRINGS files) |
-| VMAD fragments rendered as raw hex | v2.0.0 |
-| `mo2_record_detail` lost nested enumerable-of-byte blobs as int arrays | v2.4.0 |
-| `ConditionGlobal` produced NULL reference in xEdit | v2.4.1 (reflection fix) |
-| BSA extract ignored filter, storming subprocesses | v2.4.1 (full-extract-then-filter) |
-| FUZ parser rejected valid files | v2.4.1 (local bridge parser) |
-| Champollion tool-path resolution broken on live install | v2.4.1 (5-up placement) |
-| Claude Code auto-registration wrote to `~/.claude/.mcp.json` (wrong path; CC reads `~/.claude.json`) | v2.5.1 |
-| Plugin import error blocked MCP server startup (deleted `_find_spooky_cli`/`_invoke_cli` were still imported by three other modules) | v2.5.2 |
-| `set_fields` silently failed on `ExtendedList<T>` fields — MUSC `Tracks`, FLST `Items`, OTFT `Items` — with "Cannot convert JSON Array" | v2.5.6 |
-| `mo2_create_patch` reported `success: true` and inflated `records_written` when every per-record op failed | v2.5.6 |
-| Bridge subprocess calls flashed black CMD windows, stealing focus during bulk operations | v2.5.6 |
-| Implicit-load plugins (base-game ESMs + Creation Club masters in `Skyrim.ccc`) misclassified as disabled, silently hiding their records from default queries (`total_conflicts` off by ~2×) | v2.5.7 |
-| `mo2_record_index_status` stripped the `errors` list from its response, only surfacing `error_count` | v2.5.7 |
-| `mo2_build_record_index(force_rebuild=true)` was a silent no-op because on-disk cache reloaded immediately after the in-memory clear | v2.5.7 |
-| ESL FormID compaction end-to-end: patches overriding records that reference ESL-flagged masters wrote unresolved FormLinks; `mo2_record_detail` returned non-compacted IDs that disagreed with xEdit | v2.6.0 (Mutagen-backed bridge + `PluginResolver` path-resolution fix) |
-| Bridge routed reads/writes at the wrong file for plugin filenames that existed in more than one mod folder (alphabetical `mods/` walk vs MO2's priority-ordered VFS) | v2.6.0 (`organizer.resolvePath` replaces the walk) |
-| Freshly-written patches couldn't be read back until the user ticked the MO2 checkbox — `mo2_record_detail` returned "Record not found" even with `include_disabled: true` | v2.6.0 (`mo2_create_patch` waits on MO2's `onRefreshed` signal before returning) |
-| `mo2_build_record_index` fire-and-poll protocol required every caller to implement a polling loop that was easy to misuse | v2.6.0 (now blocking; returns full status dict) |
-| Event-driven index invalidation (`onPluginStateChanged` full-rebuild fallback, debounced `onRefreshed` rebuild, `trigger_refresh_and_wait_for_index`) accumulated edge cases and silent stalls | v2.6.0 (replaced with lazy build + per-query mtime freshness check) |
-| `_find_papyrus_compiler()` didn't check `<plugin>/tools/spooky-cli/tools/papyrus-compiler/` — the path the installer's README stub directs users to populate — so `mo2_compile_script` returned "PapyrusCompiler.exe not found" for users who followed the documented placement | v2.6.1 (in-plugin paths added as highest-priority search entries) |
-| `UsePreviousAppDir=yes` made the installer silently default the MO2 target dir to the last-used path on reinstall — users with multiple MO2 instances could land in the wrong one without noticing | v2.7.0 (`UsePreviousAppDir=no`) |
-| .NET 8 Runtime was a soft-block — `MB_YESNOCANCEL`'s `IDNO` branch let install continue without it, producing confusing runtime errors at first patch / record-detail call | v2.7.0 (single-button `MB_OK` + unconditional `ShellExec` to download URL + unconditional `Result := False`) |

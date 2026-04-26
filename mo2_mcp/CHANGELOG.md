@@ -4,6 +4,21 @@ All plugin changes are made in the Dev Build copy first. Once tested and stable,
 
 ---
 
+## Unreleased
+
+Doc cleanup pass — trim per-session token load on Claude-facing docs. No code or behavior changes; will roll into the next installer build.
+
+### Documentation
+
+- **`CLAUDE.md` (184 → 67 lines).** Dropped tool/skill enumeration (already visible to Claude natively via the tool list and auto-loaded skill descriptions), Skyrim modding reference (Claude has this from training), and use-case marketing copy. Added a `tool_paths.json` pointer so Claude doesn't assume default prerequisite paths when locations vary by install.
+- **`KNOWN_ISSUES.md` (198 → 128 lines).** Dropped the v2.7.1 historical section (explicitly self-flagged "preserved for historical context only"; carry-overs already migrated to the v2.8.0 section), the resolved-bugs history table (38 entries — CHANGELOG owns this), the v2.8.0 release narrative ("What's new" subsection + verification trailer), and the Phase 4 three-stream verification methodology detail for Outfit/Spell `attach_scripts` (compressed to one sentence stating the limitation). Inno registry hygiene fix rolled from v2.8 candidate to v2.9 candidate. Section renamed `v2.8.0 patching write surface` → `Patching write surface — current limitations` since the surviving content is current-state, not release notes.
+- **`KNOWLEDGEBASE.md` (12 → 9 lines).** Removed stale `CLAUDE.md` skill-inventory cross-ref (CLAUDE.md no longer carries that inventory after this pass); dropped "Remaining" framing; collapsed single-row table to a bullet.
+- **`dev/README.md` (23 → 19 lines, repo-only — gitignored).** Removed human-contributor onboarding language; reframed as Claude-facing navigational doc with append-only rule promoted to the lead. Disambiguated `archive/` path as sibling-of-repo. Added KNOWN_ISSUES to the "current state" pointer list.
+
+Net: ~190 lines cut from docs loaded every session, plus repo-only dev/README.md tightening.
+
+---
+
 ## v2.8.0 — 2026-04-26
 
 Verification + Effects-list write capability + Phase 4 bridge fixes & matrix-accuracy hygiene. Bridge support for `set_fields: {Effects: [...]}` on SPEL/ALCH/ENCH/SCRL/INGR records — surfaced from a real consumer's custom-race rebuild patch hitting the gap during v2.7.1's first-day use. Plus a bonus-catch fix for single-field FormLink writes via `set_fields`, surfaced deterministically by Phase 1's smoke. v2.8 was originally scoped as pure verification; the Effects-list addition is a bounded re-scope (one new mechanism, five record types). Phase 2/3/4 ran the verification matrix and folded the surfaced bridge bugs and matrix-accuracy findings into this release rather than punting to v2.9 — single bridge SHA, single ship.

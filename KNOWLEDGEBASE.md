@@ -1,11 +1,9 @@
 # KNOWLEDGEBASE.md — KB File Index
 
-Task-specific procedures and category-specific tool references live as skills under `.claude/skills/` and are auto-loaded by Claude Code when their trigger descriptions match the current task. See `CLAUDE.md` for the full skill inventory.
+Task-specific procedures and category-specific tool references live as skills in `.claude/skills/`, auto-loaded by Claude Code on trigger match.
 
-## Remaining KB Files
+## KB files
 
-| File | Load When |
-|---|---|
-| **kb/KB_Tools.md** | Any session using MCP tools (always load) — core tools, FormID format, field interpretation output types, pointer to category skills |
+- **`kb/KB_Tools.md`** — load for any MCP session. Core tool reference, FormID display format, field interpretation output types.
 
-Addon files (`CLAUDE_*.md`) may add their own KB files — load them per the addon's routing guidance.
+Addon files (`CLAUDE_*.md`) may add their own KB files — load per the addon's routing guidance.

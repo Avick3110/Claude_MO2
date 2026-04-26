@@ -4,7 +4,7 @@
 **Status:** Complete — Pareto lock A (max-band) received via conductor relay; MATRIX update landed in same session; ready for commit + push
 **Date:** 2026-04-26
 **Session length:** ~3.5h
-**Commits made:** TBD (work commit + hash-record commit per double-commit cadence — landing immediately after this handoff edit)
+**Commits made:** `6944372` (work) + this hash-record commit
 **Live install synced:** No (Phase 1 is probe + audit doc + MATRIX update only; live untouched at v2.8.0)
 
 ## What was done

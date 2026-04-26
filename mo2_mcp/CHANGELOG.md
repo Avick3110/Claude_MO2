@@ -19,6 +19,136 @@ Net: ~190 lines cut from docs loaded every session, plus repo-only dev/README.md
 
 ---
 
+## v2.9.0 — TBD
+
+<Phase 5 fills in date.>
+
+Generic Condition-function parameter dispatch — a reusable infrastructure that
+generalizes v2.8.0's single-purpose `actor_value` handler into a reflection-based
+slot router. Phase 2A wires the FormLink-typed slot space (119 functions:
+113 `IFormLinkOrIndex<T>` + 6 sub-A `IFormLink<T>`); Phase 2B/2C/2D extend the
+same dispatcher to enum, multi-slot, and primitive shapes within the v2.9.x
+release line.
+
+### Added — bridge
+
+- **Generic Condition-function parameter dispatch (`add_conditions parameters` map).**
+  Each `add_conditions` entry now accepts an optional `parameters: {SlotName: Value}`
+  map. SlotName matches Mutagen's reflection property name on the function's
+  `{Function}ConditionData` class (e.g. `parameters: {Object: "<formid>"}` for
+  GetIsID, `parameters: {Faction: "<formid>"}` for GetInFaction, `parameters:
+  {Perk: "<formid>"}` for HasPerk). Each value's runtime type drives the
+  marshalling: string FormID → `IFormLinkOrIndex<T>` / `IFormLink<T>` (P2A scope).
+  v2.9.0 P2A in-scope set: **119 functions** (113 single-`IFormLinkOrIndex<T>` +
+  6 sub-A single-`IFormLink<T>`). The 6 sub-A functions are the GetVATSValue*
+  family (GetVATSValueCriticalEffect, GetVATSValueCriticalEffectOrList,
+  GetVATSValueTarget, GetVATSValueTargetOrList, GetVATSValueWeapon,
+  GetVATSValueWeaponOrList — all carrying a `Value` slot of `IFormLink<T>`,
+  distinct from the FLI ctor pattern). Functions outside the in-scope set
+  called with `parameters` surface a clean per-record "not yet wired" error
+  naming the function and pointing at KNOWN_ISSUES.md; called without
+  `parameters` they preserve v2.7.1+ behavior (structurally-valid but
+  always-false, identical to pre-v2.9 behavior — back-compat). Per-function
+  slot signatures live in `dev/plans/v2.9.X_condition_parameters/CONDITIONS_AUDIT.md`,
+  the audit produced by Phase 1's full Mutagen-0.53.1 inventory probe.
+
+- **Footgun-guard for CTDA padding slots.** The dispatcher rejects any
+  `parameters` key whose name contains `"Unused"`. Mutagen 0.53.1's
+  `*ConditionData` types uniformly mirror CTDA's 4-parameter binary format
+  with `*Unused*Parameter*` slots that are never set in practice (1436
+  padding slots across 424 functions). Reflection lookup would technically
+  succeed on these slots, so a typo'd intentional slot name could land on
+  padding silently. The guard surfaces this as a clean error rather than
+  producing a structurally-valid-but-meaningless condition.
+
+- **Back-compat preservation: `actor_value` field stays live.** The v2.8.0
+  `actor_value` JSON field continues to work as syntactic sugar for
+  `parameters: {ActorValue: ...}` (handled by the existing `actor_value`
+  handler in `BuildCondition`; P2A leaves this path untouched). Supplying
+  both forms on the same condition surfaces an unambiguous-DSL error.
+
+### Architecture
+
+- **`RouteParameterSlot(condData, condDataType, functionName, slotName, jsonValue)`**
+  in `tools/mutagen-bridge/PatchEngine.cs`. Generic dispatcher: footgun-guard at
+  top → reflection-property lookup on the ConditionData class → branch on
+  `prop.PropertyType` (`IFormLinkOrIndex<T>` parent + FormKey ctor pattern,
+  generalized from v2.8.0's Global handler; `IFormLink<T>` simpler single-FormKey
+  ctor pattern for sub-A absorption). Other slot shapes (Enum, Int32, Single,
+  Boolean) throw a clean "shape not yet wired in P2A — landing in P2B/P2C/P2D"
+  error; that path is guarded by a `KnownParameterizedFunctions` set populated
+  with the 119 P2A function names. Subsequent phases extend the set + the
+  dispatcher's branch coverage; no new mechanism needed.
+
+- **`KnownParameterizedFunctions` static frozen set** in `PatchEngine.cs`. Holds
+  the 119 P2A function names. Functions in the set route through the dispatcher;
+  functions NOT in the set + caller-supplied `parameters` → out-of-scope error;
+  functions NOT in the set + no `parameters` → preserves v2.7.1+ behavior. NoParam
+  functions (219) are NOT in the set per `CONDITIONS_AUDIT.md § NoParam handling`
+  — they accept parameterless invocation as v2.7.1+ behavior unchanged.
+
+### Tests
+
+- **+134 v2.9 P2A coverage-smoke cells** under `tools/coverage-smoke/Program.cs`:
+  119 Layer 1.P.FormLink positives (1 canary + 118 bulk via helper-driven loop),
+  6 Layer 1.D representative negatives (FLI bad FormID, sub-A IFormLink<T> bad
+  FormID, sub-B out-of-scope, no-such-slot, NoParam back-compat, NoParam +
+  parameters → out-of-scope), 1 Layer 2.03 (Effects-list × HasPerk composition),
+  3 Layer 4.dsl.* (DSL-ambiguity error + actor_value back-compat — 4.dsl.03
+  SKIP-with-reason pending P2B Enum branch), 3 Layer 4.formid.* (FormID parse +
+  unresolved-plugin + record-absent), 1 Layer 4.slot.04 (footgun-guard), and 2
+  SKIP-with-reason cells (2.05 + 4.dsl.03 awaiting P2B). Total smoke surface:
+  160 v2.8.0 baseline + 134 P2A new = 294, all PASS or documented SKIP.
+- **+7 race-probe canary probes** under `tools/race-probe/Program.cs`: 5
+  representative functions across `IFormLinkOrIndex<T>` (GetIsID/Object,
+  HasMagicEffect/MagicEffect, GetInFaction/Faction) + `IFormLink<T>`
+  (GetVATSValueWeapon/Value, GetVATSValueTarget/Value), plus 2 footgun-guard
+  probes (SecondUnusedIntParameter, FirstUnusedStringParameter). In-process
+  Mutagen-direct round-trips; complement coverage-smoke's bridge-subprocess path.
+
+### Documentation
+
+- **`tools_patching.py` schema** — added the v2.9 `parameters` key to the
+  `add_conditions` description with a concise per-shape slot-type table
+  pointing at CONDITIONS_AUDIT.md, plus the footgun-guard note.
+- **`KNOWN_ISSUES.md`** — moved "Other Condition-function parameter slots"
+  from carry-over to a covered-for entry naming the v2.9.0 P2A in-scope
+  119-function set, and added the 2B/2C/2D/sub-B gaps still open.
+- **PLAN.md + MATRIX.md plan-amend** at `5a06179` — folded six architectural
+  surprises CONDITIONS_AUDIT.md surfaced during Phase 1: GetIsID slot is
+  `Object` not `Reference`, dynamic base-prop detection replaces static skip
+  list, sub-B 6-function deferral list, IFormLink<T> as 6th slot type in the
+  dispatcher, and MATRIX residuals (Scenario 3.1 + Layer 4.formid.* + harness
+  output convention).
+
+### Out of scope (v2.9.x candidates within release line)
+
+- **41 Enum-typed Condition functions** (Phase 2B). ActorValue family + 38
+  others. Dispatcher Enum branch + KnownParameterizedFunctions extension.
+- **28 MultiSlot Condition functions** (Phase 2C). GetStageDone + GetEventData
+  (3-slot mixed: Function/Member nested System.Enum + Record IFormLink) + 26
+  others. Exercises per-slot composition through the existing dispatcher
+  foreach; new code is just the Enum branch from 2B + the additional functions
+  in KnownParameterizedFunctions.
+- **11 PrimitiveOnly Condition functions** (Phase 2D). Direct Int32 / Single /
+  Boolean conversion via `JsonElement.GetInt32()` / `GetSingle()` /
+  `GetBoolean()`.
+- **6 sub-B Condition functions with String-typed slots** (deferred to v2.9.x
+  point release): GetGraphVariableFloat, GetGraphVariableInt, GetQuestVariable,
+  GetScriptVariable, GetVMQuestVariable, GetVMScriptVariable. Routing requires
+  an accept-any-string operator surface decision (Papyrus / Behavior-Graph
+  runtime identifiers can't be validated at write time).
+
+### Carry-overs from v2.8.0 (still deferred)
+
+- **Quest condition disambiguation** (`DialogConditions` / `EventConditions`).
+- **AMMO enchantment.** Mutagen schema gap; upstream change required.
+- **Replace-semantics whole-dict assignment** (Tier C dicts).
+- **Chained dict access** (`Foo[Key].Sub`).
+- **QUST.Aliases / Stages / Objectives, PERK.Effects.**
+
+---
+
 ## v2.8.0 — 2026-04-26
 
 Verification + Effects-list write capability + Phase 4 bridge fixes & matrix-accuracy hygiene. Bridge support for `set_fields: {Effects: [...]}` on SPEL/ALCH/ENCH/SCRL/INGR records — surfaced from a real consumer's custom-race rebuild patch hitting the gap during v2.7.1's first-day use. Plus a bonus-catch fix for single-field FormLink writes via `set_fields`, surfaced deterministically by Phase 1's smoke. v2.8 was originally scoped as pure verification; the Effects-list addition is a bounded re-scope (one new mechanism, five record types). Phase 2/3/4 ran the verification matrix and folded the surfaced bridge bugs and matrix-accuracy findings into this release rather than punting to v2.9 — single bridge SHA, single ship.

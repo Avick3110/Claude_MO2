@@ -18,7 +18,7 @@
 ; 5. Reports which optional tools are detected post-install.
 
 #define AppName "Claude MO2"
-#define AppVersion "2.8.0"
+#define AppVersion "2.9.0"
 #define AppPublisher "Aaronavich"
 #define AppURL "https://github.com/Aaronavich/claude-mo2"
 #define PluginFolder "mo2_mcp"

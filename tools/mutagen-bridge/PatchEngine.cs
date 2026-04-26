@@ -1625,9 +1625,12 @@ public class PatchEngine
         // expose an `ActorValue` enum property on the data record. Without
         // this routing, the enum defaults to index 0 (Aggression), which is
         // semantically meaningless for typical "GetActorValue Health >= 50"
-        // checks. Scope-locked to ActorValue per Phase 4 plan; other
-        // Condition-function parameter slots (FormLink-typed args on
-        // GetIsID / GetInFaction / GetInCell / etc.) stay v2.9 candidates.
+        // checks. Scope-locked to ActorValue per Phase 4 plan.
+        // v2.9 — retained as back-compat syntactic sugar for
+        // `parameters: {ActorValue: "..."}`; the new generic dispatcher
+        // (RouteParameterSlot) handles the equivalent slot through reflection.
+        // Supplying both forms for the same condition is an unambiguous-DSL
+        // violation — see the v2.9 dispatcher block below.
         if (!string.IsNullOrEmpty(ce.ActorValue))
         {
             var avProp = condDataType.GetProperty("ActorValue",
@@ -1642,6 +1645,44 @@ public class PatchEngine
                 throw new ArgumentException(
                     $"Unknown actor_value: '{ce.ActorValue}' — must be a Mutagen ActorValue enum name (e.g. 'Health', 'Magicka', 'Stamina', 'OneHanded', 'Sneak').");
             avProp.SetValue(condData, avValue);
+        }
+
+        // v2.9 — generic Condition-function parameter dispatch. Routes each
+        // entry of ce.Parameters to the function's ConditionData via
+        // reflection. Functions not in KnownParameterizedFunctions surface
+        // a clean per-record "not yet wired" error per PLAN § C; functions
+        // in the set route per-slot through RouteParameterSlot. The v2.8
+        // actor_value handler above stays live as back-compat sugar.
+        if (ce.Parameters != null && ce.Parameters.Count > 0)
+        {
+            // DSL-ambiguity check: actor_value + parameters.ActorValue both
+            // supplied = error. Per PLAN § A back-compat contract. Layer 4.dsl.01.
+            if (!string.IsNullOrEmpty(ce.ActorValue)
+                && ce.Parameters.ContainsKey("ActorValue"))
+            {
+                throw new ArgumentException(
+                    "Both 'actor_value' and 'parameters: {ActorValue: ...}' supplied — choose one. " +
+                    "The v2.8 'actor_value' field is back-compat syntactic sugar for the v2.9 " +
+                    "'parameters: {ActorValue: ...}' form; supplying both is ambiguous.");
+            }
+
+            // Out-of-scope check: function not in v2.9.0 in-scope set.
+            if (!KnownParameterizedFunctions.Contains(ce.Function))
+            {
+                var slotNames = string.Join(", ", ce.Parameters.Keys);
+                throw new ArgumentException(
+                    $"Condition function '{ce.Function}' has parameter slots ({slotNames}) " +
+                    "that v2.9.0 does not yet wire. Authoring this function with parameters today " +
+                    "produces a structurally-valid but always-false condition. " +
+                    "v2.9.0 in-scope set: see KNOWN_ISSUES.md § Condition-parameter coverage. " +
+                    "Please file a Live Reported Bug if you need this function added.");
+            }
+
+            // Per-slot dispatch.
+            foreach (var kvp in ce.Parameters)
+            {
+                RouteParameterSlot(condData, condDataType, ce.Function, kvp.Key, kvp.Value);
+            }
         }
 
         Condition condition;
@@ -1693,6 +1734,248 @@ public class PatchEngine
             condition.Flags |= Condition.Flag.OR;
 
         return condition;
+    }
+
+    /// <summary>
+    /// v2.9.0 P2A — frozen set of Condition function names whose
+    /// parameter slots the bridge dispatches via <see cref="RouteParameterSlot"/>.
+    /// Sourced from CONDITIONS_AUDIT.md (Mutagen 0.53.1 inventory probe).
+    /// 119 functions total: 113 single-<c>IFormLinkOrIndex&lt;T&gt;</c> + 6
+    /// sub-A single-<c>IFormLink&lt;T&gt;</c> (GetVATSValue* family).
+    /// Subsequent phases extend: 2B adds 41 Enum, 2C adds 28 MultiSlot
+    /// (incl. GetEventData), 2D adds 11 PrimitiveOnly. NoParam (219) is
+    /// in-scope-no-op — they accept parameterless invocation as v2.7.1+
+    /// behavior; supplying <c>parameters</c> for a NoParam function fires
+    /// the natural slot-name-not-found path or the out-of-scope check.
+    /// Sub-B (6 String-typed VariableName/GraphVariable functions) deferred
+    /// to v2.9.x — see PLAN.md § Carry-overs entry 7.
+    /// </summary>
+    private static readonly HashSet<string> KnownParameterizedFunctions = new(StringComparer.Ordinal)
+    {
+        // ── 113 IFormLinkOrIndex<T> functions (scratch lines 1220–1447) ──
+        "CanPayCrimeGold",
+        "EPAlchemyEffectHasKeyword",
+        "EPMagic_SpellHasKeyword",
+        "EPModSkillUsage_AdvanceObjectHasKeyword",
+        "EPTemperingItemHasKeyword",
+        "Exists",
+        "GetCombatTargetHasKeyword",
+        "GetCrimeGold",
+        "GetCrimeGoldNonviolent",
+        "GetCrimeGoldViolent",
+        "GetDeadCount",
+        "GetDetected",
+        "GetDistance",
+        "GetEquipped",
+        "GetEquippedShout",
+        "GetFactionRank",
+        "GetFactionRelation",
+        "GetGlobalValue",
+        "GetHeadingAngle",
+        "GetInCell",
+        "GetInContainer",
+        "GetInCurrentLoc",
+        "GetInCurrentLocFormList",
+        "GetInFaction",
+        "GetInSameCell",
+        "GetInSharedCrimeFaction",
+        "GetInWorldspace",
+        "GetInZone",
+        "GetInfamy",
+        "GetInfamyNonViolent",
+        "GetInfamyViolent",
+        "GetIsClass",
+        "GetIsClassDefault",
+        "GetIsCrimeFaction",
+        "GetIsCurrentPackage",
+        "GetIsCurrentWeather",
+        "GetIsEditorLocation",
+        "GetIsID",
+        "GetIsRace",
+        "GetIsReference",
+        "GetIsUsedItem",
+        "GetIsUsedItemEquipType",
+        "GetIsVoiceType",
+        "GetItemCount",
+        "GetKeywordDataForCurrentLocation",
+        "GetKeywordItemCount",
+        "GetLineOfSight",
+        "GetLocationCleared",
+        "GetPCEnemyofFaction",
+        "GetPCExpelled",
+        "GetPCFactionAttack",
+        "GetPCFactionMurder",
+        "GetPCInFaction",
+        "GetPCIsClass",
+        "GetPCIsRace",
+        "GetQuestCompleted",
+        "GetQuestRunning",
+        "GetRelationshipRank",
+        "GetShouldAttack",
+        "GetShouldHelp",
+        "GetSpellUsageNum",
+        "GetStage",
+        "GetStolenItemValue",
+        "GetStolenItemValueNoCrime",
+        "GetTalkedToPCParam",
+        "GetTargetHeight",
+        "GetThreatRatio",
+        "GetVATSBackAreaFree",
+        "GetVATSFrontAreaFree",
+        "GetVATSFrontTargetVisible",
+        "GetVATSLeftAreaFree",
+        "GetVATSLeftTargetVisible",
+        "GetVATSRightAreaFree",
+        "GetVATSRightTargetVisible",
+        "HasAssociationTypeAny",
+        "HasFamilyRelationship",
+        "HasKeyword",
+        "HasLinkedRef",
+        "HasMagicEffect",
+        "HasMagicEffectKeyword",
+        "HasParentRelationship",
+        "HasPerk",
+        "HasRefType",
+        "HasShout",
+        "HasSpell",
+        "IsAttackType",
+        "IsCombatTarget",
+        "IsCurrentFurnitureObj",
+        "IsCurrentFurnitureRef",
+        "IsHostileToActor",
+        "IsInList",
+        "IsKiller",
+        "IsKillerObject",
+        "IsLastIdlePlayed",
+        "IsLocationLoaded",
+        "IsOwner",
+        "IsPlayerGrabbedRef",
+        "IsPlayerInRegion",
+        "IsScenePlaying",
+        "IsSpellTarget",
+        "IsTalkingActivatorActor",
+        "IsWarningAbout",
+        "IsWeaponInList",
+        "LocationHasKeyword",
+        "LocationHasRefType",
+        "PlayerKnows",
+        "SameFaction",
+        "SameRace",
+        "SameSex",
+        "ShouldAttackKill",
+        "SpellHasCastingPerk",
+        "WornApparelHasKeywordCount",
+        "WornHasKeyword",
+
+        // ── 6 sub-A IFormLink<T> functions (CONDITIONS_AUDIT.md § Sub-A) ──
+        "GetVATSValueCriticalEffect",
+        "GetVATSValueCriticalEffectOrList",
+        "GetVATSValueTarget",
+        "GetVATSValueTargetOrList",
+        "GetVATSValueWeapon",
+        "GetVATSValueWeaponOrList",
+    };
+
+    /// <summary>
+    /// v2.9.0 P2A — generic Condition-function parameter dispatcher. Routes
+    /// one (slotName, jsonValue) entry from <see cref="ConditionEntry.Parameters"/>
+    /// to the corresponding reflection property on a <c>{Function}ConditionData</c>
+    /// instance. Branches in 2A: <c>IFormLinkOrIndex&lt;T&gt;</c> (existing
+    /// Global-handler pattern — parent + FormKey ctor) and <c>IFormLink&lt;T&gt;</c>
+    /// (sub-A absorption — single FormKey ctor). Other slot types (Enum, Int32,
+    /// Single, Boolean) throw "shape not yet wired in 2A — landing in 2B/2D"
+    /// — they're guarded by KnownParameterizedFunctions which 2A does not
+    /// include those shapes' functions in.
+    /// Footgun-guard: rejects any slot name containing <c>"Unused"</c> per
+    /// CONDITIONS_AUDIT.md § Architectural surprises §3 (CTDA padding pattern).
+    /// 1436 *Unused*Parameter* slots exist across 424 ConditionData types as
+    /// padding mirroring CTDA's 4-parameter binary format; reflection lookup
+    /// would technically succeed on them, so a typo'd intentional slot name
+    /// could land on padding silently. The guard surfaces this as a clean
+    /// error.
+    /// </summary>
+    private static void RouteParameterSlot(
+        ConditionData condData,
+        Type condDataType,
+        string functionName,
+        string slotName,
+        JsonElement jsonValue)
+    {
+        // Footgun-guard — reject CTDA padding slot names. Per audit §3.
+        if (slotName.Contains("Unused", StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"Parameter slot name '{slotName}' on function '{functionName}' looks like " +
+                "a CTDA padding slot (the *Unused*Parameter* pattern Mutagen mirrors from " +
+                "CTDA's 4-parameter binary format). These are never set in practice; this is " +
+                "almost certainly a typo of the intended slot name. " +
+                "See CONDITIONS_AUDIT.md § Architectural surprises §3.");
+        }
+
+        var prop = condDataType.GetProperty(slotName,
+            BindingFlags.Public | BindingFlags.Instance);
+        if (prop == null)
+        {
+            throw new ArgumentException(
+                $"Function '{functionName}' has no parameter slot named '{slotName}' " +
+                $"on its Mutagen ConditionData ({condDataType.Name}). " +
+                "Slot names are case-sensitive Mutagen reflection property names — " +
+                "see CONDITIONS_AUDIT.md for the v2.9.0 in-scope per-function slot signatures.");
+        }
+
+        var propType = prop.PropertyType;
+
+        // IFormLinkOrIndex<T> branch — existing v2.8 Global-handler pattern.
+        // FormLinkOrIndex<T> ctor: (parent: ConditionData, key: FormKey).
+        if (propType.IsGenericType
+            && propType.GetGenericTypeDefinition().Name.StartsWith("IFormLinkOrIndex"))
+        {
+            if (jsonValue.ValueKind != JsonValueKind.String)
+            {
+                throw new ArgumentException(
+                    $"Parameter slot '{slotName}' on function '{functionName}' expects a " +
+                    $"FormID string (e.g. \"Skyrim.esm:0001A696\"); got JSON {jsonValue.ValueKind}.");
+            }
+            var formKey = FormIdHelper.Parse(jsonValue.GetString()!);
+            var targetType = propType.GetGenericArguments()[0];
+            var concreteType = typeof(FormLinkOrIndex<>).MakeGenericType(targetType);
+            var newInstance = System.Activator.CreateInstance(concreteType,
+                new object[] { condData, formKey });
+            prop.SetValue(condData, newInstance);
+            return;
+        }
+
+        // IFormLink<T> branch (NOT IFormLinkOrIndex) — sub-A absorption.
+        // FormLink<T> ctor: (key: FormKey). Distinct from IFormLinkOrIndex<T>'s
+        // parent + FormKey ctor; FormLink<T> doesn't carry a parent reference.
+        if (propType.IsGenericType
+            && propType.GetGenericTypeDefinition() == typeof(IFormLink<>))
+        {
+            if (jsonValue.ValueKind != JsonValueKind.String)
+            {
+                throw new ArgumentException(
+                    $"Parameter slot '{slotName}' on function '{functionName}' expects a " +
+                    $"FormID string (e.g. \"Skyrim.esm:0001A696\"); got JSON {jsonValue.ValueKind}.");
+            }
+            var formKey = FormIdHelper.Parse(jsonValue.GetString()!);
+            var targetType = propType.GetGenericArguments()[0];
+            var concreteType = typeof(FormLink<>).MakeGenericType(targetType);
+            var newInstance = System.Activator.CreateInstance(concreteType, formKey);
+            prop.SetValue(condData, newInstance);
+            return;
+        }
+
+        // Other shapes (Enum, Int32, Single, Boolean) — out of scope for 2A.
+        // Phase 2B adds the Enum branch; 2C adds MultiSlot composition (which
+        // exercises this dispatcher per-slot); 2D adds the primitive branches.
+        // Reaching here in 2A means a function got into KnownParameterizedFunctions
+        // whose slot type isn't FLI or IFormLink — caller bug or future-phase
+        // extension drift; surface clean error rather than silent default.
+        throw new InvalidOperationException(
+            $"Parameter slot '{slotName}' on function '{functionName}' has type " +
+            $"'{propType.FullName}' which v2.9.0 P2A does not yet route. " +
+            "P2A covers IFormLinkOrIndex<T> + IFormLink<T>; subsequent phases " +
+            "extend to enum / int / float / bool. See KNOWN_ISSUES.md.");
     }
 
     /// <summary>

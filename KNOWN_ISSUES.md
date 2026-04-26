@@ -1,12 +1,37 @@
 # Known Issues & Limitations
 
-Current as of v2.8.0. These are known limitations, not bugs. For the full version history see `mo2_mcp/CHANGELOG.md`.
+Current as of v2.9.0. These are known limitations, not bugs. For the full version history see `mo2_mcp/CHANGELOG.md`.
+
+---
+
+## Condition-parameter coverage (v2.9.0 P2A)
+
+v2.9.0 P2A wires the **generic Condition-function parameter dispatch surface** for 119 functions covering the FormLink-typed slot space:
+
+- **113 single-`IFormLinkOrIndex<T>` functions** — `GetIsID` (Object), `GetInFaction` (Faction), `GetInCell` (Cell), `HasMagicEffect` (MagicEffect), `HasPerk` (Perk), `HasSpell` (Spell), `GetIsRace` (Race), `HasKeyword` (Keyword), `IsInList` (FormList), `GetItemCount` (ItemOrList), `GetEquipped` (ItemOrList), `WornHasKeyword` (Keyword), `GetGlobalValue` (Global), `GetStage` (Quest), `GetQuestRunning` (Quest), `GetIsCurrentWeather` (Weather), `GetIsCurrentPackage` (Package), `IsScenePlaying` (Scene), `GetEquippedShout` (Shout), `IsLastIdlePlayed` (IdleAnimation), `IsPlayerInRegion` (Region), and many others. See `dev/plans/v2.9.X_condition_parameters/CONDITIONS_AUDIT.md` for the full per-function slot signatures.
+- **6 sub-A single-`IFormLink<T>` functions** — `GetVATSValueCriticalEffect`, `GetVATSValueCriticalEffectOrList`, `GetVATSValueTarget`, `GetVATSValueTargetOrList`, `GetVATSValueWeapon`, `GetVATSValueWeaponOrList` (all with the `Value` slot, distinct concrete shape from the FLI branch).
+
+DSL: each `add_conditions` entry accepts a `parameters: {SlotName: Value}` map. SlotName is the Mutagen reflection property name on the function's `{Function}ConditionData` class. The v2.8 `actor_value` field is preserved as back-compat syntactic sugar for `parameters: {ActorValue: ...}`; supplying both surfaces an unambiguous-DSL error.
+
+Functions outside this set called with `parameters` surface a clean per-record "not yet wired" error naming the function and pointing at this section. Called without `parameters` they preserve v2.7.1+ behavior (structurally-valid but always-false).
+
+Footgun-guard: any slot name containing `"Unused"` is rejected (CTDA padding pattern — these slots exist in Mutagen's schema as a mirror of CTDA's 4-parameter binary format but are never set in practice).
+
+### Condition-parameter coverage — gaps still open in v2.9.0
+
+These are **2B/2C/2D scope** within the v2.9.x release line:
+
+- **41 enum-typed Condition functions** (Phase 2B). `GetActorValue` / `GetBaseActorValue` / `GetActorValuePercent` (ActorValue enum), `GetIsSex` (MaleFemaleGender), `GetEquippedItemType` (CastSource), `GetIsObjectType` (FormType), and 35 others. Each has a single enum slot routable through `Enum.Parse` — the dispatcher just needs the Enum branch added to `RouteParameterSlot`. ActorValue is back-compat-supported via the `actor_value` field today.
+- **28 multi-slot Condition functions** (Phase 2C). `GetStageDone` (Quest + Stage), `GetEventData` (Function + Member + Record — Function/Member are both nested System.Enum, Record is IFormLink absorbed under sub-A's branch), and 26 others. Multi-slot composition exercises the dispatcher's per-slot foreach.
+- **11 primitive-only Condition functions** (Phase 2D). Int32 / Single / Boolean slots only — `GetIsAliasRef` (ReferenceAliasIndex Int32), `GetInCurrentLocAlias` (LocationAliasIndex Int32), etc.
+- **6 sub-B Condition functions with String-typed slots** (deferred to v2.9.x point release). `GetGraphVariableFloat`, `GetGraphVariableInt`, `GetQuestVariable`, `GetScriptVariable`, `GetVMQuestVariable`, `GetVMScriptVariable` — each carries a String-typed `VariableName` or `GraphVariable` slot referencing a Papyrus / Behavior-Graph runtime identifier. Routing requires either a new accept-any-string operator surface or an MCP shape for Papyrus introspection round-trip; defer until a real consumer surfaces.
+- **219 NoParam Condition functions** are in-scope-no-op — they accept parameterless invocation as v2.7.1+ behavior; supplying `parameters` for a NoParam function surfaces the same "not yet wired" error path (since they're not in the in-scope set; the dispatcher correctly identifies that "function has no parameter slots" maps to the same out-of-scope rejection).
 
 ---
 
 ## Patching write surface — current limitations
 
-These write-surface gaps are not yet covered by the bridge; v2.9 candidates.
+These write-surface gaps are not yet covered by the bridge; future-release candidates.
 
 - **Replace-semantics whole-dict assignment** (Tier C dicts). The Effects-list array path uses replace-semantics, but the Tier C dict form (`Starting: {Health: 100, Magicka: 200}`) is uniform merge — keys not present in the JSON are preserved at their source values. A clear-then-set surface for dicts would need a new operator parameter or sentinel value.
 - **Chained dict access.** `Foo[Key].Sub` paths are not supported — Tier C is terminal-bracket-only. `set_fields` rejects chained brackets explicitly with a clear error rather than producing wrong behavior.

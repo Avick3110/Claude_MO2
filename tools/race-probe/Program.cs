@@ -1875,11 +1875,110 @@ Section("v2.9 P1 — ConditionData inventory dump");
     }
 }
 
+// ─── v2.9 P2A — dispatcher functional probes (Mutagen-direct, in-process) ───
+//
+// Per Phase 2A kickoff "Race-probe per-function functional probes" deliverable:
+// 5 representative functions across IFormLinkOrIndex<T> + IFormLink<T> branches
+// covering different inner-T shapes, plus a footgun-guard probe. These are
+// in-process Mutagen API-surface checks; bridge subprocess round-trip coverage
+// lives in coverage-smoke (119 positives + 14 negatives/edges).
+//
+// Each probe: construct *ConditionData → simulate RouteParameterSlot's logic
+// inline (FormLinkOrIndex<T>(parent, formKey) for FLI; FormLink<T>(formKey)
+// for IFormLink<T> branch) → reflect the slot back → assert FormKey matches.
+// No file I/O — purely validates that Mutagen 0.53.1's reflection contract
+// holds for the dispatcher's two write patterns.
+
 Console.WriteLine();
-int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures;
+Console.WriteLine("=== v2.9 P2A — dispatcher functional probes (in-process Mutagen-direct) ===");
+int p2aFailures = 0;
+
+void ProbeFLI(string functionName, string slotName, FormKey expectedKey)
+{
+    var typeName = $"Mutagen.Bethesda.Skyrim.{functionName}ConditionData";
+    var t = typeof(IConditionData).Assembly.GetType(typeName);
+    if (t == null) { Console.WriteLine($"  [{functionName,-30}] FAIL: type {typeName} not found"); p2aFailures++; return; }
+    var condData = (Mutagen.Bethesda.Skyrim.ConditionData)System.Activator.CreateInstance(t)!;
+    var prop = t.GetProperty(slotName, BindingFlags.Public | BindingFlags.Instance);
+    if (prop == null) { Console.WriteLine($"  [{functionName,-30}] FAIL: no {slotName} property on {typeName}"); p2aFailures++; return; }
+    if (!prop.PropertyType.IsGenericType ||
+        !prop.PropertyType.GetGenericTypeDefinition().Name.StartsWith("IFormLinkOrIndex"))
+    { Console.WriteLine($"  [{functionName,-30}] FAIL: {slotName} is {prop.PropertyType.Name}, not IFormLinkOrIndex<T>"); p2aFailures++; return; }
+    var inner = prop.PropertyType.GetGenericArguments()[0];
+    var concreteType = typeof(Mutagen.Bethesda.Plugins.FormLinkOrIndex<>).MakeGenericType(inner);
+    var inst = System.Activator.CreateInstance(concreteType, new object[] { condData, expectedKey });
+    prop.SetValue(condData, inst);
+    var readBack = prop.GetValue(condData);
+    var linkProp = readBack!.GetType().GetProperty("Link", BindingFlags.Public | BindingFlags.Instance);
+    var linkVal = linkProp!.GetValue(readBack);
+    var fkProp = linkVal!.GetType().GetProperty("FormKey", BindingFlags.Public | BindingFlags.Instance);
+    var fkVal = fkProp!.GetValue(linkVal);
+    if (!expectedKey.Equals(fkVal))
+    { Console.WriteLine($"  [{functionName,-30}] FAIL: expected {expectedKey}, got {fkVal}"); p2aFailures++; return; }
+    Console.WriteLine($"  [{functionName,-30}] PASS  FLI {slotName}<{inner.Name}> round-trip ✓");
+}
+
+void ProbeIFormLink(string functionName, string slotName, FormKey expectedKey)
+{
+    var typeName = $"Mutagen.Bethesda.Skyrim.{functionName}ConditionData";
+    var t = typeof(IConditionData).Assembly.GetType(typeName);
+    if (t == null) { Console.WriteLine($"  [{functionName,-30}] FAIL: type {typeName} not found"); p2aFailures++; return; }
+    var condData = (Mutagen.Bethesda.Skyrim.ConditionData)System.Activator.CreateInstance(t)!;
+    var prop = t.GetProperty(slotName, BindingFlags.Public | BindingFlags.Instance);
+    if (prop == null) { Console.WriteLine($"  [{functionName,-30}] FAIL: no {slotName} property on {typeName}"); p2aFailures++; return; }
+    if (!prop.PropertyType.IsGenericType ||
+        prop.PropertyType.GetGenericTypeDefinition() != typeof(Mutagen.Bethesda.Plugins.IFormLink<>))
+    { Console.WriteLine($"  [{functionName,-30}] FAIL: {slotName} is {prop.PropertyType.Name}, not IFormLink<T>"); p2aFailures++; return; }
+    var inner = prop.PropertyType.GetGenericArguments()[0];
+    var concreteType = typeof(Mutagen.Bethesda.Plugins.FormLink<>).MakeGenericType(inner);
+    var inst = System.Activator.CreateInstance(concreteType, expectedKey);
+    prop.SetValue(condData, inst);
+    var readBack = prop.GetValue(condData);
+    // IFormLink<T> exposes FormKey directly (no .Link wrapper).
+    var fkProp = readBack!.GetType().GetProperty("FormKey", BindingFlags.Public | BindingFlags.Instance);
+    var fkVal = fkProp!.GetValue(readBack);
+    if (!expectedKey.Equals(fkVal))
+    { Console.WriteLine($"  [{functionName,-30}] FAIL: expected {expectedKey}, got {fkVal}"); p2aFailures++; return; }
+    Console.WriteLine($"  [{functionName,-30}] PASS  IFormLink<{inner.Name}> round-trip ✓");
+}
+
+void ProbeFootgunGuard(string functionName, string paddingSlotName)
+{
+    // Replicate dispatcher's footgun-guard logic — slot names containing
+    // "Unused" must be rejected even though reflection lookup would succeed
+    // (CTDA padding mirror of 4-parameter binary format). Per CONDITIONS_AUDIT.md
+    // § Architectural surprises §3.
+    bool guardFires = paddingSlotName.Contains("Unused", StringComparison.Ordinal);
+    if (!guardFires)
+    { Console.WriteLine($"  [footgun-guard ({paddingSlotName,-25})] FAIL: guard didn't recognize padding pattern"); p2aFailures++; return; }
+    // Confirm Mutagen also exposes the slot via reflection (so the guard is
+    // load-bearing — without it, this slot WOULD be writable through the
+    // dispatcher and silently land on padding).
+    var typeName = $"Mutagen.Bethesda.Skyrim.{functionName}ConditionData";
+    var t = typeof(IConditionData).Assembly.GetType(typeName);
+    var prop = t?.GetProperty(paddingSlotName, BindingFlags.Public | BindingFlags.Instance);
+    if (prop == null)
+    { Console.WriteLine($"  [footgun-guard ({paddingSlotName,-25})] PASS (no-op — Mutagen doesn't expose {paddingSlotName} on {functionName}; guard would still fire on the name pattern alone)"); return; }
+    Console.WriteLine($"  [footgun-guard ({paddingSlotName,-25})] PASS  guard recognizes *Unused* + Mutagen exposes the slot (load-bearing) ✓");
+}
+
+// 5 representative probes — one per inner-T shape variation.
+var probeKey = new FormKey(ModKey.FromNameAndExtension("Skyrim.esm"), 0x0001A6E8);
+ProbeFLI("GetIsID",       "Object",      probeKey);  // IFormLinkOrIndex<IReferenceableObjectGetter>
+ProbeFLI("HasMagicEffect","MagicEffect", probeKey);  // IFormLinkOrIndex<IMagicEffectGetter>
+ProbeFLI("GetInFaction",  "Faction",     probeKey);  // IFormLinkOrIndex<IFactionGetter>
+ProbeIFormLink("GetVATSValueWeapon", "Value", probeKey);  // IFormLink<IWeaponGetter>
+ProbeIFormLink("GetVATSValueTarget", "Value", probeKey);  // IFormLink<INpcGetter>
+ProbeFootgunGuard("GetIsID", "SecondUnusedIntParameter");
+ProbeFootgunGuard("GetIsID", "FirstUnusedStringParameter");
+
+Console.WriteLine($"=== v2.9 P2A probes: {(p2aFailures == 0 ? "ALL PASS" : $"{p2aFailures} FAILURE(S)")} ===");
+
+Console.WriteLine();
+int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures;
 if (totalFailures > 0)
 {
-    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
+    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
     Environment.Exit(1);
 }
 Console.WriteLine("=== probe complete ===");

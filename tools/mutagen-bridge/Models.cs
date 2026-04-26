@@ -509,13 +509,37 @@ public class ConditionEntry
     /// supplied, the bridge parses this string via <c>Enum.Parse&lt;ActorValue&gt;</c>
     /// and assigns it to the constructed ConditionData. Without it, the
     /// underlying enum default (index 0 = Aggression) is preserved — the
-    /// pre-v2.8.0 behavior; this field is purely additive. Scope-locked
-    /// to ActorValue per Phase 4 plan; other Condition function parameter
-    /// slots (FormLink-typed args on GetIsID, GetInFaction, etc.) remain
-    /// v2.9 candidates.
+    /// pre-v2.8.0 behavior; this field is purely additive.
+    /// v2.9 — kept as back-compat syntactic sugar for
+    /// <c>parameters: {ActorValue: ...}</c>; both forms route to the same
+    /// ConditionData slot. Supplying both for the same condition surfaces
+    /// an unambiguous-DSL error (see <see cref="Parameters"/>).
     /// </summary>
     [JsonPropertyName("actor_value")]
     public string? ActorValue { get; set; }
+
+    /// <summary>
+    /// v2.9 — generic Condition-function parameter slot map. Each key is a
+    /// Mutagen reflection property name on the function's
+    /// <c>{Function}ConditionData</c> class (e.g. <c>"Object"</c> on
+    /// <c>GetIsIDConditionData</c>, <c>"Faction"</c> on
+    /// <c>GetInFactionConditionData</c>, <c>"Stage"</c> on
+    /// <c>GetStageDoneConditionData</c>). Each value is JSON-typed per the
+    /// slot's runtime type — string FormID for <c>IFormLinkOrIndex&lt;T&gt;</c>
+    /// / <c>IFormLink&lt;T&gt;</c>, string for enum, number for int/float,
+    /// bool for bool. Per-function slot signatures live in
+    /// <c>dev/plans/v2.9.X_condition_parameters/CONDITIONS_AUDIT.md</c>;
+    /// functions outside the v2.9.x in-scope set surface a clean per-record
+    /// "not yet wired" error when <c>parameters</c> is supplied.
+    /// Back-compat: the v2.8 <see cref="ActorValue"/> field is still accepted
+    /// as syntactic sugar for <c>parameters: {ActorValue: ...}</c>; supplying
+    /// both forms for the same condition surfaces an unambiguous-DSL error.
+    /// CTDA padding slots (any name containing "Unused") are explicitly
+    /// rejected by the dispatcher (footgun-guard) — see CONDITIONS_AUDIT.md
+    /// § Architectural surprises §3.
+    /// </summary>
+    [JsonPropertyName("parameters")]
+    public Dictionary<string, JsonElement>? Parameters { get; set; }
 
     [JsonPropertyName("or_flag")]
     public bool OrFlag { get; set; } = false;

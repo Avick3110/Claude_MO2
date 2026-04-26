@@ -5191,6 +5191,1054 @@ else Skip("4.c.01-carry", "no QUST");
     }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// v2.9.0 P2A — Condition-function parameter dispatcher cells
+// ═══════════════════════════════════════════════════════════════
+//
+// Tests 161+ exercise the v2.9.0 generic Condition-parameter dispatch
+// surface: ConditionEntry.Parameters routed through RouteParameterSlot.
+// Phase 2A scope: 119 IFormLinkOrIndex<T> + IFormLink<T> functions, plus
+// negatives + DSL-ambiguity + footgun-guard + out-of-scope error cells.
+// 2B/2C/2D extend with Enum / MultiSlot / PrimitiveOnly shapes.
+//
+// Cell IDs follow MATRIX.md § Layer 1.P / 1.D / 2 / 4 conventions.
+
+// ─── Test 161 [1.P.GetIsID.MGEF] — CANARY: dispatcher routes Object slot ───
+// First v2.9 dispatcher cell — proves the generic foreach-over-Parameters
+// path resolves a FormID through RouteParameterSlot's IFormLinkOrIndex<T>
+// branch into GetIsIDConditionData.Object (the function-specific slot per
+// CONDITIONS_AUDIT.md § Architectural surprises §1; 'Reference' is a base
+// prop, NOT GetIsID's slot).
+{
+    Console.WriteLine($"── Test 161 [1.P.GetIsID.MGEF]: MGEF + add_conditions GetIsID via parameters.Object (v2.9 P2A dispatcher canary) ──");
+    var mgefForCond = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefForCond == null) { Skip("1.P.GetIsID.MGEF", "no MGEF with Conditions container in vanilla Skyrim.esm"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test161-1pGetIsIDMGEF.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        // Lydia (Skyrim.esm:0001A6E8) — well-known vanilla NPC; any NPC FormKey
+        // works for the canary, the slot-routing assertion checks FormKey
+        // round-trip (NOT FormID 0), not record existence.
+        const string targetFormIdStr = "Skyrim.esm:0001A6E8";
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefForCond.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new
+                        {
+                            function = "GetIsID",
+                            @operator = "==",
+                            value = 1f,
+                            parameters = new Dictionary<string, object>
+                            {
+                                ["Object"] = targetFormIdStr,
+                            },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, stderr, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        Console.WriteLine($"  source: {FormatFormKey(mgefForCond.FormKey)} ({mgefForCond.EditorID})");
+        Console.WriteLine($"  target: {targetFormIdStr} (parameters.Object — IFormLinkOrIndex<IReferenceableObjectGetter>)");
+        Console.WriteLine($"  exit: {exit}");
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        bool ok = root.GetProperty("success").GetBoolean();
+        if (!ok) { Console.WriteLine($"  FAIL: bridge reported success=false: {stdout}"); }
+        else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+        else
+        {
+            var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+            var rec = outMod.MagicEffects.FirstOrDefault(m => m.FormKey == mgefForCond.FormKey);
+            if (rec?.Conditions == null || rec.Conditions.Count == 0)
+            { Console.WriteLine("  FAIL: MGEF Conditions missing or empty"); ok = false; }
+            else
+            {
+                // Find the appended GetIsID condition by ConditionData type.
+                var addedCond = rec.Conditions.FirstOrDefault(c =>
+                    c.Data?.GetType().Name == "GetIsIDConditionData");
+                if (addedCond == null)
+                { Console.WriteLine($"  FAIL: no Conditions entry of type GetIsIDConditionData in readback ({rec.Conditions.Count} conditions present)"); ok = false; }
+                else
+                {
+                    // Reflect addedCond.Data.Object — must be a FormLinkOrIndex<IReferenceableObjectGetter>
+                    // with FormKey matching the supplied target (NOT FormID 0 = default).
+                    var objProp = addedCond.Data!.GetType().GetProperty("Object",
+                        BindingFlags.Public | BindingFlags.Instance);
+                    if (objProp == null) { Console.WriteLine("  FAIL: GetIsIDConditionData has no Object property"); ok = false; }
+                    else
+                    {
+                        var objVal = objProp.GetValue(addedCond.Data);
+                        if (objVal == null) { Console.WriteLine("  FAIL: GetIsIDConditionData.Object is null after dispatcher route"); ok = false; }
+                        else
+                        {
+                            // Walk FormLinkOrIndex<T>.Link.FormKey — the read-back wraps the
+                            // FormKey in an IFormLinkNullableGetter<T> at .Link (per Mutagen's
+                            // FormLinkOrIndex.cs line 11). FormKey isn't a direct property on
+                            // FormLinkOrIndex<T> — getting it requires a two-step reflection.
+                            var linkProp = objVal.GetType().GetProperty("Link",
+                                BindingFlags.Public | BindingFlags.Instance);
+                            if (linkProp == null) { Console.WriteLine($"  FAIL: FormLinkOrIndex<T> has no Link property; runtime type = {objVal.GetType().FullName}"); ok = false; }
+                            else
+                            {
+                                var linkVal = linkProp.GetValue(objVal);
+                                if (linkVal == null) { Console.WriteLine("  FAIL: FormLinkOrIndex<T>.Link is null after dispatcher route"); ok = false; }
+                                else
+                                {
+                                    var fkProp = linkVal.GetType().GetProperty("FormKey",
+                                        BindingFlags.Public | BindingFlags.Instance);
+                                    if (fkProp == null) { Console.WriteLine($"  FAIL: Link has no FormKey property; runtime type = {linkVal.GetType().FullName}"); ok = false; }
+                                    else
+                                    {
+                                        var fkVal = fkProp.GetValue(linkVal);
+                                        var fkStr = fkVal?.ToString() ?? "<null>";
+                                        // FormKey.ToString format: "HEXID:plugin.esm" — local ID rendered
+                                        // as 6 hex digits (24-bit) without master-flag bits, plugin name
+                                        // suffix. Bridge input "Skyrim.esm:0001A6E8" canonicalizes to local
+                                        // ID 0x01A6E8 (the leading "00" is the master-flag, dropped).
+                                        // Match the local ID without leading-zero padding to be robust.
+                                        if (!fkStr.Contains("1A6E8", StringComparison.Ordinal) || !fkStr.Contains("Skyrim.esm", StringComparison.Ordinal))
+                                        { Console.WriteLine($"  FAIL: Object.Link.FormKey was \"{fkStr}\", expected to contain \"1A6E8\" + \"Skyrim.esm\""); ok = false; }
+                                        else Console.WriteLine($"  readback: appended condition is GetIsIDConditionData with Object.Link.FormKey={fkStr} ✓ (v2.9 dispatcher canary verified — Object slot resolved through RouteParameterSlot's IFormLinkOrIndex<T> branch, NOT default FormID 0)");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Console.WriteLine(ok ? "  PASS" : "  FAIL");
+        if (!ok) failures++;
+        Console.WriteLine();
+    }
+}
+
+// ─── Tests 162–279 [1.P.<Function>.MGEF] — bulk Layer 1.P.FormLink cells ───
+// 118 remaining FLI/sub-A functions (119 total - GetIsID at Test 161 canary = 118).
+// Each cell exercises the dispatcher's per-(function, slot) reflection path.
+// Pattern is uniform: build add_conditions on a vanilla MGEF with parameters:
+// {<slot>: <FormID>}; pipe through bridge; read back; assert slot's FormKey
+// resolved (NOT default FormID 0).
+//
+// FormID convention: Skyrim.esm:0001A6E8 (Lydia) for all 118 cells. Mutagen
+// accepts any FormKey at write-time without type validation; readback reflects
+// what was written regardless of inner-T shape match. This sidesteps per-slot
+// FormID curation while still proving the dispatcher routes the FormKey
+// through the right reflection path (FLI ctor pattern + FormLink<T> ctor
+// pattern, by branch).
+{
+    Console.WriteLine($"── Tests 162–279 [1.P.<Function>.MGEF]: bulk v2.9 P2A FLI/sub-A dispatcher cells (118 functions) ──");
+    var mgefForBulk = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefForBulk == null) { Skip("1.P.bulk", "no MGEF with Conditions container in vanilla Skyrim.esm"); }
+    else
+    {
+        const string targetFormIdStr = "Skyrim.esm:0001A6E8";
+        // (Function, Slot, Branch) — branch label is informational. 112 FLI
+        // (113 native - GetIsID canary) + 6 sub-A IFormLink<T> = 118.
+        var bulkFuncs = new (string Fn, string Slot, string Branch)[]
+        {
+            // ── 112 IFormLinkOrIndex<T> (excluding GetIsID — Test 161 canary) ──
+            ("CanPayCrimeGold",                       "Faction",                "FLI"),
+            ("EPAlchemyEffectHasKeyword",             "Keyword",                "FLI"),
+            ("EPMagic_SpellHasKeyword",               "Keyword",                "FLI"),
+            ("EPModSkillUsage_AdvanceObjectHasKeyword","Keyword",               "FLI"),
+            ("EPTemperingItemHasKeyword",             "Keyword",                "FLI"),
+            ("Exists",                                "Target",                 "FLI"),
+            ("GetCombatTargetHasKeyword",             "Keyword",                "FLI"),
+            ("GetCrimeGold",                          "Faction",                "FLI"),
+            ("GetCrimeGoldNonviolent",                "Faction",                "FLI"),
+            ("GetCrimeGoldViolent",                   "Faction",                "FLI"),
+            ("GetDeadCount",                          "Npc",                    "FLI"),
+            ("GetDetected",                           "TargetNpc",              "FLI"),
+            ("GetDistance",                           "Target",                 "FLI"),
+            ("GetEquipped",                           "ItemOrList",             "FLI"),
+            ("GetEquippedShout",                      "Shout",                  "FLI"),
+            ("GetFactionRank",                        "Faction",                "FLI"),
+            ("GetFactionRelation",                    "TargetNpc",              "FLI"),
+            ("GetGlobalValue",                        "Global",                 "FLI"),
+            ("GetHeadingAngle",                       "Target",                 "FLI"),
+            ("GetInCell",                             "Cell",                   "FLI"),
+            ("GetInContainer",                        "Target",                 "FLI"),
+            ("GetInCurrentLoc",                       "Location",               "FLI"),
+            ("GetInCurrentLocFormList",               "FormList",               "FLI"),
+            ("GetInFaction",                          "Faction",                "FLI"),
+            ("GetInSameCell",                         "Target",                 "FLI"),
+            ("GetInSharedCrimeFaction",               "Target",                 "FLI"),
+            ("GetInWorldspace",                       "WorldspaceOrList",       "FLI"),
+            ("GetInZone",                             "EncounterZone",          "FLI"),
+            ("GetInfamy",                             "Faction",                "FLI"),
+            ("GetInfamyNonViolent",                   "Faction",                "FLI"),
+            ("GetInfamyViolent",                      "Faction",                "FLI"),
+            ("GetIsClass",                            "Class",                  "FLI"),
+            ("GetIsClassDefault",                     "Class",                  "FLI"),
+            ("GetIsCrimeFaction",                     "Faction",                "FLI"),
+            ("GetIsCurrentPackage",                   "Package",                "FLI"),
+            ("GetIsCurrentWeather",                   "Weather",                "FLI"),
+            ("GetIsEditorLocation",                   "Location",               "FLI"),
+            // GetIsID — Test 161 canary above.
+            ("GetIsRace",                             "Race",                   "FLI"),
+            ("GetIsReference",                        "Target",                 "FLI"),
+            ("GetIsUsedItem",                         "Object",                 "FLI"),
+            ("GetIsUsedItemEquipType",                "EquipType",              "FLI"),
+            ("GetIsVoiceType",                        "VoiceTypeOrList",        "FLI"),
+            ("GetItemCount",                          "ItemOrList",             "FLI"),
+            ("GetKeywordDataForCurrentLocation",      "Keyword",                "FLI"),
+            ("GetKeywordItemCount",                   "Keyword",                "FLI"),
+            ("GetLineOfSight",                        "Target",                 "FLI"),
+            ("GetLocationCleared",                    "Location",               "FLI"),
+            ("GetPCEnemyofFaction",                   "Faction",                "FLI"),
+            ("GetPCExpelled",                         "Faction",                "FLI"),
+            ("GetPCFactionAttack",                    "Faction",                "FLI"),
+            ("GetPCFactionMurder",                    "Faction",                "FLI"),
+            ("GetPCInFaction",                        "Faction",                "FLI"),
+            ("GetPCIsClass",                          "Class",                  "FLI"),
+            ("GetPCIsRace",                           "Race",                   "FLI"),
+            ("GetQuestCompleted",                     "Quest",                  "FLI"),
+            ("GetQuestRunning",                       "Quest",                  "FLI"),
+            ("GetRelationshipRank",                   "TargetNpc",              "FLI"),
+            ("GetShouldAttack",                       "TargetNpc",              "FLI"),
+            ("GetShouldHelp",                         "TargetNpc",              "FLI"),
+            ("GetSpellUsageNum",                      "MagicItem",              "FLI"),
+            ("GetStage",                              "Quest",                  "FLI"),
+            ("GetStolenItemValue",                    "Faction",                "FLI"),
+            ("GetStolenItemValueNoCrime",             "Faction",                "FLI"),
+            ("GetTalkedToPCParam",                    "TargetNpc",              "FLI"),
+            ("GetTargetHeight",                       "Target",                 "FLI"),
+            ("GetThreatRatio",                        "TargetNpc",              "FLI"),
+            ("GetVATSBackAreaFree",                   "Target",                 "FLI"),
+            ("GetVATSFrontAreaFree",                  "Target",                 "FLI"),
+            ("GetVATSFrontTargetVisible",             "Target",                 "FLI"),
+            ("GetVATSLeftAreaFree",                   "Target",                 "FLI"),
+            ("GetVATSLeftTargetVisible",              "Target",                 "FLI"),
+            ("GetVATSRightAreaFree",                  "Target",                 "FLI"),
+            ("GetVATSRightTargetVisible",             "Target",                 "FLI"),
+            ("HasAssociationTypeAny",                 "AssociationType",        "FLI"),
+            ("HasFamilyRelationship",                 "TargetNpc",              "FLI"),
+            ("HasKeyword",                            "Keyword",                "FLI"),
+            ("HasLinkedRef",                          "Keyword",                "FLI"),
+            ("HasMagicEffect",                        "MagicEffect",            "FLI"),
+            ("HasMagicEffectKeyword",                 "Keyword",                "FLI"),
+            ("HasParentRelationship",                 "TargetNpc",              "FLI"),
+            ("HasPerk",                               "Perk",                   "FLI"),
+            ("HasRefType",                            "LocationReferenceType",  "FLI"),
+            ("HasShout",                              "Shout",                  "FLI"),
+            ("HasSpell",                              "Spell",                  "FLI"),
+            ("IsAttackType",                          "Keyword",                "FLI"),
+            ("IsCombatTarget",                        "TargetNpc",              "FLI"),
+            ("IsCurrentFurnitureObj",                 "Furniture",              "FLI"),
+            ("IsCurrentFurnitureRef",                 "Target",                 "FLI"),
+            ("IsHostileToActor",                      "TargetNpc",              "FLI"),
+            ("IsInList",                              "FormList",               "FLI"),
+            ("IsKiller",                              "TargetNpc",              "FLI"),
+            ("IsKillerObject",                        "FormList",               "FLI"),
+            ("IsLastIdlePlayed",                      "IdleAnimation",          "FLI"),
+            ("IsLocationLoaded",                      "Location",               "FLI"),
+            ("IsOwner",                               "Owner",                  "FLI"),
+            ("IsPlayerGrabbedRef",                    "Target",                 "FLI"),
+            ("IsPlayerInRegion",                      "Region",                 "FLI"),
+            ("IsScenePlaying",                        "Scene",                  "FLI"),
+            ("IsSpellTarget",                         "MagicItem",              "FLI"),
+            ("IsTalkingActivatorActor",               "TargetNpc",              "FLI"),
+            ("IsWarningAbout",                        "FormList",               "FLI"),
+            ("IsWeaponInList",                        "FormList",               "FLI"),
+            ("LocationHasKeyword",                    "Keyword",                "FLI"),
+            ("LocationHasRefType",                    "LocationReferenceType",  "FLI"),
+            ("PlayerKnows",                           "Knowable",               "FLI"),
+            ("SameFaction",                           "TargetNpc",              "FLI"),
+            ("SameRace",                              "TargetNpc",              "FLI"),
+            ("SameSex",                               "TargetNpc",              "FLI"),
+            ("ShouldAttackKill",                      "TargetNpc",              "FLI"),
+            ("SpellHasCastingPerk",                   "Perk",                   "FLI"),
+            ("WornApparelHasKeywordCount",            "Keyword",                "FLI"),
+            ("WornHasKeyword",                        "Keyword",                "FLI"),
+
+            // ── 6 sub-A IFormLink<T> (GetVATSValue* family) ──
+            ("GetVATSValueCriticalEffect",            "Value",                  "IFormLink"),
+            ("GetVATSValueCriticalEffectOrList",      "Value",                  "IFormLink"),
+            ("GetVATSValueTarget",                    "Value",                  "IFormLink"),
+            ("GetVATSValueTargetOrList",              "Value",                  "IFormLink"),
+            ("GetVATSValueWeapon",                    "Value",                  "IFormLink"),
+            ("GetVATSValueWeaponOrList",              "Value",                  "IFormLink"),
+        };
+        int testNum = 162;
+        int bulkPasses = 0, bulkFailures = 0;
+        foreach (var (fn, slot, branch) in bulkFuncs)
+        {
+            var (ok, trace) = RunFLIDispatcherCell(
+                bridgeExe, outDir, mgefForBulk, SkyrimEsm,
+                new { game_release = "SkyrimSE", listings = loadOrderListings },
+                fn, slot, branch, targetFormIdStr);
+            string label = $"1.P.{fn}.MGEF";
+            Console.WriteLine($"  [{testNum,3}] [{label,-58}] {(ok ? "PASS" : "FAIL")}  {trace}");
+            if (ok) bulkPasses++; else { bulkFailures++; failures++; }
+            testNum++;
+        }
+        Console.WriteLine($"  Bulk summary: {bulkPasses}/{bulkFuncs.Length} PASS ({bulkFailures} FAIL)");
+        Console.WriteLine();
+    }
+}
+
+// ─── Test 280 [1.D.01]: GetIsID + bad FormID (FLI representative negative) ───
+// Mirrors Test 161's positive but with malformed FormID — verifies the dispatcher
+// surfaces FormIdHelper.Parse errors as record-level failures with rollback.
+{
+    Console.WriteLine($"── Test 280 [1.D.01]: GetIsID + bad FormID (FLI representative negative) ──");
+    var mgefNeg = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefNeg == null) { Skip("1.D.01", "no MGEF with Conditions container"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test280-1d01-getisid-bad-formid.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefNeg.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new
+                        {
+                            function = "GetIsID",
+                            @operator = "==",
+                            value = 1f,
+                            parameters = new Dictionary<string, object> { ["Object"] = "Skyrim.esm:DOESNOTEXIST" },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        bool success = root.GetProperty("success").GetBoolean();
+        // Expected: bridge errors at the record level (FormIdHelper.Parse rejects DOESNOTEXIST).
+        if (success)
+        { Console.WriteLine($"  FAIL: bridge reported success=true on malformed FormID; expected record-level error"); failures++; }
+        else
+        {
+            var details = root.GetProperty("details");
+            string errMsg = details[0].GetProperty("error").GetString() ?? "<no error message>";
+            // Just verify the error surfaces — exact wording is FormIdHelper's.
+            if (errMsg.Length == 0)
+            { Console.WriteLine($"  FAIL: bridge errored but error message is empty: {stdout}"); failures++; }
+            else
+            { Console.WriteLine($"  rejection confirmed: error='{errMsg}'"); Console.WriteLine("  PASS"); }
+        }
+        Console.WriteLine();
+    }
+}
+
+// ─── Test 281 [1.D.02]: GetVATSValueWeapon + bad FormID (sub-A IFormLink<T> negative) ───
+{
+    Console.WriteLine($"── Test 281 [1.D.02]: GetVATSValueWeapon + bad FormID (sub-A IFormLink<T> representative negative) ──");
+    var mgefNeg = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefNeg == null) { Skip("1.D.02", "no MGEF with Conditions container"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test281-1d02-getvats-bad-formid.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefNeg.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new
+                        {
+                            function = "GetVATSValueWeapon",
+                            @operator = "==",
+                            value = 1f,
+                            parameters = new Dictionary<string, object> { ["Value"] = "Skyrim.esm:DOESNOTEXIST" },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        bool success = root.GetProperty("success").GetBoolean();
+        if (success)
+        { Console.WriteLine($"  FAIL: bridge reported success=true on malformed FormID through IFormLink<T> branch"); failures++; }
+        else
+        {
+            var details = root.GetProperty("details");
+            string errMsg = details[0].GetProperty("error").GetString() ?? "<no error message>";
+            if (errMsg.Length == 0)
+            { Console.WriteLine($"  FAIL: bridge errored but error message is empty: {stdout}"); failures++; }
+            else
+            { Console.WriteLine($"  rejection confirmed (sub-A branch): error='{errMsg}'"); Console.WriteLine("  PASS"); }
+        }
+        Console.WriteLine();
+    }
+}
+
+// ─── Test 282 [1.D.50]: out-of-scope function (sub-B GetVMScriptVariable) + parameters ───
+// Validates the out-of-scope check fires per § C — function not in
+// KnownParameterizedFunctions + parameters supplied → record-level error.
+{
+    Console.WriteLine($"── Test 282 [1.D.50]: GetVMScriptVariable + parameters (sub-B out-of-scope error) ──");
+    var mgefNeg = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefNeg == null) { Skip("1.D.50", "no MGEF with Conditions container"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test282-1d50-subb-out-of-scope.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefNeg.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new
+                        {
+                            function = "GetVMScriptVariable",
+                            @operator = "==",
+                            value = 1f,
+                            parameters = new Dictionary<string, object>
+                            {
+                                ["Target"] = "Skyrim.esm:0001A6E8",
+                                ["VariableName"] = "MyVar",
+                            },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        bool success = root.GetProperty("success").GetBoolean();
+        if (success)
+        { Console.WriteLine($"  FAIL: bridge reported success=true on out-of-scope function with parameters; expected record-level error"); failures++; }
+        else
+        {
+            var details = root.GetProperty("details");
+            string errMsg = details[0].GetProperty("error").GetString() ?? "<no error message>";
+            if (!errMsg.Contains("GetVMScriptVariable", StringComparison.Ordinal) || !errMsg.Contains("v2.9.0", StringComparison.Ordinal))
+            { Console.WriteLine($"  FAIL: error message missing function name or version reference: '{errMsg}'"); failures++; }
+            else
+            { Console.WriteLine($"  out-of-scope rejection confirmed: '{errMsg}'"); Console.WriteLine("  PASS"); }
+        }
+        Console.WriteLine();
+    }
+}
+
+// ─── Test 283 [1.D.51]: GetIsID + unknown SlotName (no-such-slot error) ───
+{
+    Console.WriteLine($"── Test 283 [1.D.51]: GetIsID + parameters: {{NotARealSlot: ...}} (no-such-slot error) ──");
+    var mgefNeg = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefNeg == null) { Skip("1.D.51", "no MGEF with Conditions container"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test283-1d51-no-such-slot.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefNeg.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new
+                        {
+                            function = "GetIsID",
+                            @operator = "==",
+                            value = 1f,
+                            parameters = new Dictionary<string, object> { ["NotARealSlot"] = "Skyrim.esm:0001A6E8" },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        bool success = root.GetProperty("success").GetBoolean();
+        if (success)
+        { Console.WriteLine($"  FAIL: bridge reported success=true on unknown slot name; expected record-level error"); failures++; }
+        else
+        {
+            var details = root.GetProperty("details");
+            string errMsg = details[0].GetProperty("error").GetString() ?? "<no error message>";
+            if (!errMsg.Contains("NotARealSlot", StringComparison.Ordinal) || !errMsg.Contains("no parameter slot", StringComparison.Ordinal))
+            { Console.WriteLine($"  FAIL: error message missing slot name or 'no parameter slot' phrase: '{errMsg}'"); failures++; }
+            else
+            { Console.WriteLine($"  no-such-slot rejection confirmed: '{errMsg}'"); Console.WriteLine("  PASS"); }
+        }
+        Console.WriteLine();
+    }
+}
+
+// ─── Test 284 [1.D.53]: NoParam function (GetDead) without parameters — back-compat ───
+// Verifies v2.7.1+ parameterless behavior preserved. GetDead isn't in
+// KnownParameterizedFunctions; without parameters, the dispatcher block is
+// never entered, and the existing Activator.CreateInstance path produces a
+// structurally-valid Condition.
+{
+    Console.WriteLine($"── Test 284 [1.D.53]: GetDead (NoParam) without parameters — v2.7.1 back-compat preserved ──");
+    var mgefNoParam = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefNoParam == null) { Skip("1.D.53", "no MGEF with Conditions container"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test284-1d53-noparam-backcompat.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefNoParam.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new { function = "GetDead", @operator = "==", value = 1f },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        bool success = root.GetProperty("success").GetBoolean();
+        if (!success)
+        { Console.WriteLine($"  FAIL: NoParam back-compat broken — bridge reported success=false: {stdout}"); failures++; }
+        else
+        { Console.WriteLine($"  back-compat preserved: GetDead without parameters succeeds (v2.7.1+ behavior unchanged)"); Console.WriteLine("  PASS"); }
+        Console.WriteLine();
+    }
+}
+
+// ─── Test 285 [1.D.54]: NoParam function (GetDead) WITH bogus parameters → out-of-scope ───
+// Confirms GetDead is NOT in KnownParameterizedFunctions; supplying parameters
+// fires the out-of-scope check naturally. Validates the NoParam-NOT-in-set
+// design from CONDITIONS_AUDIT.md § NoParam handling.
+{
+    Console.WriteLine($"── Test 285 [1.D.54]: GetDead + parameters: {{Foo: 1}} (NoParam + parameters → out-of-scope error) ──");
+    var mgefNoParam = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefNoParam == null) { Skip("1.D.54", "no MGEF with Conditions container"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test285-1d54-noparam-with-params.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefNoParam.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new
+                        {
+                            function = "GetDead",
+                            @operator = "==",
+                            value = 1f,
+                            parameters = new Dictionary<string, object> { ["Foo"] = 1 },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        bool success = root.GetProperty("success").GetBoolean();
+        if (success)
+        { Console.WriteLine($"  FAIL: NoParam-function + parameters reported success=true; expected out-of-scope error"); failures++; }
+        else
+        {
+            var details = root.GetProperty("details");
+            string errMsg = details[0].GetProperty("error").GetString() ?? "<no error message>";
+            if (!errMsg.Contains("GetDead", StringComparison.Ordinal) || !errMsg.Contains("v2.9.0", StringComparison.Ordinal))
+            { Console.WriteLine($"  FAIL: error message missing function name or version reference: '{errMsg}'"); failures++; }
+            else
+            { Console.WriteLine($"  out-of-scope rejection confirmed (NoParam + params): '{errMsg}'"); Console.WriteLine("  PASS"); }
+        }
+        Console.WriteLine();
+    }
+}
+
+// ─── Test 286 [2.03]: Effects-list × HasPerk via parameters (composition probe) ───
+// Tests v2.8 P1 surface (set_fields: {Effects: [...]}) + v2.9 P2A surface
+// (parameters dispatcher) co-exercising in one cell. SPEL.Effects[i].Conditions
+// flows through the same shared BuildCondition factory.
+{
+    Console.WriteLine($"── Test 286 [2.03]: SPEL set_fields Effects with nested HasPerk via parameters (v2.8 × v2.9 composition) ──");
+    var spel = source.Spells.FirstOrDefault(s => s.Effects != null && s.Effects.Count > 0);
+    if (spel == null) { Skip("2.03", "no SPEL with Effects in vanilla Skyrim.esm"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test286-2-03-effects-haspc.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var firstEffect = spel.Effects[0];
+        var baseEffectFormId = firstEffect.BaseEffect.FormKeyNullable.HasValue
+            ? FormatFormKey(firstEffect.BaseEffect.FormKeyNullable.Value)
+            : "Skyrim.esm:0003EB04";
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(spel.FormKey),
+                    source_path = SkyrimEsm,
+                    set_fields = new Dictionary<string, object>
+                    {
+                        ["Effects"] = new object[]
+                        {
+                            new
+                            {
+                                BaseEffect = baseEffectFormId,
+                                Data = new { Magnitude = 10f, Area = 0, Duration = 0 },
+                                Conditions = new object[]
+                                {
+                                    new
+                                    {
+                                        function = "HasPerk",
+                                        @operator = "==",
+                                        value = 1f,
+                                        parameters = new Dictionary<string, object> { ["Perk"] = "Skyrim.esm:0001A6E8" },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        bool success = root.GetProperty("success").GetBoolean();
+        if (!success) { Console.WriteLine($"  FAIL: bridge reported success=false: {stdout}"); failures++; }
+        else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); failures++; }
+        else
+        {
+            var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+            var rec = outMod.Spells.FirstOrDefault(s => s.FormKey == spel.FormKey);
+            if (rec?.Effects == null || rec.Effects.Count == 0)
+            { Console.WriteLine("  FAIL: SPEL Effects missing in readback"); failures++; }
+            else
+            {
+                var eff = rec.Effects[0];
+                var nested = eff.Conditions?.FirstOrDefault(c => c.Data?.GetType().Name == "HasPerkConditionData");
+                if (nested == null)
+                { Console.WriteLine($"  FAIL: nested HasPerkConditionData missing in readback Effects[0].Conditions"); failures++; }
+                else
+                {
+                    var perkProp = nested.Data!.GetType().GetProperty("Perk", BindingFlags.Public | BindingFlags.Instance);
+                    var perkVal = perkProp?.GetValue(nested.Data);
+                    var linkProp = perkVal?.GetType().GetProperty("Link", BindingFlags.Public | BindingFlags.Instance);
+                    var linkVal = linkProp?.GetValue(perkVal);
+                    var fkProp = linkVal?.GetType().GetProperty("FormKey", BindingFlags.Public | BindingFlags.Instance);
+                    var fkStr = fkProp?.GetValue(linkVal)?.ToString() ?? "<null>";
+                    if (!fkStr.Contains("1A6E8", StringComparison.Ordinal))
+                    { Console.WriteLine($"  FAIL: Effects[0].Conditions[0].Data.Perk.Link.FormKey = '{fkStr}', expected to contain '1A6E8'"); failures++; }
+                    else
+                    { Console.WriteLine($"  composition confirmed: SPEL.Effects[0].Conditions[0] is HasPerkConditionData with Perk={fkStr} ✓ (v2.8 Effects-list + v2.9 dispatcher integrated through shared BuildCondition factory)"); Console.WriteLine("  PASS"); }
+                }
+            }
+        }
+        Console.WriteLine();
+    }
+}
+
+// ─── Test 287 [2.05]: SKIP — back-compat coexistence requires 2B Enum dispatcher ───
+{
+    Skip("2.05", "back-compat coexistence (record A actor_value + record B parameters: {ActorValue: ...}) requires 2B's Enum branch; record A side covered by Test 288 [4.dsl.02]; full 2.05 lifts to PASS in 2B");
+}
+
+// ─── Test 288 [4.dsl.01]: actor_value AND parameters.ActorValue both → ambiguity error ───
+{
+    Console.WriteLine($"── Test 288 [4.dsl.01]: actor_value + parameters.ActorValue both supplied (unambiguous-DSL error) ──");
+    var mgefDsl = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefDsl == null) { Skip("4.dsl.01", "no MGEF with Conditions container"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test288-4dsl01-both-supplied.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefDsl.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new
+                        {
+                            function = "GetActorValue",
+                            actor_value = "Health",
+                            @operator = ">=",
+                            value = 50f,
+                            parameters = new Dictionary<string, object> { ["ActorValue"] = "Health" },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        bool success = root.GetProperty("success").GetBoolean();
+        if (success)
+        { Console.WriteLine($"  FAIL: both forms supplied reported success=true; expected unambiguous-DSL error"); failures++; }
+        else
+        {
+            var details = root.GetProperty("details");
+            string errMsg = details[0].GetProperty("error").GetString() ?? "<no error message>";
+            if (!errMsg.Contains("actor_value", StringComparison.Ordinal) || !errMsg.Contains("parameters", StringComparison.Ordinal))
+            { Console.WriteLine($"  FAIL: error doesn't name both forms: '{errMsg}'"); failures++; }
+            else
+            { Console.WriteLine($"  unambiguous-DSL rejection confirmed: '{errMsg}'"); Console.WriteLine("  PASS"); }
+        }
+        Console.WriteLine();
+    }
+}
+
+// ─── Test 289 [4.dsl.02]: actor_value alone (v2.8 back-compat preserved) ───
+// Test 160 already verified this for non-dispatcher path; here we re-verify
+// alongside the dispatcher to confirm the v2.8 path stays live in v2.9.
+{
+    Console.WriteLine($"── Test 289 [4.dsl.02]: actor_value alone (v2.8 back-compat with v2.9 dispatcher present) ──");
+    var mgefDsl = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefDsl == null) { Skip("4.dsl.02", "no MGEF with Conditions container"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test289-4dsl02-actor-value-alone.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefDsl.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new { function = "GetActorValue", actor_value = "Stamina", @operator = ">=", value = 50f },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        bool success = root.GetProperty("success").GetBoolean();
+        if (!success) { Console.WriteLine($"  FAIL: v2.8 actor_value back-compat path failed: {stdout}"); failures++; }
+        else
+        {
+            var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+            var rec = outMod.MagicEffects.FirstOrDefault(m => m.FormKey == mgefDsl.FormKey);
+            var addedCond = rec?.Conditions?.FirstOrDefault(c => c.Data?.GetType().Name == "GetActorValueConditionData");
+            var avProp = addedCond?.Data?.GetType().GetProperty("ActorValue", BindingFlags.Public | BindingFlags.Instance);
+            var avStr = avProp?.GetValue(addedCond?.Data)?.ToString() ?? "<null>";
+            if (avStr != "Stamina")
+            { Console.WriteLine($"  FAIL: ActorValue was '{avStr}', expected 'Stamina'"); failures++; }
+            else
+            { Console.WriteLine($"  v2.8 back-compat preserved: GetActorValueConditionData.ActorValue=Stamina via actor_value field ✓"); Console.WriteLine("  PASS"); }
+        }
+        Console.WriteLine();
+    }
+}
+
+// ─── Test 290 [4.dsl.03]: SKIP — parameters.ActorValue alone needs 2B Enum branch ───
+{
+    Skip("4.dsl.03", "parameters: {ActorValue: 'Health'} alone requires 2B's Enum branch + GetActorValue in KnownParameterizedFunctions; lifts to PASS in 2B");
+}
+
+// ─── Test 291 [4.formid.01]: GetIsID + malformed FormID hex ───
+// Already covered by Test 280 [1.D.01] — FormID parse rejection. Re-listed
+// here as 4.formid.01 to match MATRIX explicitly.
+{
+    Console.WriteLine($"── Test 291 [4.formid.01]: GetIsID + parameters: {{Object: 'Skyrim.esm:NOT-HEX'}} (FormID parse error) ──");
+    var mgefF = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefF == null) { Skip("4.formid.01", "no MGEF with Conditions container"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test291-4formid01-bad-hex.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefF.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new
+                        {
+                            function = "GetIsID",
+                            @operator = "==",
+                            value = 1f,
+                            parameters = new Dictionary<string, object> { ["Object"] = "Skyrim.esm:NOT-HEX" },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        bool success = root.GetProperty("success").GetBoolean();
+        if (success)
+        { Console.WriteLine($"  FAIL: malformed FormID hex reported success=true"); failures++; }
+        else
+        { Console.WriteLine($"  FormID parse rejection confirmed"); Console.WriteLine("  PASS"); }
+        Console.WriteLine();
+    }
+}
+
+// ─── Test 292 [4.formid.02]: GetIsID + unresolved-plugin FormID (Mutagen accepts at write-time) ───
+// MATRIX: bridge writes the FormKey as supplied; load-order validation defers
+// to WriteToBinary (matches v2.8.0 write-time-not-validate-time posture).
+{
+    Console.WriteLine($"── Test 292 [4.formid.02]: GetIsID + parameters: {{Object: 'NotARealPlugin.esp:01A6E8'}} (write-time-not-validate posture) ──");
+    var mgefF = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefF == null) { Skip("4.formid.02", "no MGEF with Conditions container"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test292-4formid02-unresolved-plugin.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefF.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new
+                        {
+                            function = "GetIsID",
+                            @operator = "==",
+                            value = 1f,
+                            parameters = new Dictionary<string, object> { ["Object"] = "NotARealPlugin.esp:01A6E8" },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        // Document the actual behavior — Mutagen may accept or reject this at write time.
+        bool success = root.GetProperty("success").GetBoolean();
+        Console.WriteLine($"  bridge reported success={success} (documenting actual Mutagen behavior; no strict assertion — see MATRIX 4.formid.02)");
+        Console.WriteLine("  PASS (documented)");
+        Console.WriteLine();
+    }
+}
+
+// ─── Test 293 [4.formid.03]: GetIsID + well-formed but absent FormID (write succeeds) ───
+{
+    Console.WriteLine($"── Test 293 [4.formid.03]: GetIsID + parameters: {{Object: 'Skyrim.esm:00FFFFFF'}} (well-formed but absent — write succeeds) ──");
+    var mgefF = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefF == null) { Skip("4.formid.03", "no MGEF with Conditions container"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test293-4formid03-absent-record.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefF.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new
+                        {
+                            function = "GetIsID",
+                            @operator = "==",
+                            value = 1f,
+                            parameters = new Dictionary<string, object> { ["Object"] = "Skyrim.esm:00FFFFFF" },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        bool success = root.GetProperty("success").GetBoolean();
+        if (!success) { Console.WriteLine($"  FAIL: well-formed FormID rejected: {stdout}"); failures++; }
+        else
+        { Console.WriteLine($"  write-time-not-validate posture confirmed: well-formed FormID written without record-existence check"); Console.WriteLine("  PASS"); }
+        Console.WriteLine();
+    }
+}
+
+// ─── Test 294 [4.slot.04]: footgun-guard rejects *Unused* slot names ───
+// Per CONDITIONS_AUDIT.md § Architectural surprises §3 — CTDA padding pattern.
+{
+    Console.WriteLine($"── Test 294 [4.slot.04]: GetIsID + parameters: {{SecondUnusedIntParameter: 42}} (footgun-guard rejection) ──");
+    var mgefFg = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefFg == null) { Skip("4.slot.04", "no MGEF with Conditions container"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test294-4slot04-footgun-guard.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefFg.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new
+                        {
+                            function = "GetIsID",
+                            @operator = "==",
+                            value = 1f,
+                            parameters = new Dictionary<string, object> { ["SecondUnusedIntParameter"] = 42 },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        bool success = root.GetProperty("success").GetBoolean();
+        if (success)
+        { Console.WriteLine($"  FAIL: *Unused* slot name reported success=true; footgun-guard didn't fire"); failures++; }
+        else
+        {
+            var details = root.GetProperty("details");
+            string errMsg = details[0].GetProperty("error").GetString() ?? "<no error message>";
+            if (!errMsg.Contains("padding", StringComparison.Ordinal) || !errMsg.Contains("Unused", StringComparison.Ordinal))
+            { Console.WriteLine($"  FAIL: error doesn't reference padding or Unused: '{errMsg}'"); failures++; }
+            else
+            { Console.WriteLine($"  footgun-guard rejection confirmed: '{errMsg}'"); Console.WriteLine("  PASS"); }
+        }
+        Console.WriteLine();
+    }
+}
+
 if (skipReasons.Count > 0)
 {
     Console.WriteLine($"=== {skipReasons.Count} SKIP(s) ===");
@@ -5224,4 +6272,99 @@ static (string stdout, string stderr, int exit) RunBridge(string exe, string std
     var stderr = p.StandardError.ReadToEnd();
     p.WaitForExit();
     return (stdout, stderr, p.ExitCode);
+}
+
+// v2.9.0 P2A — bulk dispatcher cell helper. Builds a single-condition
+// add_conditions request, pipes through bridge, reads back the output ESP,
+// and asserts the slot's FormKey resolved (NOT default FormID 0).
+//
+// Branch-aware: IFormLink<T> readback exposes FormKey directly on the
+// FormLink struct; IFormLinkOrIndex<T> nests FormKey under .Link. The helper
+// tries .Link.FormKey first, falls back to .FormKey directly — handles both.
+static (bool ok, string trace) RunFLIDispatcherCell(
+    string bridgeExe, string outDir, IMagicEffectGetter mgef, string sourcePath,
+    object loadOrder, string functionName, string slotName, string branchLabel,
+    string targetFormIdStr)
+{
+    var outPath = Path.Combine(outDir, $"v29-fli-{functionName}-{slotName}.esp");
+    if (File.Exists(outPath)) File.Delete(outPath);
+    var req = new
+    {
+        command = "patch",
+        output_path = outPath,
+        esl_flag = false,
+        author = "coverage-smoke",
+        records = new[]
+        {
+            new
+            {
+                op = "override",
+                formid = $"{mgef.FormKey.ModKey.FileName}:{mgef.FormKey.ID:X6}",
+                source_path = sourcePath,
+                add_conditions = new object[]
+                {
+                    new
+                    {
+                        function = functionName,
+                        @operator = "==",
+                        value = 1f,
+                        parameters = new Dictionary<string, object> { [slotName] = targetFormIdStr },
+                    },
+                },
+            },
+        },
+        load_order = loadOrder,
+    };
+    var (stdout, _, _) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+    JsonDocument doc;
+    try { doc = JsonDocument.Parse(stdout); }
+    catch (Exception ex) { return (false, $"bridge stdout not valid JSON: {ex.Message}"); }
+    using (doc)
+    {
+        var root = doc.RootElement;
+        if (!root.TryGetProperty("success", out var succEl) || !succEl.GetBoolean())
+            return (false, $"bridge success=false: {stdout.Substring(0, Math.Min(stdout.Length, 200))}");
+        if (!File.Exists(outPath))
+            return (false, "output ESP missing");
+        var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+        var rec = outMod.MagicEffects.FirstOrDefault(m => m.FormKey == mgef.FormKey);
+        if (rec?.Conditions == null || rec.Conditions.Count == 0)
+            return (false, "MGEF Conditions missing or empty");
+        var expectedDataTypeName = $"{functionName}ConditionData";
+        // ApplyAddConditions appends to the existing Conditions list, so the
+        // dispatched-and-written entry is always at the end. LastOrDefault
+        // matches even when the source MGEF carries a pre-existing condition
+        // of the same ConditionData type (e.g. some vanilla MGEFs already
+        // have HasKeywordConditionData entries — FirstOrDefault would return
+        // the pre-existing one and miss the dispatched one's slot value).
+        var addedCond = rec.Conditions.LastOrDefault(c => c.Data?.GetType().Name == expectedDataTypeName);
+        if (addedCond == null)
+            return (false, $"no entry of type {expectedDataTypeName} in {rec.Conditions.Count} conditions");
+        var slotProp = addedCond.Data!.GetType().GetProperty(slotName,
+            BindingFlags.Public | BindingFlags.Instance);
+        if (slotProp == null)
+            return (false, $"{expectedDataTypeName} has no {slotName} property");
+        var slotVal = slotProp.GetValue(addedCond.Data);
+        if (slotVal == null)
+            return (false, $"{expectedDataTypeName}.{slotName} is null");
+
+        // Try .Link.FormKey path first (FormLinkOrIndex<T>); fall back to
+        // .FormKey directly (FormLink<T> — sub-A branch).
+        var linkProp = slotVal.GetType().GetProperty("Link",
+            BindingFlags.Public | BindingFlags.Instance);
+        var fkSource = linkProp != null ? linkProp.GetValue(slotVal) : slotVal;
+        if (fkSource == null)
+            return (false, $"slotVal.Link is null (type={slotVal.GetType().Name})");
+        var fkProp = fkSource.GetType().GetProperty("FormKey",
+            BindingFlags.Public | BindingFlags.Instance);
+        if (fkProp == null)
+            return (false, $"can't find FormKey on {fkSource.GetType().Name}");
+        var fkStr = fkProp.GetValue(fkSource)?.ToString() ?? "<null>";
+        // Mutagen's FormKey.ToString = "HEXID:plugin"; bridge sent
+        // "Skyrim.esm:0001A6E8" → local ID 0x01A6E8 (master flag bits stripped).
+        if (!fkStr.Contains("1A6E8", StringComparison.Ordinal) ||
+            !fkStr.Contains("Skyrim.esm", StringComparison.Ordinal))
+            return (false, $"{slotName} FormKey={fkStr}, expected to contain '1A6E8'+'Skyrim.esm'");
+        return (true, $"{branchLabel} {slotName}={fkStr}");
+    }
 }

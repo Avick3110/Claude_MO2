@@ -1737,14 +1737,16 @@ public class PatchEngine
     }
 
     /// <summary>
-    /// v2.9.0 P2A — frozen set of Condition function names whose
+    /// v2.9.0 P2A/P2B — frozen set of Condition function names whose
     /// parameter slots the bridge dispatches via <see cref="RouteParameterSlot"/>.
     /// Sourced from CONDITIONS_AUDIT.md (Mutagen 0.53.1 inventory probe).
-    /// 119 functions total: 113 single-<c>IFormLinkOrIndex&lt;T&gt;</c> + 6
-    /// sub-A single-<c>IFormLink&lt;T&gt;</c> (GetVATSValue* family).
-    /// Subsequent phases extend: 2B adds 41 Enum, 2C adds 28 MultiSlot
-    /// (incl. GetEventData), 2D adds 11 PrimitiveOnly. NoParam (219) is
-    /// in-scope-no-op — they accept parameterless invocation as v2.7.1+
+    /// 160 functions total: 113 single-<c>IFormLinkOrIndex&lt;T&gt;</c> (P2A) +
+    /// 6 sub-A single-<c>IFormLink&lt;T&gt;</c> P2A (GetVATSValue* family) +
+    /// 41 single-Enum P2B (ActorValue family + 38 others — Axis / Sex /
+    /// CastSource / FormType / etc.).
+    /// Subsequent phases extend: 2C adds 28 MultiSlot (incl. GetEventData,
+    /// 3-slot mixed Enum + IFormLink), 2D adds 11 PrimitiveOnly. NoParam (219)
+    /// is in-scope-no-op — they accept parameterless invocation as v2.7.1+
     /// behavior; supplying <c>parameters</c> for a NoParam function fires
     /// the natural slot-name-not-found path or the out-of-scope check.
     /// Sub-B (6 String-typed VariableName/GraphVariable functions) deferred
@@ -1874,18 +1876,79 @@ public class PatchEngine
         "GetVATSValueTargetOrList",
         "GetVATSValueWeapon",
         "GetVATSValueWeaponOrList",
+
+        // ── 41 Enum functions (P2B; scratch lines 1136–1219) ──
+        // Slot signatures: ActorValue / Axis / CastSource / Alignment / FormType /
+        // MaleFemaleGender / MiscStatEnum / AdvanceAction / nested
+        // GetVATSValueActionConditionData+Action / CastType / TargetType /
+        // Projectile+TypeEnum / WeaponAnimationType / FurnitureAnimType /
+        // FurnitureEntryType / CriticalStage / PlayerAction / WardState — 18
+        // distinct enum types across 41 functions. All route uniformly via the
+        // Enum branch in RouteParameterSlot (Enum.Parse with ignoreCase: true).
+        // GetActorValue / GetBaseActorValue / GetActorValuePercent are the
+        // v2.8.0 carryovers — back-compat sugar via the actor_value field
+        // remains live; supplying both forms surfaces the unambiguous-DSL
+        // error per BuildCondition's check above.
+        "EPMagic_IsAdvanceSkill",
+        "EPMagic_SpellHasSkill",
+        "EPModSkillUsage_IsAdvanceAction",
+        "GetActorValue",
+        "GetActorValuePercent",
+        "GetAngle",
+        "GetBaseActorValue",
+        "GetCurrentCastingType",
+        "GetCurrentDeliveryType",
+        "GetEquippedItemType",
+        "GetIsAlignment",
+        "GetIsObjectType",
+        "GetIsSex",
+        "GetIsUsedItemType",
+        "GetPCIsSex",
+        "GetPCMiscStat",
+        "GetPathingCurrentSpeedAngle",
+        "GetPathingTargetAngleOffset",
+        "GetPathingTargetOffset",
+        "GetPathingTargetSpeedAngle",
+        "GetPermanentActorValue",
+        "GetPos",
+        "GetReplacedItemType",
+        "GetStartingAngle",
+        "GetStartingPos",
+        "GetVATSValueAction",
+        "GetVATSValueCastingType",
+        "GetVATSValueDeliveryType",
+        "GetVATSValueProjectileType",
+        "GetVATSValueTargetPart",
+        "GetVATSValueWeaponType",
+        "GetVelocity",
+        "HasBoundWeaponEquipped",
+        "HasEquippedSpell",
+        "IsFurnitureAnimType",
+        "IsFurnitureEntryType",
+        "IsInCriticalStage",
+        "IsInFurnitureState",
+        "IsPlayerActionActive",
+        "IsWardState",
+        "IsWeaponSkillType",
     };
 
     /// <summary>
-    /// v2.9.0 P2A — generic Condition-function parameter dispatcher. Routes
+    /// v2.9.0 P2A/P2B — generic Condition-function parameter dispatcher. Routes
     /// one (slotName, jsonValue) entry from <see cref="ConditionEntry.Parameters"/>
     /// to the corresponding reflection property on a <c>{Function}ConditionData</c>
-    /// instance. Branches in 2A: <c>IFormLinkOrIndex&lt;T&gt;</c> (existing
-    /// Global-handler pattern — parent + FormKey ctor) and <c>IFormLink&lt;T&gt;</c>
-    /// (sub-A absorption — single FormKey ctor). Other slot types (Enum, Int32,
-    /// Single, Boolean) throw "shape not yet wired in 2A — landing in 2B/2D"
-    /// — they're guarded by KnownParameterizedFunctions which 2A does not
-    /// include those shapes' functions in.
+    /// instance. Branches landed:
+    /// <list type="bullet">
+    /// <item>2A: <c>IFormLinkOrIndex&lt;T&gt;</c> (existing Global-handler pattern —
+    ///   parent + FormKey ctor) and <c>IFormLink&lt;T&gt;</c> (sub-A absorption —
+    ///   single FormKey ctor).</item>
+    /// <item>2B: <c>System.Enum</c> via <c>Enum.Parse(propType, value, ignoreCase: true)</c>
+    ///   — generalizes v2.8.0's <c>actor_value</c> handler. Numeric-vs-string
+    ///   posture: error if <c>jsonValue.ValueKind != String</c> (strings are the
+    ///   documented form; matches the back-compat <c>actor_value</c> contract).</item>
+    /// </list>
+    /// Other slot types (Int32, Single, Boolean) throw "shape not yet wired" —
+    /// they're guarded by KnownParameterizedFunctions which doesn't include
+    /// those shapes' functions until 2D lands.
     /// Footgun-guard: rejects any slot name containing <c>"Unused"</c> per
     /// CONDITIONS_AUDIT.md § Architectural surprises §3 (CTDA padding pattern).
     /// 1436 *Unused*Parameter* slots exist across 424 ConditionData types as
@@ -1965,17 +2028,50 @@ public class PatchEngine
             return;
         }
 
-        // Other shapes (Enum, Int32, Single, Boolean) — out of scope for 2A.
-        // Phase 2B adds the Enum branch; 2C adds MultiSlot composition (which
-        // exercises this dispatcher per-slot); 2D adds the primitive branches.
-        // Reaching here in 2A means a function got into KnownParameterizedFunctions
-        // whose slot type isn't FLI or IFormLink — caller bug or future-phase
-        // extension drift; surface clean error rather than silent default.
+        // Enum branch (2B) — generalizes v2.8.0's actor_value handler at
+        // BuildCondition lines ~1634-1648. Reflection-property type drives the
+        // Enum.Parse target, so any *ConditionData enum slot routes uniformly
+        // (ActorValue, Sex, Axis, CastSource, FormType, etc. — 41 functions in
+        // 2B's KnownParameterizedFunctions extension). Strings only — numeric
+        // input is a DSL violation per kickoff §3 lock; strings match the
+        // back-compat actor_value contract.
+        if (propType.IsEnum)
+        {
+            if (jsonValue.ValueKind != JsonValueKind.String)
+            {
+                throw new ArgumentException(
+                    $"Parameter slot '{slotName}' on function '{functionName}' expects an " +
+                    $"enum name string (e.g. \"Health\" for ActorValue); got JSON {jsonValue.ValueKind}. " +
+                    "Numeric enum-index input is not accepted — supply the member name.");
+            }
+            object parsed;
+            try
+            {
+                parsed = Enum.Parse(propType, jsonValue.GetString()!, ignoreCase: true);
+            }
+            catch (ArgumentException)
+            {
+                throw new ArgumentException(
+                    $"Unknown enum name '{jsonValue.GetString()}' for parameter slot " +
+                    $"'{slotName}' on function '{functionName}' (enum type {propType.FullName}). " +
+                    "Slot names accept any defined member of the enum (case-insensitive).");
+            }
+            prop.SetValue(condData, parsed);
+            return;
+        }
+
+        // Other shapes (Int32, Single, Boolean) — out of scope for 2A/2B.
+        // 2C adds MultiSlot composition (which exercises this dispatcher per-slot
+        // and in practice uses already-landed branches); 2D adds the primitive
+        // branches. Reaching here means a function got into
+        // KnownParameterizedFunctions whose slot type isn't FLI / IFormLink /
+        // Enum — caller bug or future-phase extension drift; surface clean error
+        // rather than silent default.
         throw new InvalidOperationException(
             $"Parameter slot '{slotName}' on function '{functionName}' has type " +
-            $"'{propType.FullName}' which v2.9.0 P2A does not yet route. " +
-            "P2A covers IFormLinkOrIndex<T> + IFormLink<T>; subsequent phases " +
-            "extend to enum / int / float / bool. See KNOWN_ISSUES.md.");
+            $"'{propType.FullName}' which v2.9.0 P2B does not yet route. " +
+            "P2A/P2B cover IFormLinkOrIndex<T> + IFormLink<T> + System.Enum; " +
+            "subsequent phases extend to int / float / bool. See KNOWN_ISSUES.md.");
     }
 
     /// <summary>

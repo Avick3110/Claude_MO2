@@ -26,9 +26,10 @@ Net: ~190 lines cut from docs loaded every session, plus repo-only dev/README.md
 Generic Condition-function parameter dispatch — a reusable infrastructure that
 generalizes v2.8.0's single-purpose `actor_value` handler into a reflection-based
 slot router. Phase 2A wires the FormLink-typed slot space (119 functions:
-113 `IFormLinkOrIndex<T>` + 6 sub-A `IFormLink<T>`); Phase 2B/2C/2D extend the
-same dispatcher to enum, multi-slot, and primitive shapes within the v2.9.x
-release line.
+113 `IFormLinkOrIndex<T>` + 6 sub-A `IFormLink<T>`). Phase 2B extends to the
+Enum-typed slot space (41 functions across 18 distinct enum types — ActorValue
+family + Sex/Axis/CastSource/FormType/etc.). Phase 2C/2D will extend the same
+dispatcher to multi-slot and primitive shapes within the v2.9.x release line.
 
 ### Added — bridge
 
@@ -37,20 +38,40 @@ release line.
   map. SlotName matches Mutagen's reflection property name on the function's
   `{Function}ConditionData` class (e.g. `parameters: {Object: "<formid>"}` for
   GetIsID, `parameters: {Faction: "<formid>"}` for GetInFaction, `parameters:
-  {Perk: "<formid>"}` for HasPerk). Each value's runtime type drives the
-  marshalling: string FormID → `IFormLinkOrIndex<T>` / `IFormLink<T>` (P2A scope).
-  v2.9.0 P2A in-scope set: **119 functions** (113 single-`IFormLinkOrIndex<T>` +
-  6 sub-A single-`IFormLink<T>`). The 6 sub-A functions are the GetVATSValue*
-  family (GetVATSValueCriticalEffect, GetVATSValueCriticalEffectOrList,
-  GetVATSValueTarget, GetVATSValueTargetOrList, GetVATSValueWeapon,
-  GetVATSValueWeaponOrList — all carrying a `Value` slot of `IFormLink<T>`,
-  distinct from the FLI ctor pattern). Functions outside the in-scope set
-  called with `parameters` surface a clean per-record "not yet wired" error
-  naming the function and pointing at KNOWN_ISSUES.md; called without
-  `parameters` they preserve v2.7.1+ behavior (structurally-valid but
-  always-false, identical to pre-v2.9 behavior — back-compat). Per-function
-  slot signatures live in `dev/plans/v2.9.X_condition_parameters/CONDITIONS_AUDIT.md`,
-  the audit produced by Phase 1's full Mutagen-0.53.1 inventory probe.
+  {Perk: "<formid>"}` for HasPerk, `parameters: {ActorValue: "Health"}` for
+  GetActorValue). Each value's runtime type drives the marshalling: string
+  FormID → `IFormLinkOrIndex<T>` / `IFormLink<T>` (P2A scope); string enum
+  member name → `System.Enum` via `Enum.Parse(propType, value, ignoreCase: true)`
+  (P2B scope; numeric enum-index input is rejected — strings are the documented
+  form, matching the v2.8 `actor_value` contract).
+  v2.9.0 in-scope set: **160 functions** (113 single-`IFormLinkOrIndex<T>` P2A +
+  6 sub-A single-`IFormLink<T>` P2A + 41 single-Enum P2B). The 6 sub-A functions
+  are the GetVATSValue* family (GetVATSValueCriticalEffect,
+  GetVATSValueCriticalEffectOrList, GetVATSValueTarget, GetVATSValueTargetOrList,
+  GetVATSValueWeapon, GetVATSValueWeaponOrList — all carrying a `Value` slot of
+  `IFormLink<T>`, distinct from the FLI ctor pattern). The 41 P2B functions
+  span 18 distinct enum types: ActorValue family (8 functions: GetActorValue,
+  GetBaseActorValue, GetActorValuePercent, GetPermanentActorValue,
+  GetVATSValueTargetPart, IsWeaponSkillType, EPMagic_IsAdvanceSkill,
+  EPMagic_SpellHasSkill), Axis family (9 functions: GetAngle / GetPos /
+  GetVelocity / GetStarting{Angle,Pos} / GetPathing* × 4), CastSource family
+  (6 functions: GetCurrentCastingType, GetCurrentDeliveryType,
+  GetEquippedItemType, GetReplacedItemType, HasBoundWeaponEquipped,
+  HasEquippedSpell), GetIsSex/GetPCIsSex (MaleFemaleGender),
+  GetIsObjectType/GetIsUsedItemType (FormType), GetIsAlignment (Alignment),
+  GetPCMiscStat (MiscStatEnum), EPModSkillUsage_IsAdvanceAction (AdvanceAction),
+  the 6 GetVATSValue* enum-shape functions (CastType / TargetType /
+  WeaponAnimationType + nested GetVATSValueActionConditionData+Action and
+  Projectile+TypeEnum), IsFurnitureAnimType / IsInFurnitureState
+  (FurnitureAnimType), IsFurnitureEntryType (FurnitureEntryType),
+  IsInCriticalStage (CriticalStage), IsPlayerActionActive (PlayerAction),
+  IsWardState (WardState). Functions outside the in-scope set called with
+  `parameters` surface a clean per-record "not yet wired" error naming the
+  function and pointing at KNOWN_ISSUES.md; called without `parameters` they
+  preserve v2.7.1+ behavior (structurally-valid but always-false, identical
+  to pre-v2.9 behavior — back-compat). Per-function slot signatures live in
+  `dev/plans/v2.9.X_condition_parameters/CONDITIONS_AUDIT.md`, the audit
+  produced by Phase 1's full Mutagen-0.53.1 inventory probe.
 
 - **Footgun-guard for CTDA padding slots.** The dispatcher rejects any
   `parameters` key whose name contains `"Unused"`. Mutagen 0.53.1's
@@ -64,28 +85,37 @@ release line.
 - **Back-compat preservation: `actor_value` field stays live.** The v2.8.0
   `actor_value` JSON field continues to work as syntactic sugar for
   `parameters: {ActorValue: ...}` (handled by the existing `actor_value`
-  handler in `BuildCondition`; P2A leaves this path untouched). Supplying
-  both forms on the same condition surfaces an unambiguous-DSL error.
+  handler in `BuildCondition`; P2A leaves this path untouched, P2B's Enum
+  branch is the equivalent generic-dispatch route — both flow through the
+  same `BuildCondition` factory). Supplying both forms on the same condition
+  surfaces an unambiguous-DSL error. Coverage-smoke proves both paths coexist
+  on different records in a single bridge invocation (Test 287 [2.05]:
+  record A back-compat + record B dispatcher both succeed).
 
 ### Architecture
 
 - **`RouteParameterSlot(condData, condDataType, functionName, slotName, jsonValue)`**
   in `tools/mutagen-bridge/PatchEngine.cs`. Generic dispatcher: footgun-guard at
   top → reflection-property lookup on the ConditionData class → branch on
-  `prop.PropertyType` (`IFormLinkOrIndex<T>` parent + FormKey ctor pattern,
-  generalized from v2.8.0's Global handler; `IFormLink<T>` simpler single-FormKey
-  ctor pattern for sub-A absorption). Other slot shapes (Enum, Int32, Single,
-  Boolean) throw a clean "shape not yet wired in P2A — landing in P2B/P2C/P2D"
-  error; that path is guarded by a `KnownParameterizedFunctions` set populated
-  with the 119 P2A function names. Subsequent phases extend the set + the
-  dispatcher's branch coverage; no new mechanism needed.
+  `prop.PropertyType`. Branches landed: `IFormLinkOrIndex<T>` (P2A — parent +
+  FormKey ctor pattern, generalized from v2.8.0's Global handler);
+  `IFormLink<T>` (P2A — simpler single-FormKey ctor for sub-A absorption);
+  `System.Enum` (P2B — `Enum.Parse(propType, value, ignoreCase: true)` with
+  `ValueKind != String` guard for the documented string-only contract; wraps
+  `Enum.Parse`'s `ArgumentException` to add function/slot context for DX).
+  Other slot shapes (Int32, Single, Boolean) throw a clean "shape not yet
+  wired" error; that path is guarded by a `KnownParameterizedFunctions` set
+  which doesn't include those shapes' functions until 2D lands. Subsequent
+  phases extend the set + the dispatcher's branch coverage; no new mechanism
+  needed.
 
 - **`KnownParameterizedFunctions` static frozen set** in `PatchEngine.cs`. Holds
-  the 119 P2A function names. Functions in the set route through the dispatcher;
-  functions NOT in the set + caller-supplied `parameters` → out-of-scope error;
-  functions NOT in the set + no `parameters` → preserves v2.7.1+ behavior. NoParam
-  functions (219) are NOT in the set per `CONDITIONS_AUDIT.md § NoParam handling`
-  — they accept parameterless invocation as v2.7.1+ behavior unchanged.
+  the 160 in-scope function names (113 P2A FLI + 6 P2A sub-A IFormLink + 41 P2B
+  Enum). Functions in the set route through the dispatcher; functions NOT in the
+  set + caller-supplied `parameters` → out-of-scope error; functions NOT in the
+  set + no `parameters` → preserves v2.7.1+ behavior. NoParam functions (219) are
+  NOT in the set per `CONDITIONS_AUDIT.md § NoParam handling` — they accept
+  parameterless invocation as v2.7.1+ behavior unchanged.
 
 ### Tests
 
@@ -95,25 +125,48 @@ release line.
   FormID, sub-B out-of-scope, no-such-slot, NoParam back-compat, NoParam +
   parameters → out-of-scope), 1 Layer 2.03 (Effects-list × HasPerk composition),
   3 Layer 4.dsl.* (DSL-ambiguity error + actor_value back-compat — 4.dsl.03
-  SKIP-with-reason pending P2B Enum branch), 3 Layer 4.formid.* (FormID parse +
+  SKIP-with-reason pending P2B), 3 Layer 4.formid.* (FormID parse +
   unresolved-plugin + record-absent), 1 Layer 4.slot.04 (footgun-guard), and 2
-  SKIP-with-reason cells (2.05 + 4.dsl.03 awaiting P2B). Total smoke surface:
-  160 v2.8.0 baseline + 134 P2A new = 294, all PASS or documented SKIP.
-- **+7 race-probe canary probes** under `tools/race-probe/Program.cs`: 5
+  SKIP-with-reason cells (2.05 + 4.dsl.03 awaiting P2B).
+- **+45 v2.9 P2B coverage-smoke cells** (and 2 SKIPs lifted to PASS): 41 Layer
+  1.P.Enum positives (1 canary GetActorValue with deliberate non-Health value
+  + 40 bulk via new `RunEnumDispatcherCell` helper that picks
+  `Enum.GetValues(propType).Cast<object>().Last()` per cell and logs the chosen
+  member in the trace for post-Mutagen-upgrade debuggability), 1 Layer 1.D.03 /
+  4.enum.01 combined (bad enum name → record-level Enum.Parse error wrapped with
+  function/slot context), 1 Layer 4.enum.02 (lowercase enum name resolves
+  case-insensitively), 1 Layer 4.enum.03 (numeric input → JSON-type error per
+  the documented string-only posture), Test 287 [2.05] lifted (back-compat
+  coexistence: record A `actor_value: "Stamina"` + record B
+  `parameters: {ActorValue: "Stamina"}` both succeed), and Test 290 [4.dsl.03]
+  lifted (parameters.ActorValue alone routes through the Enum branch).
+  Total smoke surface: 160 v2.8.0 baseline + 134 P2A + 45 P2B = 339, all PASS
+  or documented SKIP.
+- **+7 race-probe canary probes (P2A)** under `tools/race-probe/Program.cs`: 5
   representative functions across `IFormLinkOrIndex<T>` (GetIsID/Object,
   HasMagicEffect/MagicEffect, GetInFaction/Faction) + `IFormLink<T>`
   (GetVATSValueWeapon/Value, GetVATSValueTarget/Value), plus 2 footgun-guard
   probes (SecondUnusedIntParameter, FirstUnusedStringParameter). In-process
   Mutagen-direct round-trips; complement coverage-smoke's bridge-subprocess path.
+- **+3 race-probe Enum probes (P2B)** spanning enum-size variation: large
+  (GetActorValue/ActorValue, 156 members, target Magicka), small
+  (GetIsSex/MaleFemaleGender, 2 members, target Female), tiny
+  (GetAngle/Axis, 3 members, target Z). Each probe simulates the Enum branch
+  inline (Enum.Parse + reflection setter + readback) and asserts round-trip.
 
 ### Documentation
 
 - **`tools_patching.py` schema** — added the v2.9 `parameters` key to the
   `add_conditions` description with a concise per-shape slot-type table
-  pointing at CONDITIONS_AUDIT.md, plus the footgun-guard note.
-- **`KNOWN_ISSUES.md`** — moved "Other Condition-function parameter slots"
-  from carry-over to a covered-for entry naming the v2.9.0 P2A in-scope
-  119-function set, and added the 2B/2C/2D/sub-B gaps still open.
+  pointing at CONDITIONS_AUDIT.md, plus the footgun-guard note. P2B extended
+  the description to name the 41-function Enum coverage with the
+  string-only / case-insensitive contract.
+- **`KNOWN_ISSUES.md`** — P2A moved "Other Condition-function parameter slots"
+  from carry-over to a covered-for entry naming the v2.9.0 in-scope set, and
+  added the 2B/2C/2D/sub-B gaps still open. P2B lifted the 41-Enum bullet
+  from the gap-list to the covered-for section, with the per-enum-family
+  detail (ActorValue/Axis/CastSource/etc.); only 2C MultiSlot, 2D
+  PrimitiveOnly, sub-B String, and NoParam-no-op remain in the gaps section.
 - **PLAN.md + MATRIX.md plan-amend** at `5a06179` — folded six architectural
   surprises CONDITIONS_AUDIT.md surfaced during Phase 1: GetIsID slot is
   `Object` not `Reference`, dynamic base-prop detection replaces static skip
@@ -123,13 +176,11 @@ release line.
 
 ### Out of scope (v2.9.x candidates within release line)
 
-- **41 Enum-typed Condition functions** (Phase 2B). ActorValue family + 38
-  others. Dispatcher Enum branch + KnownParameterizedFunctions extension.
 - **28 MultiSlot Condition functions** (Phase 2C). GetStageDone + GetEventData
-  (3-slot mixed: Function/Member nested System.Enum + Record IFormLink) + 26
-  others. Exercises per-slot composition through the existing dispatcher
-  foreach; new code is just the Enum branch from 2B + the additional functions
-  in KnownParameterizedFunctions.
+  (3-slot mixed: Function/Member nested System.Enum routable through P2B's
+  Enum branch + Record IFormLink absorbed under sub-A's branch) + 26 others.
+  Exercises per-slot composition through the existing dispatcher foreach; no
+  new branches needed — 2C is "extend KnownParameterizedFunctions + add cells."
 - **11 PrimitiveOnly Condition functions** (Phase 2D). Direct Int32 / Single /
   Boolean conversion via `JsonElement.GetInt32()` / `GetSingle()` /
   `GetBoolean()`.

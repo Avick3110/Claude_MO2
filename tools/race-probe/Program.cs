@@ -1974,11 +1974,58 @@ ProbeFootgunGuard("GetIsID", "FirstUnusedStringParameter");
 
 Console.WriteLine($"=== v2.9 P2A probes: {(p2aFailures == 0 ? "ALL PASS" : $"{p2aFailures} FAILURE(S)")} ===");
 
+// ─── v2.9 P2B — Enum dispatcher functional probes (Mutagen-direct, in-process) ───
+//
+// Three representative Enum probes covering the dispatcher's reflection path
+// across enum-size variation: large (ActorValue, ~100 members), small
+// (MaleFemaleGender, 2 members), tiny (Axis, 3 members). Each probe simulates
+// RouteParameterSlot's Enum branch logic inline (Enum.Parse with ignoreCase: true,
+// reflection setter, readback) → asserts the slot's value matches the chosen
+// member and is NOT default index 0. Complements coverage-smoke's bridge-
+// subprocess Enum cells (Tests 295–338).
+
 Console.WriteLine();
-int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures;
+Console.WriteLine("=== v2.9 P2B — Enum dispatcher functional probes (in-process Mutagen-direct) ===");
+int p2bFailures = 0;
+
+void ProbeEnum(string functionName, string slotName, string targetName)
+{
+    var typeName = $"Mutagen.Bethesda.Skyrim.{functionName}ConditionData";
+    var t = typeof(IConditionData).Assembly.GetType(typeName);
+    if (t == null) { Console.WriteLine($"  [{functionName,-30}] FAIL: type {typeName} not found"); p2bFailures++; return; }
+    var condData = (Mutagen.Bethesda.Skyrim.ConditionData)System.Activator.CreateInstance(t)!;
+    var prop = t.GetProperty(slotName, BindingFlags.Public | BindingFlags.Instance);
+    if (prop == null) { Console.WriteLine($"  [{functionName,-30}] FAIL: no {slotName} property on {typeName}"); p2bFailures++; return; }
+    if (!prop.PropertyType.IsEnum)
+    { Console.WriteLine($"  [{functionName,-30}] FAIL: {slotName} is {prop.PropertyType.Name}, not an enum"); p2bFailures++; return; }
+    var enumType = prop.PropertyType;
+    object parsed;
+    try { parsed = Enum.Parse(enumType, targetName, ignoreCase: true); }
+    catch (Exception ex) { Console.WriteLine($"  [{functionName,-30}] FAIL: Enum.Parse('{targetName}') threw: {ex.Message}"); p2bFailures++; return; }
+    prop.SetValue(condData, parsed);
+    var readBack = prop.GetValue(condData);
+    var readBackName = readBack?.ToString() ?? "<null>";
+    if (readBackName != targetName)
+    { Console.WriteLine($"  [{functionName,-30}] FAIL: readback was '{readBackName}', expected '{targetName}'"); p2bFailures++; return; }
+    var memberCount = Enum.GetValues(enumType).Length;
+    Console.WriteLine($"  [{functionName,-30}] PASS  Enum {slotName}<{enumType.Name}> ({memberCount} members) round-trip → {readBackName} ✓");
+}
+
+// Three probes spanning enum-size: large / small / tiny.
+// ActorValue uses Magicka — well-known Skyrim ActorValue, distinct from
+// Test 290's Health and Test 287's Stamina to keep the canary cells visually
+// distinguishable in the trace.
+ProbeEnum("GetActorValue", "ActorValue",       "Magicka");           // ~100 members (ActorValue)
+ProbeEnum("GetIsSex",      "MaleFemaleGender", "Female");            // 2 members (MaleFemaleGender)
+ProbeEnum("GetAngle",      "Axis",             "Z");                 // 3 members (Axis)
+
+Console.WriteLine($"=== v2.9 P2B probes: {(p2bFailures == 0 ? "ALL PASS" : $"{p2bFailures} FAILURE(S)")} ===");
+
+Console.WriteLine();
+int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures;
 if (totalFailures > 0)
 {
-    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
+    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
     Environment.Exit(1);
 }
 Console.WriteLine("=== probe complete ===");

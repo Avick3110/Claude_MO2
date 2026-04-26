@@ -5918,9 +5918,90 @@ else Skip("4.c.01-carry", "no QUST");
     }
 }
 
-// ─── Test 287 [2.05]: SKIP — back-compat coexistence requires 2B Enum dispatcher ───
+// ─── Test 287 [2.05]: back-compat coexistence — actor_value + parameters.ActorValue ───
+// Lifted from SKIP-with-reason in 2A. Two records in one bridge call:
+//   A: GetActorValue with v2.8 actor_value: "Stamina" field (back-compat path)
+//   B: GetActorValue with v2.9 parameters: {ActorValue: "Stamina"} (dispatcher path)
+// Both must succeed; both readbacks must show ActorValue=Stamina. Proves the
+// v2.8 back-compat sugar path coexists with the v2.9 generic dispatcher in a
+// single multi-record bridge invocation (both paths flow through the same
+// BuildCondition factory, just take different code branches inside it).
 {
-    Skip("2.05", "back-compat coexistence (record A actor_value + record B parameters: {ActorValue: ...}) requires 2B's Enum branch; record A side covered by Test 288 [4.dsl.02]; full 2.05 lifts to PASS in 2B");
+    Console.WriteLine($"── Test 287 [2.05]: actor_value (record A) + parameters.ActorValue (record B) coexistence ──");
+    var mgefsForCoex = source.MagicEffects.Where(m => m.Conditions != null).Take(2).ToList();
+    if (mgefsForCoex.Count < 2) { Skip("2.05", $"need 2 MGEF with Conditions container, found {mgefsForCoex.Count}"); }
+    else
+    {
+        var mgefA = mgefsForCoex[0];
+        var mgefB = mgefsForCoex[1];
+        var outPath = Path.Combine(outDir, "test287-2-05-coexistence.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new object[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefA.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        // Record A: v2.8 back-compat path
+                        new { function = "GetActorValue", actor_value = "Stamina", @operator = ">=", value = 50f },
+                    },
+                },
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefB.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        // Record B: v2.9 dispatcher path
+                        new
+                        {
+                            function = "GetActorValue",
+                            @operator = ">=",
+                            value = 50f,
+                            parameters = new Dictionary<string, object> { ["ActorValue"] = "Stamina" },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        Console.WriteLine($"  source A: {FormatFormKey(mgefA.FormKey)} ({mgefA.EditorID}) — actor_value path");
+        Console.WriteLine($"  source B: {FormatFormKey(mgefB.FormKey)} ({mgefB.EditorID}) — parameters.ActorValue path");
+        Console.WriteLine($"  exit: {exit}");
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        bool success = root.GetProperty("success").GetBoolean();
+        if (!success) { Console.WriteLine($"  FAIL: bridge reported success=false: {stdout}"); failures++; }
+        else
+        {
+            var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+            string ReadAv(IMagicEffectGetter src)
+            {
+                var rec = outMod.MagicEffects.FirstOrDefault(m => m.FormKey == src.FormKey);
+                var addedCond = rec?.Conditions?.LastOrDefault(c => c.Data?.GetType().Name == "GetActorValueConditionData");
+                var avProp = addedCond?.Data?.GetType().GetProperty("ActorValue", BindingFlags.Public | BindingFlags.Instance);
+                return avProp?.GetValue(addedCond?.Data)?.ToString() ?? "<null>";
+            }
+            var avA = ReadAv(mgefA);
+            var avB = ReadAv(mgefB);
+            if (avA != "Stamina") { Console.WriteLine($"  FAIL: record A (actor_value path) ActorValue was '{avA}', expected 'Stamina'"); failures++; }
+            else if (avB != "Stamina") { Console.WriteLine($"  FAIL: record B (parameters path) ActorValue was '{avB}', expected 'Stamina'"); failures++; }
+            else
+            { Console.WriteLine($"  coexistence confirmed: record A actor_value→ActorValue={avA}; record B parameters.ActorValue→ActorValue={avB} ✓ (v2.8 back-compat + v2.9 dispatcher both live)"); Console.WriteLine("  PASS"); }
+        }
+        Console.WriteLine();
+    }
 }
 
 // ─── Test 288 [4.dsl.01]: actor_value AND parameters.ActorValue both → ambiguity error ───
@@ -6032,9 +6113,82 @@ else Skip("4.c.01-carry", "no QUST");
     }
 }
 
-// ─── Test 290 [4.dsl.03]: SKIP — parameters.ActorValue alone needs 2B Enum branch ───
+// ─── Test 290 [4.dsl.03]: parameters.ActorValue alone via 2B dispatcher ───
+// Lifted from SKIP-with-reason in 2A. Mirrors Test 289 [4.dsl.02]'s structure
+// but routes through RouteParameterSlot's Enum branch instead of v2.8's
+// back-compat actor_value handler. Proves the generic dispatcher reaches the
+// ActorValue slot via reflection (NOT via the back-compat path — actor_value
+// is omitted entirely; only parameters: {ActorValue: ...} is supplied).
+//
+// 2B canary: this is the inline-smoke halt-and-report cell. Independent
+// verification that the Enum branch lands a non-default ActorValue value
+// through the dispatcher, distinct from v2.8's path (proven by Test 289).
 {
-    Skip("4.dsl.03", "parameters: {ActorValue: 'Health'} alone requires 2B's Enum branch + GetActorValue in KnownParameterizedFunctions; lifts to PASS in 2B");
+    Console.WriteLine($"── Test 290 [4.dsl.03]: GetActorValue + parameters: {{ActorValue: 'Health'}} alone (v2.9 P2B Enum dispatcher canary) ──");
+    var mgefDsl = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefDsl == null) { Skip("4.dsl.03", "no MGEF with Conditions container"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test290-4dsl03-parameters-actorvalue-alone.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefDsl.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new
+                        {
+                            function = "GetActorValue",
+                            @operator = ">=",
+                            value = 50f,
+                            parameters = new Dictionary<string, object> { ["ActorValue"] = "Health" },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, stderr, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        Console.WriteLine($"  source: {FormatFormKey(mgefDsl.FormKey)} ({mgefDsl.EditorID})");
+        Console.WriteLine($"  target: parameters.ActorValue = \"Health\" (no actor_value field — pure dispatcher path)");
+        Console.WriteLine($"  exit: {exit}");
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        bool success = root.GetProperty("success").GetBoolean();
+        if (!success) { Console.WriteLine($"  FAIL: bridge reported success=false: {stdout}"); failures++; }
+        else
+        {
+            var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+            var rec = outMod.MagicEffects.FirstOrDefault(m => m.FormKey == mgefDsl.FormKey);
+            // ApplyAddConditions appends to the existing Conditions list, so the
+            // dispatched-and-written entry is always at the end. LastOrDefault
+            // matches even when source carries pre-existing same-type condition
+            // (mirrors the same fix in RunFLIDispatcherCell).
+            var addedCond = rec?.Conditions?.LastOrDefault(c => c.Data?.GetType().Name == "GetActorValueConditionData");
+            if (addedCond == null)
+            { Console.WriteLine($"  FAIL: no GetActorValueConditionData in readback ({rec?.Conditions?.Count ?? 0} conditions)"); failures++; }
+            else
+            {
+                var avProp = addedCond.Data!.GetType().GetProperty("ActorValue", BindingFlags.Public | BindingFlags.Instance);
+                var avStr = avProp?.GetValue(addedCond.Data)?.ToString() ?? "<null>";
+                if (avStr != "Health")
+                { Console.WriteLine($"  FAIL: ActorValue was '{avStr}', expected 'Health' (Enum dispatcher branch did not land)"); failures++; }
+                else
+                { Console.WriteLine($"  readback: GetActorValueConditionData.ActorValue=Health ✓ (v2.9 P2B Enum dispatcher canary verified — slot resolved through RouteParameterSlot's Enum branch with ignoreCase: true Enum.Parse, NOT via v2.8's back-compat actor_value handler)"); Console.WriteLine("  PASS"); }
+            }
+        }
+        Console.WriteLine();
+    }
 }
 
 // ─── Test 291 [4.formid.01]: GetIsID + malformed FormID hex ───
@@ -6239,6 +6393,341 @@ else Skip("4.c.01-carry", "no QUST");
     }
 }
 
+// ═════════════════════════════════════════════════════════════════════════
+// v2.9.0 P2B — Enum-shape dispatcher cells (Layer 1.P.Enum positives ×41 +
+// Layer 1.D.03 / 4.enum.01–03 negatives/edges).
+//
+// Phase 2B scope: 41 Enum-typed Condition functions (scratch lines 1136–1219)
+// covering 18 distinct enum types (ActorValue, Axis, CastSource, Alignment,
+// FormType, MaleFemaleGender, MiscStatEnum, AdvanceAction, FurnitureAnimType,
+// FurnitureEntryType, CriticalStage, PlayerAction, WardState + 5 nested types
+// like GetVATSValueActionConditionData+Action and Projectile+TypeEnum).
+// Routing via RouteParameterSlot's Enum branch (Enum.Parse with ignoreCase: true).
+// Halt-and-report canary already verified end-to-end at Test 290 [4.dsl.03];
+// these cells extend Layer 1.P coverage to the full 41-function in-scope set
+// plus Layer 1.D / 4.enum negatives and edges.
+
+// ─── Test 295 [1.P.GetActorValue.MGEF] — Enum canary cell (explicit) ───
+// Mirrors Test 161's role for the FLI branch: the explicit Layer 1.P canary
+// for Enum-shape dispatch. Test 290 [4.dsl.03] proves the dispatcher path is
+// distinct from v2.8 back-compat; this 1.P cell anchors GetActorValue in the
+// per-function positive coverage layer with a deliberately-not-Health value
+// (Magicka — non-default index, distinct from Test 290) so the cell
+// independently verifies the Enum branch and isn't a duplicate of 290.
+{
+    Console.WriteLine($"── Test 295 [1.P.GetActorValue.MGEF]: MGEF + add_conditions GetActorValue via parameters.ActorValue (Enum canary) ──");
+    var mgefForCanary = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefForCanary == null) { Skip("1.P.GetActorValue.MGEF", "no MGEF with Conditions container"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test295-1pGetActorValueMGEF.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        const string targetEnumValue = "Magicka";  // valid Mutagen 0.53.1 ActorValue, non-default, distinct from Test 290's "Health" and Test 287's "Stamina"
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefForCanary.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new
+                        {
+                            function = "GetActorValue",
+                            @operator = ">=",
+                            value = 50f,
+                            parameters = new Dictionary<string, object> { ["ActorValue"] = targetEnumValue },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        Console.WriteLine($"  source: {FormatFormKey(mgefForCanary.FormKey)} ({mgefForCanary.EditorID})");
+        Console.WriteLine($"  target: parameters.ActorValue = \"{targetEnumValue}\" (Mutagen.Bethesda.Skyrim.ActorValue enum)");
+        Console.WriteLine($"  exit: {exit}");
+        using var doc = JsonDocument.Parse(stdout);
+        bool success = doc.RootElement.GetProperty("success").GetBoolean();
+        if (!success) { Console.WriteLine($"  FAIL: bridge reported success=false: {stdout}"); failures++; }
+        else
+        {
+            var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+            var rec = outMod.MagicEffects.FirstOrDefault(m => m.FormKey == mgefForCanary.FormKey);
+            var addedCond = rec?.Conditions?.LastOrDefault(c => c.Data?.GetType().Name == "GetActorValueConditionData");
+            var avProp = addedCond?.Data?.GetType().GetProperty("ActorValue", BindingFlags.Public | BindingFlags.Instance);
+            var avStr = avProp?.GetValue(addedCond?.Data)?.ToString() ?? "<null>";
+            if (avStr != targetEnumValue)
+            { Console.WriteLine($"  FAIL: ActorValue was '{avStr}', expected '{targetEnumValue}'"); failures++; }
+            else
+            { Console.WriteLine($"  readback: GetActorValueConditionData.ActorValue={avStr} ✓ (Enum canary verified — slot resolved through RouteParameterSlot's Enum branch)"); Console.WriteLine("  PASS"); }
+        }
+        Console.WriteLine();
+    }
+}
+
+// ─── Tests 296–335 [1.P.<Function>.MGEF] — bulk Layer 1.P.Enum cells (40 fns) ───
+// 41 Enum total - GetActorValue canary above = 40 bulk cells.
+// Per-cell value pick: Enum.GetValues(propType).Cast<object>().Last() — the
+// last enum member is deterministic (Mutagen 0.53.1 is the project's pinned
+// version) and non-default (index 0 = what Activator.CreateInstance would
+// produce, so successful readback of Last() proves the dispatcher landed).
+// Per Aaron's halt-1 refinement: trace logs the chosen value per cell so
+// post-Mutagen-upgrade debugging sees the specific enum member instantly.
+{
+    Console.WriteLine($"── Tests 296–335 [1.P.<Function>.MGEF]: bulk v2.9 P2B Enum dispatcher cells (40 functions) ──");
+    var mgefForBulk = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefForBulk == null) { Skip("1.P.Enum.bulk", "no MGEF with Conditions container"); }
+    else
+    {
+        // (Function, Slot) — 40 entries, GetActorValue excluded (Test 295 canary).
+        // Order matches scratch lines 1136–1219.
+        var bulkEnumFuncs = new (string Fn, string Slot)[]
+        {
+            ("EPMagic_IsAdvanceSkill",         "ActorValue"),
+            ("EPMagic_SpellHasSkill",          "ActorValue"),
+            ("EPModSkillUsage_IsAdvanceAction","AdvanceAction"),
+            // GetActorValue — Test 295 canary above.
+            ("GetActorValuePercent",           "ActorValue"),
+            ("GetAngle",                       "Axis"),
+            ("GetBaseActorValue",              "ActorValue"),
+            ("GetCurrentCastingType",          "SpellSource"),
+            ("GetCurrentDeliveryType",         "SpellSource"),
+            ("GetEquippedItemType",            "ItemSource"),
+            ("GetIsAlignment",                 "Alignment"),
+            ("GetIsObjectType",                "FormType"),
+            ("GetIsSex",                       "MaleFemaleGender"),
+            ("GetIsUsedItemType",              "FormType"),
+            ("GetPCIsSex",                     "MaleFemaleGender"),
+            ("GetPCMiscStat",                  "MiscStat"),
+            ("GetPathingCurrentSpeedAngle",    "Axis"),
+            ("GetPathingTargetAngleOffset",    "Axis"),
+            ("GetPathingTargetOffset",         "Axis"),
+            ("GetPathingTargetSpeedAngle",     "Axis"),
+            ("GetPermanentActorValue",         "ActorValue"),
+            ("GetPos",                         "Axis"),
+            ("GetReplacedItemType",            "ItemSource"),
+            ("GetStartingAngle",               "Axis"),
+            ("GetStartingPos",                 "Axis"),
+            ("GetVATSValueAction",             "Value"),
+            ("GetVATSValueCastingType",        "Value"),
+            ("GetVATSValueDeliveryType",       "Value"),
+            ("GetVATSValueProjectileType",     "Value"),
+            ("GetVATSValueTargetPart",         "Value"),
+            ("GetVATSValueWeaponType",         "Value"),
+            ("GetVelocity",                    "Axis"),
+            ("HasBoundWeaponEquipped",         "WeaponSource"),
+            ("HasEquippedSpell",               "SpellSource"),
+            ("IsFurnitureAnimType",            "FurnitureAnimType"),
+            ("IsFurnitureEntryType",           "FurnitureEntryType"),
+            ("IsInCriticalStage",              "CriticalStage"),
+            ("IsInFurnitureState",             "FurnitureAnimType"),
+            ("IsPlayerActionActive",           "PlayerAction"),
+            ("IsWardState",                    "WardState"),
+            ("IsWeaponSkillType",              "ActorValue"),
+        };
+        int testNum = 296;
+        int bulkPasses = 0, bulkFailures = 0;
+        foreach (var (fn, slot) in bulkEnumFuncs)
+        {
+            var (ok, trace) = RunEnumDispatcherCell(
+                bridgeExe, outDir, mgefForBulk, SkyrimEsm,
+                new { game_release = "SkyrimSE", listings = loadOrderListings },
+                fn, slot);
+            string label = $"1.P.{fn}.MGEF";
+            Console.WriteLine($"  [{testNum,3}] [{label,-58}] {(ok ? "PASS" : "FAIL")}  {trace}");
+            if (ok) bulkPasses++; else { bulkFailures++; failures++; }
+            testNum++;
+        }
+        Console.WriteLine($"  Bulk Enum summary: {bulkPasses}/{bulkEnumFuncs.Length} PASS ({bulkFailures} FAIL)");
+        Console.WriteLine();
+    }
+}
+
+// ─── Test 336 [1.D.03 / 4.enum.01]: GetActorValue + bad enum name ───
+// Combined cell — MATRIX 1.D.03 and 4.enum.01 specify the same operation.
+// Verifies Enum.Parse rejection wraps with function/slot context per the
+// dispatcher's Enum-branch ArgumentException handler.
+{
+    Console.WriteLine($"── Test 336 [1.D.03 / 4.enum.01]: GetActorValue + parameters: {{ActorValue: 'BogusStat'}} (bad enum rejection) ──");
+    var mgefBad = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefBad == null) { Skip("1.D.03/4.enum.01", "no MGEF with Conditions container"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test336-1d03-bad-enum.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefBad.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new
+                        {
+                            function = "GetActorValue",
+                            @operator = ">=",
+                            value = 1f,
+                            parameters = new Dictionary<string, object> { ["ActorValue"] = "BogusStatThatDoesntExist" },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        using var doc = JsonDocument.Parse(stdout);
+        bool success = doc.RootElement.GetProperty("success").GetBoolean();
+        if (success)
+        { Console.WriteLine($"  FAIL: bad enum reported success=true; expected record-level error"); failures++; }
+        else
+        {
+            var details = doc.RootElement.GetProperty("details");
+            string errMsg = details[0].GetProperty("error").GetString() ?? "<no error message>";
+            // Confirm error names the bad value + identifies it as enum-shape on the slot/function.
+            if (!errMsg.Contains("BogusStat", StringComparison.Ordinal) ||
+                !errMsg.Contains("ActorValue", StringComparison.Ordinal))
+            { Console.WriteLine($"  FAIL: error doesn't name bad value or enum type: '{errMsg}'"); failures++; }
+            else
+            { Console.WriteLine($"  bad-enum rejection confirmed: '{errMsg}'"); Console.WriteLine("  PASS"); }
+        }
+        Console.WriteLine();
+    }
+}
+
+// ─── Test 337 [4.enum.02]: GetActorValue + lowercase parse (case-insensitive) ───
+// Per PLAN § A: Enum.Parse(..., ignoreCase: true). Lowercase "health" must
+// resolve to ActorValue.Health.
+{
+    Console.WriteLine($"── Test 337 [4.enum.02]: GetActorValue + parameters: {{ActorValue: 'health'}} (lowercase, case-insensitive parse) ──");
+    var mgefLow = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefLow == null) { Skip("4.enum.02", "no MGEF with Conditions container"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test337-4enum02-lowercase.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefLow.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new
+                        {
+                            function = "GetActorValue",
+                            @operator = ">=",
+                            value = 50f,
+                            parameters = new Dictionary<string, object> { ["ActorValue"] = "health" },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        using var doc = JsonDocument.Parse(stdout);
+        bool success = doc.RootElement.GetProperty("success").GetBoolean();
+        if (!success) { Console.WriteLine($"  FAIL: lowercase enum name rejected: {stdout}"); failures++; }
+        else
+        {
+            var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+            var rec = outMod.MagicEffects.FirstOrDefault(m => m.FormKey == mgefLow.FormKey);
+            var addedCond = rec?.Conditions?.LastOrDefault(c => c.Data?.GetType().Name == "GetActorValueConditionData");
+            var avProp = addedCond?.Data?.GetType().GetProperty("ActorValue", BindingFlags.Public | BindingFlags.Instance);
+            var avStr = avProp?.GetValue(addedCond?.Data)?.ToString() ?? "<null>";
+            if (avStr != "Health")
+            { Console.WriteLine($"  FAIL: lowercase 'health' did not resolve to Health; got '{avStr}'"); failures++; }
+            else
+            { Console.WriteLine($"  case-insensitive parse confirmed: 'health' → ActorValue.{avStr} ✓ (Enum.Parse ignoreCase: true)"); Console.WriteLine("  PASS"); }
+        }
+        Console.WriteLine();
+    }
+}
+
+// ─── Test 338 [4.enum.03]: GetActorValue + numeric input → error ───
+// Per kickoff §3 lock and PLAN § A — strings are the documented form;
+// numeric input is a DSL violation. The Enum branch checks ValueKind != String
+// and throws explicitly rather than coercing the number to an enum index.
+// Documents Phase 2B's deliberate posture: matches v2.8 actor_value contract.
+{
+    Console.WriteLine($"── Test 338 [4.enum.03]: GetActorValue + parameters: {{ActorValue: 24}} (numeric → error per 2B posture) ──");
+    var mgefNum = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefNum == null) { Skip("4.enum.03", "no MGEF with Conditions container"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test338-4enum03-numeric.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefNum.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new
+                        {
+                            function = "GetActorValue",
+                            @operator = ">=",
+                            value = 1f,
+                            parameters = new Dictionary<string, object> { ["ActorValue"] = 24 },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        using var doc = JsonDocument.Parse(stdout);
+        bool success = doc.RootElement.GetProperty("success").GetBoolean();
+        if (success)
+        { Console.WriteLine($"  FAIL: numeric input reported success=true; expected JSON-type error per 2B posture"); failures++; }
+        else
+        {
+            var details = doc.RootElement.GetProperty("details");
+            string errMsg = details[0].GetProperty("error").GetString() ?? "<no error message>";
+            // Confirm error indicates enum-name expectation + got a non-string JSON value.
+            if (!errMsg.Contains("enum name", StringComparison.Ordinal) ||
+                !errMsg.Contains("Number", StringComparison.OrdinalIgnoreCase))
+            { Console.WriteLine($"  FAIL: error doesn't reference enum-name expectation or numeric ValueKind: '{errMsg}'"); failures++; }
+            else
+            { Console.WriteLine($"  numeric-input rejection confirmed: '{errMsg}'"); Console.WriteLine("  PASS"); }
+        }
+        Console.WriteLine();
+    }
+}
+
 if (skipReasons.Count > 0)
 {
     Console.WriteLine($"=== {skipReasons.Count} SKIP(s) ===");
@@ -6366,5 +6855,150 @@ static (bool ok, string trace) RunFLIDispatcherCell(
             !fkStr.Contains("Skyrim.esm", StringComparison.Ordinal))
             return (false, $"{slotName} FormKey={fkStr}, expected to contain '1A6E8'+'Skyrim.esm'");
         return (true, $"{branchLabel} {slotName}={fkStr}");
+    }
+}
+
+// v2.9.0 P2B — Enum-shape dispatcher cell helper. Builds a single-condition
+// add_conditions request with parameters: {<slot>: <enumValueAsString>},
+// pipes through bridge, reads back, asserts the slot's value resolved to
+// the chosen enum member (NOT default index 0 = what Activator.CreateInstance
+// would write, so a successful Last() readback proves the dispatcher landed).
+//
+// Per-cell value pick: Enum.GetValues(propType).Cast<object>().Last().
+// Deterministic against Mutagen 0.53.1 (project's pinned version); per
+// halt-1 refinement the chosen value is logged in the trace so post-Mutagen-
+// upgrade debugging surfaces the specific member instantly without re-running
+// the helper.
+//
+// Readback comparison uses the underlying integer value's lower 32 bits
+// (unchecked uint cast), not .ToString(). Reasons:
+//   1. Some Mutagen enum types use hash-style integer encoding for the CTDA
+//      binary format (e.g. MiscStatEnum: AnimalsKilled = 0xFCD96A11 is a
+//      Bethesda-style CRC32-of-name hash), and Mutagen's reader returns the
+//      raw int when its name lookup misses. The dispatcher's reflection write
+//      IS round-trip-stable at the bit level — that's what matters.
+//   2. Sign-extension mismatch — some enums (MiscStatEnum) are defined with
+//      uint underlying type (so chosen.UnderlyingValue is a positive UInt32
+//      like 4242362385 = 0xFCD96A11), but Mutagen's binary reader stores the
+//      same 4 bytes as Int32 (so readback is -52604911 with the same
+//      0xFCD96A11 lower 32 bits but sign-extended to 64 bits). Comparing as
+//      uint (lower 32 bits, unchecked cast) handles both representations
+//      uniformly.
+// Trace logs both the chosen member name and its underlying int for
+// debuggability; if the readback renders as a raw int instead of the name,
+// the trace shows that too.
+//
+// Nested enum types (e.g. GetVATSValueActionConditionData+Action,
+// Projectile+TypeEnum) load the same way via reflection on the slot's
+// PropertyType — the helper doesn't care whether the enum is nested or
+// top-level.
+static (bool ok, string trace) RunEnumDispatcherCell(
+    string bridgeExe, string outDir, IMagicEffectGetter mgef, string sourcePath,
+    object loadOrder, string functionName, string slotName)
+{
+    // Look up the {Function}ConditionData type via reflection so we can
+    // discover the slot's enum type at test time and pick a known-valid
+    // value without hand-curation per function.
+    var typeName = $"Mutagen.Bethesda.Skyrim.{functionName}ConditionData";
+    var condDataType = typeof(IConditionData).Assembly.GetType(typeName);
+    if (condDataType == null)
+        return (false, $"type {typeName} not found in Mutagen.Bethesda.Skyrim assembly");
+    var slotProp = condDataType.GetProperty(slotName,
+        BindingFlags.Public | BindingFlags.Instance);
+    if (slotProp == null)
+        return (false, $"{condDataType.Name} has no {slotName} property");
+    var enumType = slotProp.PropertyType;
+    if (!enumType.IsEnum)
+        return (false, $"{slotName} on {condDataType.Name} is {enumType.Name}, not an enum");
+    var values = Enum.GetValues(enumType).Cast<object>().ToList();
+    if (values.Count == 0)
+        return (false, $"{enumType.Name} has no defined enum members");
+    var chosenValue = values.Last();
+    var chosenName = chosenValue.ToString()!;
+    // Underlying int — the round-trip-stable representation. Some Mutagen
+    // enum types (e.g. MiscStatEnum) store their members as Bethesda hash
+    // values, so the int survives binary round-trip even when name resolution
+    // misses on the readback side.
+    long chosenInt;
+    try { chosenInt = Convert.ToInt64(chosenValue); }
+    catch (Exception ex) { return (false, $"can't convert chosen enum value '{chosenName}' to long: {ex.Message}"); }
+
+    var outPath = Path.Combine(outDir, $"v29-enum-{functionName}-{slotName}.esp");
+    if (File.Exists(outPath)) File.Delete(outPath);
+    var req = new
+    {
+        command = "patch",
+        output_path = outPath,
+        esl_flag = false,
+        author = "coverage-smoke",
+        records = new[]
+        {
+            new
+            {
+                op = "override",
+                formid = $"{mgef.FormKey.ModKey.FileName}:{mgef.FormKey.ID:X6}",
+                source_path = sourcePath,
+                add_conditions = new object[]
+                {
+                    new
+                    {
+                        function = functionName,
+                        @operator = "==",
+                        value = 1f,
+                        parameters = new Dictionary<string, object> { [slotName] = chosenName },
+                    },
+                },
+            },
+        },
+        load_order = loadOrder,
+    };
+    var (stdout, _, _) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+    JsonDocument doc;
+    try { doc = JsonDocument.Parse(stdout); }
+    catch (Exception ex) { return (false, $"bridge stdout not valid JSON: {ex.Message}"); }
+    using (doc)
+    {
+        var root = doc.RootElement;
+        if (!root.TryGetProperty("success", out var succEl) || !succEl.GetBoolean())
+            return (false, $"bridge success=false (chose '{chosenName}'): {stdout.Substring(0, Math.Min(stdout.Length, 200))}");
+        if (!File.Exists(outPath))
+            return (false, "output ESP missing");
+        var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+        var rec = outMod.MagicEffects.FirstOrDefault(m => m.FormKey == mgef.FormKey);
+        if (rec?.Conditions == null || rec.Conditions.Count == 0)
+            return (false, "MGEF Conditions missing or empty");
+        var expectedDataTypeName = $"{functionName}ConditionData";
+        // LastOrDefault — same rationale as RunFLIDispatcherCell.
+        var addedCond = rec.Conditions.LastOrDefault(c => c.Data?.GetType().Name == expectedDataTypeName);
+        if (addedCond == null)
+            return (false, $"no entry of type {expectedDataTypeName} in {rec.Conditions.Count} conditions (chose '{chosenName}')");
+        var slotPropReadback = addedCond.Data!.GetType().GetProperty(slotName,
+            BindingFlags.Public | BindingFlags.Instance);
+        if (slotPropReadback == null)
+            return (false, $"{expectedDataTypeName} has no {slotName} property at readback");
+        var slotVal = slotPropReadback.GetValue(addedCond.Data);
+        if (slotVal == null)
+            return (false, $"{expectedDataTypeName}.{slotName} is null after readback (chose '{chosenName}')");
+        var readbackStr = slotVal.ToString() ?? "<null>";
+        long readbackInt;
+        try { readbackInt = Convert.ToInt64(slotVal); }
+        catch (Exception ex) { return (false, $"can't convert {slotName} readback '{readbackStr}' to long: {ex.Message}"); }
+        // Compare lower 32 bits via unchecked uint cast — see helper-comment
+        // above for the sign-extension + hash-encoding rationale.
+        uint chosenBits = unchecked((uint)chosenInt);
+        uint readbackBits = unchecked((uint)readbackInt);
+        if (chosenBits != readbackBits)
+            return (false, $"{slotName} readback={readbackStr}({readbackInt}=0x{readbackBits:X8}), chose '{chosenName}'({chosenInt}=0x{chosenBits:X8}) via Last() — lower-32-bit mismatch");
+        // Strip namespace prefix from FullName for trace readability — nested types
+        // print as "Outer+Inner" via Name; top-level enums use Name directly.
+        var enumLabel = enumType.IsNested ? $"{enumType.DeclaringType!.Name}+{enumType.Name}" : enumType.Name;
+        // If readback's name resolved to the chosen name, simplest trace; otherwise
+        // include the int so the round-trip-stable evidence is in the log (e.g.
+        // MiscStatEnum's AnimalsKilled comes back as raw int -52604911, but the
+        // dispatcher round-trip is correct at the bit level).
+        var trace = readbackStr == chosenName
+            ? $"{enumLabel}.{slotName}={readbackStr} via Last()"
+            : $"{enumLabel}.{slotName}={chosenName}(0x{chosenBits:X8}) → readback {readbackStr} via Last() (bit round-trip ✓; Mutagen name lookup misses — see helper note)";
+        return (true, trace);
     }
 }

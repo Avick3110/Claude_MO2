@@ -2021,11 +2021,154 @@ ProbeEnum("GetAngle",      "Axis",             "Z");                 // 3 member
 
 Console.WriteLine($"=== v2.9 P2B probes: {(p2bFailures == 0 ? "ALL PASS" : $"{p2bFailures} FAILURE(S)")} ===");
 
+// ─── v2.9 P2C — MultiSlot dispatcher functional probes (Mutagen-direct, in-process) ───
+//
+// Four representative MultiSlot probes covering the dispatcher's per-slot
+// composition path across shape combinations:
+//   - GetEventData (3-slot mixed-shape: 2 nested System.Enum + 1 IFormLink<T>)
+//     — the 3-slot canary; exercises 2B Enum branch + 2A sub-A IFormLink<T> in
+//     a single composition.
+//   - GetStageDone (FLI + Int32) — Layer 2.01 canonical multi-slot; FLI 2A +
+//     Int32 P2C-new.
+//   - GetWithinDistance (Single + FLI) — Single P2C-new representative; only
+//     Single-bearing function in v2.9.0 in-scope set.
+//   - GetRelativeAngle (Enum + FLI) — Axis enum + IPlacedSimple FLI; covers
+//     Enum + FLI mixed without the IFormLink/3-slot complexity of GetEventData.
+//
+// Each probe simulates RouteParameterSlot's per-slot dispatch inline — for
+// each slot, picks the right branch (FormLinkOrIndex<T> ctor / FormLink<T>
+// ctor / Enum.Parse / direct Int32 / direct Single), reflectively writes the
+// value, reads back, asserts. No bridge subprocess — independent verification
+// that the per-slot reflection write is round-trip-stable at the Mutagen-direct
+// layer. Complements coverage-smoke's bridge-subprocess MultiSlot cells (Tests
+// 339–370).
+
 Console.WriteLine();
-int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures;
+Console.WriteLine("=== v2.9 P2C — MultiSlot dispatcher functional probes (in-process Mutagen-direct) ===");
+int p2cFailures = 0;
+
+void ProbeMultiSlot(string functionName, params (string Slot, object Value)[] slotInputs)
+{
+    var typeName = $"Mutagen.Bethesda.Skyrim.{functionName}ConditionData";
+    var t = typeof(IConditionData).Assembly.GetType(typeName);
+    if (t == null)
+    {
+        Console.WriteLine($"  [{functionName,-30}] FAIL: type {typeName} not found");
+        p2cFailures++; return;
+    }
+    var condData = (Mutagen.Bethesda.Skyrim.ConditionData)System.Activator.CreateInstance(t)!;
+
+    var perSlotTraces = new System.Collections.Generic.List<string>();
+    foreach (var (slotName, value) in slotInputs)
+    {
+        var prop = t.GetProperty(slotName, BindingFlags.Public | BindingFlags.Instance);
+        if (prop == null)
+        { Console.WriteLine($"  [{functionName,-30}] FAIL: no {slotName} property on {t.Name}"); p2cFailures++; return; }
+        var pt = prop.PropertyType;
+
+        if (pt.IsGenericType && pt.GetGenericTypeDefinition().Name.StartsWith("IFormLinkOrIndex"))
+        {
+            if (value is not FormKey fk)
+            { Console.WriteLine($"  [{functionName,-30}] FAIL: {slotName}<FLI> input not FormKey ({value?.GetType().Name})"); p2cFailures++; return; }
+            var inner = pt.GetGenericArguments()[0];
+            var concreteType = typeof(Mutagen.Bethesda.Plugins.FormLinkOrIndex<>).MakeGenericType(inner);
+            var inst = System.Activator.CreateInstance(concreteType, new object[] { condData, fk });
+            prop.SetValue(condData, inst);
+            var readBack = prop.GetValue(condData);
+            var linkVal = readBack!.GetType().GetProperty("Link")!.GetValue(readBack);
+            var fkVal = linkVal!.GetType().GetProperty("FormKey")!.GetValue(linkVal);
+            if (!fk.Equals(fkVal))
+            { Console.WriteLine($"  [{functionName,-30}] FAIL: {slotName}<FLI> expected {fk}, got {fkVal}"); p2cFailures++; return; }
+            perSlotTraces.Add($"{slotName}<FLI>={fk}");
+        }
+        else if (pt.IsGenericType && pt.GetGenericTypeDefinition() == typeof(Mutagen.Bethesda.Plugins.IFormLink<>))
+        {
+            if (value is not FormKey fk)
+            { Console.WriteLine($"  [{functionName,-30}] FAIL: {slotName}<IFormLink> input not FormKey"); p2cFailures++; return; }
+            var inner = pt.GetGenericArguments()[0];
+            var concreteType = typeof(Mutagen.Bethesda.Plugins.FormLink<>).MakeGenericType(inner);
+            var inst = System.Activator.CreateInstance(concreteType, fk);
+            prop.SetValue(condData, inst);
+            var readBack = prop.GetValue(condData);
+            var fkVal = readBack!.GetType().GetProperty("FormKey")!.GetValue(readBack);
+            if (!fk.Equals(fkVal))
+            { Console.WriteLine($"  [{functionName,-30}] FAIL: {slotName}<IFormLink> expected {fk}, got {fkVal}"); p2cFailures++; return; }
+            perSlotTraces.Add($"{slotName}<IFormLink>={fk}");
+        }
+        else if (pt.IsEnum)
+        {
+            if (value is not string enumName)
+            { Console.WriteLine($"  [{functionName,-30}] FAIL: {slotName}<Enum> input not string"); p2cFailures++; return; }
+            object parsed;
+            try { parsed = Enum.Parse(pt, enumName, ignoreCase: true); }
+            catch (Exception ex)
+            { Console.WriteLine($"  [{functionName,-30}] FAIL: Enum.Parse({slotName}, '{enumName}') threw: {ex.Message}"); p2cFailures++; return; }
+            prop.SetValue(condData, parsed);
+            var readBack = prop.GetValue(condData);
+            // Use lower-32-bit comparison per 2B forward-carry (handles MiscStatEnum-style
+            // sign-extension if a hash-encoded enum surfaces in MultiSlot scope).
+            long sentBits = Convert.ToInt64(parsed);
+            long readbackBits = Convert.ToInt64(readBack);
+            if (unchecked((uint)sentBits) != unchecked((uint)readbackBits))
+            { Console.WriteLine($"  [{functionName,-30}] FAIL: {slotName}<Enum> bit mismatch ('{enumName}' vs readback '{readBack}')"); p2cFailures++; return; }
+            perSlotTraces.Add($"{slotName}<Enum>={enumName}");
+        }
+        else if (pt == typeof(int))
+        {
+            if (value is not int intVal)
+            { Console.WriteLine($"  [{functionName,-30}] FAIL: {slotName}<Int32> input not int"); p2cFailures++; return; }
+            prop.SetValue(condData, intVal);
+            var readBack = prop.GetValue(condData);
+            if (readBack is not int readBackInt || readBackInt != intVal)
+            { Console.WriteLine($"  [{functionName,-30}] FAIL: {slotName}<Int32> readback was '{readBack}', expected {intVal}"); p2cFailures++; return; }
+            perSlotTraces.Add($"{slotName}<Int32>={intVal}");
+        }
+        else if (pt == typeof(float))
+        {
+            if (value is not float floatVal)
+            { Console.WriteLine($"  [{functionName,-30}] FAIL: {slotName}<Single> input not float"); p2cFailures++; return; }
+            prop.SetValue(condData, floatVal);
+            var readBack = prop.GetValue(condData);
+            // Bit-exact comparison via SingleToInt32Bits per 2B forward-carry — handles
+            // NaN / sub-normal edge cases (uncommon for Skyrim conditions but cheap to
+            // guard against here as a v2.9.x stability anchor).
+            if (readBack is not float readBackFloat
+                || BitConverter.SingleToInt32Bits(readBackFloat) != BitConverter.SingleToInt32Bits(floatVal))
+            { Console.WriteLine($"  [{functionName,-30}] FAIL: {slotName}<Single> readback was '{readBack}', expected {floatVal} (bit-exact)"); p2cFailures++; return; }
+            perSlotTraces.Add($"{slotName}<Single>={floatVal}");
+        }
+        else
+        {
+            Console.WriteLine($"  [{functionName,-30}] FAIL: {slotName} has unsupported type {pt.FullName}");
+            p2cFailures++; return;
+        }
+    }
+    Console.WriteLine($"  [{functionName,-30}] PASS  MultiSlot {slotInputs.Length}-slot: {string.Join(" | ", perSlotTraces)} ✓");
+}
+
+// 4 representative MultiSlot probes spanning the dispatcher's branches.
+var probeMultiKey = new FormKey(ModKey.FromNameAndExtension("Skyrim.esm"), 0x0001A6E8);
+ProbeMultiSlot("GetEventData",
+    ("Function", (object)"GetIsID"),
+    ("Member", (object)"Form"),
+    ("Record", (object)probeMultiKey));                                   // 2 nested Enum + 1 IFormLink (3-slot canary)
+ProbeMultiSlot("GetStageDone",
+    ("Quest", (object)probeMultiKey),
+    ("Stage", (object)50));                                               // FLI + Int32 (Layer 2.01 canonical)
+ProbeMultiSlot("GetWithinDistance",
+    ("Distance", (object)1024.0f),
+    ("Target", (object)probeMultiKey));                                   // Single + FLI (only Single-bearing function)
+ProbeMultiSlot("GetRelativeAngle",
+    ("Axis", (object)"Z"),
+    ("Target", (object)probeMultiKey));                                   // Enum + FLI (Axis matches P2B probe)
+
+Console.WriteLine($"=== v2.9 P2C probes: {(p2cFailures == 0 ? "ALL PASS" : $"{p2cFailures} FAILURE(S)")} ===");
+
+Console.WriteLine();
+int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures;
 if (totalFailures > 0)
 {
-    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
+    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
     Environment.Exit(1);
 }
 Console.WriteLine("=== probe complete ===");

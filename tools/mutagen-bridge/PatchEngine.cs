@@ -1930,10 +1930,53 @@ public class PatchEngine
         "IsPlayerActionActive",
         "IsWardState",
         "IsWeaponSkillType",
+
+        // ── 28 MultiSlot functions (P2C; scratch lines 1448–1531; incl. GetEventData
+        // absorbed under sub-A's IFormLink<T> branch per CONDITIONS_AUDIT.md
+        // § GetEventData re-triage decision) ──
+        // Slot signatures span FLI + IFormLink + Enum + Int32 + Single across the
+        // 28 functions; each multi-slot function dispatches per-slot through
+        // BuildCondition's foreach over ce.Parameters (lines ~1681-1685). The
+        // dispatcher itself doesn't distinguish "single-slot" from "multi-slot"
+        // — the foreach handles both uniformly. GetStageDone (Quest FLI + Stage
+        // Int32) is the canonical 2-slot probe; GetEventData (EventFunction nested
+        // enum + EventMember nested enum + Record IFormLink<ISkyrimMajorRecordGetter>)
+        // is the 3-slot mixed-shape canary. Unknown is Mutagen's generic-fallback
+        // ConditionData (Function: Condition+Function nested enum + ParameterOne/
+        // ParameterTwo: Int32×2) for unknown CTDA function codes; included for
+        // completeness even though typical patchers wouldn't author it directly.
+        "GetCrime",
+        "GetEventData",
+        "GetFactionCombatReaction",
+        "GetFactionRankDifference",
+        "GetInCellParam",
+        "GetKeywordDataForAlias",
+        "GetKeywordDataForLocation",
+        "GetLocAliasRefTypeAliveCount",
+        "GetLocAliasRefTypeDeadCount",
+        "GetRefTypeAliveCount",
+        "GetRefTypeDeadCount",
+        "GetRelativeAngle",
+        "GetStageDone",
+        "GetWithinDistance",
+        "HasAssociationType",
+        "HasSameEditorLocAsRef",
+        "HasSameEditorLocAsRefAlias",
+        "IsCellOwner",
+        "IsCloserToAThanB",
+        "IsCurrentSpell",
+        "IsInSameCurrentLocAsRef",
+        "IsInSameCurrentLocAsRefAlias",
+        "IsLinkedTo",
+        "IsSceneActionComplete",
+        "LocAliasHasKeyword",
+        "LocAliasIsLocation",
+        "SpellHasKeyword",
+        "Unknown",
     };
 
     /// <summary>
-    /// v2.9.0 P2A/P2B — generic Condition-function parameter dispatcher. Routes
+    /// v2.9.0 P2A/P2B/P2C — generic Condition-function parameter dispatcher. Routes
     /// one (slotName, jsonValue) entry from <see cref="ConditionEntry.Parameters"/>
     /// to the corresponding reflection property on a <c>{Function}ConditionData</c>
     /// instance. Branches landed:
@@ -1945,10 +1988,25 @@ public class PatchEngine
     ///   — generalizes v2.8.0's <c>actor_value</c> handler. Numeric-vs-string
     ///   posture: error if <c>jsonValue.ValueKind != String</c> (strings are the
     ///   documented form; matches the back-compat <c>actor_value</c> contract).</item>
+    /// <item>2C: <c>Int32</c> and <c>Single</c> primitive branches via
+    ///   <c>JsonElement.GetInt32()</c> / <c>GetSingle()</c>. Required by 10 native
+    ///   MultiSlot functions whose secondary slots are Int32 (Stage / *AliasIndex
+    ///   / SceneActionIndex / Unknown's ParameterOne+ParameterTwo) and by
+    ///   GetWithinDistance's Distance slot (Single — only Single-bearing function
+    ///   in the v2.9.0 in-scope set); pre-positions for 2D's 11 PrimitiveOnly
+    ///   functions which all use Int32. Numeric-vs-string posture: error if
+    ///   <c>jsonValue.ValueKind != Number</c>.</item>
     /// </list>
-    /// Other slot types (Int32, Single, Boolean) throw "shape not yet wired" —
-    /// they're guarded by KnownParameterizedFunctions which doesn't include
-    /// those shapes' functions until 2D lands.
+    /// Multi-slot composition is handled by <see cref="BuildCondition"/>'s foreach
+    /// over <c>ce.Parameters</c> (lines ~1681-1685) — each slot routes independently
+    /// through whichever branch matches its prop type, so 2C's 28 MultiSlot functions
+    /// wire purely via <see cref="KnownParameterizedFunctions"/> additions. No new
+    /// dispatcher abstraction.
+    /// Boolean primitive intentionally NOT landed: zero v2.9.0 in-scope functions
+    /// need it (verified across 199 dispatcher-wired functions). PLAN.md § A names
+    /// Boolean as one of the design's six branches — first v2.9.x consumer trigger
+    /// lands the branch + cell + name. See KNOWN_ISSUES.md § Condition-parameter
+    /// coverage.
     /// Footgun-guard: rejects any slot name containing <c>"Unused"</c> per
     /// CONDITIONS_AUDIT.md § Architectural surprises §3 (CTDA padding pattern).
     /// 1436 *Unused*Parameter* slots exist across 424 ConditionData types as
@@ -2060,18 +2118,71 @@ public class PatchEngine
             return;
         }
 
-        // Other shapes (Int32, Single, Boolean) — out of scope for 2A/2B.
-        // 2C adds MultiSlot composition (which exercises this dispatcher per-slot
-        // and in practice uses already-landed branches); 2D adds the primitive
-        // branches. Reaching here means a function got into
-        // KnownParameterizedFunctions whose slot type isn't FLI / IFormLink /
-        // Enum — caller bug or future-phase extension drift; surface clean error
-        // rather than silent default.
+        // Int32 branch (2C) — direct numeric conversion. Required by 10 native
+        // MultiSlot functions whose secondary slots are Int32 (Stage / *AliasIndex
+        // / SceneActionIndex / Unknown's ParameterOne+ParameterTwo); pre-positions
+        // for 2D's 11 PrimitiveOnly functions which all use Int32. JsonElement.GetInt32()
+        // throws on non-integral numerics or overflow (1.5 → InvalidOperationException;
+        // 2_147_483_648 → OverflowException) — those surface here as clean per-record
+        // errors rather than silent truncation.
+        if (propType == typeof(int))
+        {
+            if (jsonValue.ValueKind != JsonValueKind.Number)
+            {
+                throw new ArgumentException(
+                    $"Parameter slot '{slotName}' on function '{functionName}' expects an " +
+                    $"Int32 (e.g. 50); got JSON {jsonValue.ValueKind}.");
+            }
+            int intValue;
+            try { intValue = jsonValue.GetInt32(); }
+            catch (Exception ex)
+            {
+                throw new ArgumentException(
+                    $"Parameter slot '{slotName}' on function '{functionName}' expects an " +
+                    $"Int32; the JSON number isn't a valid Int32 ({ex.Message}).");
+            }
+            prop.SetValue(condData, intValue);
+            return;
+        }
+
+        // Single branch (2C) — direct float conversion. Required by exactly one
+        // v2.9.0 in-scope function: GetWithinDistance.Distance. Landed alongside
+        // Int32 because Aaron's "ship the full routable surface" posture covers
+        // it as a one-line drop-in even though only one function exercises the
+        // path; defers SKIP-shuffling if a Single-bearing function ever appears.
+        if (propType == typeof(float))
+        {
+            if (jsonValue.ValueKind != JsonValueKind.Number)
+            {
+                throw new ArgumentException(
+                    $"Parameter slot '{slotName}' on function '{functionName}' expects a " +
+                    $"Single (e.g. 1024.0); got JSON {jsonValue.ValueKind}.");
+            }
+            float floatValue;
+            try { floatValue = jsonValue.GetSingle(); }
+            catch (Exception ex)
+            {
+                throw new ArgumentException(
+                    $"Parameter slot '{slotName}' on function '{functionName}' expects a " +
+                    $"Single; conversion failed ({ex.Message}).");
+            }
+            prop.SetValue(condData, floatValue);
+            return;
+        }
+
+        // Other shapes (Boolean + any future Mutagen schema additions) — out of
+        // scope for v2.9.0. PLAN.md § A names Boolean as one of the design's six
+        // branches; zero v2.9.0 in-scope functions need it (verified across 199
+        // dispatcher-wired functions). Reaching here means either (a) a Boolean-
+        // bearing function landed in KnownParameterizedFunctions (caller bug —
+        // should re-trigger the branch decision via PLAN amend); or (b) Mutagen
+        // 0.54+ added a new slot type the dispatcher doesn't route. Surface a
+        // clean error rather than silent default.
         throw new InvalidOperationException(
             $"Parameter slot '{slotName}' on function '{functionName}' has type " +
-            $"'{propType.FullName}' which v2.9.0 P2B does not yet route. " +
-            "P2A/P2B cover IFormLinkOrIndex<T> + IFormLink<T> + System.Enum; " +
-            "subsequent phases extend to int / float / bool. See KNOWN_ISSUES.md.");
+            $"'{propType.FullName}' which v2.9.0 does not route. " +
+            "v2.9.0 covers IFormLinkOrIndex<T> + IFormLink<T> + System.Enum + Int32 + Single. " +
+            "See KNOWN_ISSUES.md § Condition-parameter coverage.");
     }
 
     /// <summary>

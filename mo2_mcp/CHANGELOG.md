@@ -28,8 +28,12 @@ generalizes v2.8.0's single-purpose `actor_value` handler into a reflection-base
 slot router. Phase 2A wires the FormLink-typed slot space (119 functions:
 113 `IFormLinkOrIndex<T>` + 6 sub-A `IFormLink<T>`). Phase 2B extends to the
 Enum-typed slot space (41 functions across 18 distinct enum types — ActorValue
-family + Sex/Axis/CastSource/FormType/etc.). Phase 2C/2D will extend the same
-dispatcher to multi-slot and primitive shapes within the v2.9.x release line.
+family + Sex/Axis/CastSource/FormType/etc.). Phase 2C extends to the MultiSlot
+function space (28 functions, including the 3-slot mixed-shape GetEventData
+canary and the FLI+Int32 GetStageDone canonical) and lands the Int32 + Single
+primitive branches that the multi-slot composition surfaces (Boolean deferred —
+zero v2.9.0 in-scope consumers; lands when first surfaces). Phase 2D will wire
+the 11 PrimitiveOnly functions on top of the now-landed Int32 + Single branches.
 
 ### Added — bridge
 
@@ -44,8 +48,8 @@ dispatcher to multi-slot and primitive shapes within the v2.9.x release line.
   member name → `System.Enum` via `Enum.Parse(propType, value, ignoreCase: true)`
   (P2B scope; numeric enum-index input is rejected — strings are the documented
   form, matching the v2.8 `actor_value` contract).
-  v2.9.0 in-scope set: **160 functions** (113 single-`IFormLinkOrIndex<T>` P2A +
-  6 sub-A single-`IFormLink<T>` P2A + 41 single-Enum P2B). The 6 sub-A functions
+  v2.9.0 in-scope set: **188 functions** (113 single-`IFormLinkOrIndex<T>` P2A +
+  6 sub-A single-`IFormLink<T>` P2A + 41 single-Enum P2B + 28 MultiSlot P2C). The 6 sub-A functions
   are the GetVATSValue* family (GetVATSValueCriticalEffect,
   GetVATSValueCriticalEffectOrList, GetVATSValueTarget, GetVATSValueTargetOrList,
   GetVATSValueWeapon, GetVATSValueWeaponOrList — all carrying a `Value` slot of
@@ -72,6 +76,46 @@ dispatcher to multi-slot and primitive shapes within the v2.9.x release line.
   to pre-v2.9 behavior — back-compat). Per-function slot signatures live in
   `dev/plans/v2.9.X_condition_parameters/CONDITIONS_AUDIT.md`, the audit
   produced by Phase 1's full Mutagen-0.53.1 inventory probe.
+
+- **MultiSlot dispatch via per-slot composition (P2C — 28 functions).** No
+  new dispatcher abstraction needed: `BuildCondition`'s foreach over
+  `ce.Parameters` (already laid down in P2A) iterates each (slotName, value)
+  pair and routes each through `RouteParameterSlot` independently. Each slot
+  picks whichever branch matches its prop type — so a function like
+  GetEventData (3 slots: Function nested-Enum + Member nested-Enum + Record
+  IFormLink) routes its first two slots through P2B's Enum branch and its
+  third through P2A's sub-A IFormLink<T> branch in a single condition entry,
+  with the per-slot routing decided independently. P2C is purely
+  `KnownParameterizedFunctions` extension (28 names) plus the Int32 + Single
+  primitive branch additions that some MultiSlot functions need; multi-slot
+  composition itself doesn't add new dispatcher code. Canonical multi-slot
+  example: GetStageDone (Quest IFormLinkOrIndex<IQuestGetter> + Stage Int32);
+  3-slot canary: GetEventData (Function/Member nested System.Enum + Record
+  IFormLink<ISkyrimMajorRecordGetter>). Mutagen's special generic-fallback
+  type `UnknownConditionData` (Function: Condition+Function nested-Enum +
+  ParameterOne/Two: Int32×2) is in-scope at the bridge level, but coverage-
+  smoke registers it as SKIP-with-reason because Mutagen's binary reader
+  reclassifies it on round-trip via the function code in .Function (the
+  dispatcher's write IS correct; harness readback can't anchor on type name).
+  See [`PHASE_2C_HANDOFF.md`](../dev/plans/v2.9.X_condition_parameters/PHASE_2C_HANDOFF.md).
+
+- **Int32 + Single primitive branches (P2C).** Added between the Enum branch
+  and the catch-all in `RouteParameterSlot`: `if (propType == typeof(int))`
+  / `if (propType == typeof(float))`, each a one-line drop-in routing
+  `JsonElement.GetInt32()` / `GetSingle()` directly. Required by 10 native
+  MultiSlot functions whose secondary slots are Int32 (Stage / *AliasIndex /
+  SceneActionIndex / Unknown's ParameterOne+Two) and by GetWithinDistance's
+  Distance slot (Single — only Single-bearing function in v2.9.0 in-scope
+  set). Both branches enforce `JsonValueKind.Number` posture (string input
+  → record-level type-coercion error). Pre-positions for P2D's 11
+  PrimitiveOnly functions which all use Int32 — P2D becomes pure
+  `KnownParameterizedFunctions` extension + cells. **Boolean primitive
+  intentionally NOT landed in v2.9.0** — zero in-scope consumers (verified
+  across 199 dispatcher-wired functions); landing without a coverage-smoke
+  cell or race-probe means an untested path that future Mutagen drift could
+  silently break. PLAN.md § A's design names Boolean as one of six branches;
+  v2.9.0 ships five (FLI / IFormLink<T> / System.Enum / Int32 / Single). First
+  v2.9.x consumer trigger lands Boolean.
 
 - **Footgun-guard for CTDA padding slots.** The dispatcher rejects any
   `parameters` key whose name contains `"Unused"`. Mutagen 0.53.1's
@@ -102,19 +146,24 @@ dispatcher to multi-slot and primitive shapes within the v2.9.x release line.
   `IFormLink<T>` (P2A — simpler single-FormKey ctor for sub-A absorption);
   `System.Enum` (P2B — `Enum.Parse(propType, value, ignoreCase: true)` with
   `ValueKind != String` guard for the documented string-only contract; wraps
-  `Enum.Parse`'s `ArgumentException` to add function/slot context for DX).
-  Other slot shapes (Int32, Single, Boolean) throw a clean "shape not yet
-  wired" error; that path is guarded by a `KnownParameterizedFunctions` set
-  which doesn't include those shapes' functions until 2D lands. Subsequent
-  phases extend the set + the dispatcher's branch coverage; no new mechanism
-  needed.
+  `Enum.Parse`'s `ArgumentException` to add function/slot context for DX);
+  `Int32` (P2C — `JsonElement.GetInt32()` with `ValueKind != Number` guard);
+  `Single` (P2C — `JsonElement.GetSingle()` with `ValueKind != Number` guard).
+  MultiSlot composition is handled by `BuildCondition`'s foreach over
+  `ce.Parameters` — each (slotName, value) pair routes through this dispatcher
+  independently, so multi-slot functions wire purely via
+  `KnownParameterizedFunctions` additions (no per-slot dispatcher code).
+  Boolean is the only PLAN-named branch not landed in v2.9.0 (zero in-scope
+  consumers); the catch-all error message reflects "v2.9.0 covers
+  IFormLinkOrIndex<T> + IFormLink<T> + System.Enum + Int32 + Single."
 
 - **`KnownParameterizedFunctions` static frozen set** in `PatchEngine.cs`. Holds
-  the 160 in-scope function names (113 P2A FLI + 6 P2A sub-A IFormLink + 41 P2B
-  Enum). Functions in the set route through the dispatcher; functions NOT in the
-  set + caller-supplied `parameters` → out-of-scope error; functions NOT in the
-  set + no `parameters` → preserves v2.7.1+ behavior. NoParam functions (219) are
-  NOT in the set per `CONDITIONS_AUDIT.md § NoParam handling` — they accept
+  the 188 in-scope function names (113 P2A FLI + 6 P2A sub-A IFormLink + 41 P2B
+  Enum + 28 P2C MultiSlot incl. GetEventData absorbed). Functions in the set
+  route through the dispatcher; functions NOT in the set + caller-supplied
+  `parameters` → out-of-scope error; functions NOT in the set + no
+  `parameters` → preserves v2.7.1+ behavior. NoParam functions (219) are NOT
+  in the set per `CONDITIONS_AUDIT.md § NoParam handling` — they accept
   parameterless invocation as v2.7.1+ behavior unchanged.
 
 ### Tests
@@ -153,6 +202,59 @@ dispatcher to multi-slot and primitive shapes within the v2.9.x release line.
   (GetIsSex/MaleFemaleGender, 2 members, target Female), tiny
   (GetAngle/Axis, 3 members, target Z). Each probe simulates the Enum branch
   inline (Enum.Parse + reflection setter + readback) and asserts round-trip.
+- **+32 v2.9 P2C coverage-smoke cells** (1 PASS-canary + 25 PASS-bulk +
+  1 SKIP-with-reason + 5 PASS-explicit):
+  - **Test 339 [1.P.GetEventData.MGEF]** — 3-slot composition canary
+    (Function/Member nested-Enum + Record IFormLink). Halt-1 rigor checkpoint.
+    All three readbacks confirmed: Function=GetIsID (Enum) + Member=Form
+    (Enum) + Record.FormKey=000007:Skyrim.esm (IFormLink<T>).
+  - **Tests 340–364 [1.P.\<Function\>.MGEF]** — 25 bulk MultiSlot positives via
+    new `RunMultiSlotDispatcherCell` helper that discovers each function's
+    useful slots dynamically (filters base props + `*Unused*` padding),
+    picks per-slot canary values per branch (FormID for FLI/IFormLink,
+    `Enum.GetValues.Last()` for Enum, 42 for Int32, 1024.0f for Single),
+    asserts per-slot readback. Trace logs per-slot branch + value for
+    debuggability. Lower-32-bit comparison for Enum slots (2B forward-carry
+    for sign-extension); bit-exact comparison via `BitConverter.SingleToInt32Bits`
+    for Single (2B forward-carry's NaN/sub-normal guidance).
+  - **1.P.Unknown.MGEF** — SKIP-with-reason. Bridge dispatcher write IS correct
+    (`UnknownConditionData.Function` + `ParameterOne/Two` set + bridge reports
+    success=true + binary CTDA well-formed); Mutagen's CTDA reader uses the
+    function code in `.Function` to dispatch on read to the corresponding
+    concrete ConditionData type, NOT `UnknownConditionData` (which is reserved
+    for genuinely-unrecognized codes only). Harness's type-name readback can't
+    survive the round-trip. v2.9.x candidate for binary-CTDA-equivalence
+    assertion that doesn't depend on type name.
+  - **Test 366 [1.P.GetStageDone.MGEF / 2.01]** — combined cell covering both
+    MATRIX cell IDs since they specify the same operation (mirrors 2B's
+    1.D.03 ↔ 4.enum.01 dedup at Test 336). Quest from `source.Quests.First()`
+    + Stage=50 — exercises FLI 2A + Int32 P2C-new in canonical multi-slot
+    composition.
+  - **Test 367 [2.06]** — multi-condition single record with multi-slot
+    function: PERK with `add_conditions: [GetStageDone(Quest+Stage),
+    HasSpell(Spell)]`. Proves `BuildCondition` runs once per condition
+    entry and per-condition `parameters` maps route independently across
+    mixed-shape functions. Also confirms PERK as a non-MGEF carrier works.
+  - **Tests 368–370 [1.D.04 / 1.D.06 / 1.D.05]** — three Layer 1.D MultiSlot
+    representative negatives covering distinct error categories:
+    bad-slot-1 of GetStageDone (Quest malformed FormID — FLI parsing failure
+    within multi-slot foreach; halts at first bad slot); GetStageDone Stage
+    as string (Int32 type-coercion failure — confirms P2C Int32 branch's
+    ValueKind != Number guard); GetEventData bad enum on Function slot (enum
+    failure within 3-slot composition — confirms 2B Enum branch's
+    Enum.Parse wrap fires uniformly inside multi-slot dispatch).
+
+  Total smoke surface: 160 v2.8.0 baseline + 134 P2A + 45 P2B + 32 P2C = **371
+  cells** (366 PASS + 5 SKIP — the 4 v2.8 baseline carryovers + new 1.P.Unknown.MGEF;
+  0 FAIL).
+- **+4 race-probe MultiSlot probes (P2C)** under `tools/race-probe/Program.cs`
+  via new `ProbeMultiSlot` function (params-tuple slot inputs; per-slot inline
+  reflection writes mirroring the dispatcher). Spans the full branch surface:
+  GetEventData (3-slot — 2 nested Enum + 1 IFormLink<T>), GetStageDone
+  (FLI + Int32 — Layer 2.01 canonical), GetWithinDistance (Single + FLI —
+  only Single-bearing function), GetRelativeAngle (Enum + FLI — Axis enum
+  matches P2B probe). Each probe simulates per-slot dispatch inline + asserts
+  round-trip. Total race-probe surface: 7 P2A + 3 P2B + 4 P2C = 14 PASS.
 
 ### Documentation
 
@@ -160,13 +262,21 @@ dispatcher to multi-slot and primitive shapes within the v2.9.x release line.
   `add_conditions` description with a concise per-shape slot-type table
   pointing at CONDITIONS_AUDIT.md, plus the footgun-guard note. P2B extended
   the description to name the 41-function Enum coverage with the
-  string-only / case-insensitive contract.
+  string-only / case-insensitive contract. P2C extended further to cover the
+  28 MultiSlot functions (per-slot composition note + canonical examples)
+  + Int32 / Single primitive contracts (number-only / string-rejected) +
+  Boolean-deferred note + Unknown SKIP-with-reason note. Total in-scope
+  count updated 160 → 188.
 - **`KNOWN_ISSUES.md`** — P2A moved "Other Condition-function parameter slots"
   from carry-over to a covered-for entry naming the v2.9.0 in-scope set, and
   added the 2B/2C/2D/sub-B gaps still open. P2B lifted the 41-Enum bullet
   from the gap-list to the covered-for section, with the per-enum-family
-  detail (ActorValue/Axis/CastSource/etc.); only 2C MultiSlot, 2D
-  PrimitiveOnly, sub-B String, and NoParam-no-op remain in the gaps section.
+  detail (ActorValue/Axis/CastSource/etc.). P2C lifts MultiSlot 28 (with
+  per-shape detail incl. the Unknown SKIP rationale) + adds the Int32 / Single
+  primitive-branch bullet + adds the Boolean-deferred design-vs-implementation
+  note (per Aaron's halt-1 directive); section header renamed
+  `(v2.9.0 P2A + P2B)` → `(v2.9.0 P2A + P2B + P2C)`. Only 2D PrimitiveOnly,
+  sub-B String, and NoParam-no-op remain in the gaps section.
 - **PLAN.md + MATRIX.md plan-amend** at `5a06179` — folded six architectural
   surprises CONDITIONS_AUDIT.md surfaced during Phase 1: GetIsID slot is
   `Object` not `Reference`, dynamic base-prop detection replaces static skip
@@ -176,14 +286,20 @@ dispatcher to multi-slot and primitive shapes within the v2.9.x release line.
 
 ### Out of scope (v2.9.x candidates within release line)
 
-- **28 MultiSlot Condition functions** (Phase 2C). GetStageDone + GetEventData
-  (3-slot mixed: Function/Member nested System.Enum routable through P2B's
-  Enum branch + Record IFormLink absorbed under sub-A's branch) + 26 others.
-  Exercises per-slot composition through the existing dispatcher foreach; no
-  new branches needed — 2C is "extend KnownParameterizedFunctions + add cells."
-- **11 PrimitiveOnly Condition functions** (Phase 2D). Direct Int32 / Single /
-  Boolean conversion via `JsonElement.GetInt32()` / `GetSingle()` /
-  `GetBoolean()`.
+- **11 PrimitiveOnly Condition functions** (Phase 2D). All use Int32 slots —
+  Int32 branch already in place from P2C, so 2D is pure
+  `KnownParameterizedFunctions` extension + cells (no new dispatcher code).
+  Specifically: GetIsAliasRef, GetInCurrentLocAlias, GetIsEditorLocAlias,
+  GetLocationAliasCleared, GetNumericPackageData, GetPlayerControlsDisabled,
+  GetVATSValueUnknown, GetWithinPackageLocation, IsLimbGone, IsLocAliasLoaded,
+  IsNullPackageData. Single + Boolean primitives have zero in-scope consumers
+  in 2D.
+- **Boolean primitive branch** (deferred to v2.9.x — design-only in v2.9.0).
+  PLAN.md § A names Boolean as one of six dispatcher branches, but zero
+  v2.9.0 in-scope functions need it (verified across 199 dispatcher-wired
+  functions). Landing without a coverage-smoke cell or race-probe means an
+  untested path that future Mutagen drift could silently break. First
+  v2.9.x consumer trigger lands the branch + cell + name simultaneously.
 - **6 sub-B Condition functions with String-typed slots** (deferred to v2.9.x
   point release): GetGraphVariableFloat, GetGraphVariableInt, GetQuestVariable,
   GetScriptVariable, GetVMQuestVariable, GetVMScriptVariable. Routing requires

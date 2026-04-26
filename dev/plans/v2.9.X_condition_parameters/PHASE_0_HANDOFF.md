@@ -4,7 +4,7 @@
 **Status:** Complete
 **Date:** 2026-04-26
 **Session length:** ~1h
-**Commits made:** _pending — work-commit hash filled by hash-record commit_
+**Commits made:** `b5edf14` (work) + this hash-record commit
 **Live install synced:** No (Phase 0 is docs-only)
 
 ## Working version slug

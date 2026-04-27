@@ -177,7 +177,7 @@ public class PatchEngine
         var overrideRecord = CopyAsOverride(patchMod, sourceRecord);
         if (overrideRecord == null)
             throw new InvalidOperationException(
-                $"Could not create override for {sourceRecord.GetType().Name}");
+                $"Could not create override for {RecordTypeCode(sourceRecord)}");
 
         var detail = new RecordDetail
         {
@@ -2479,6 +2479,11 @@ public class PatchEngine
         IFormListGetter => "FLST", IMagicEffectGetter => "MGEF",
         IContainerGetter => "CONT", IPackageGetter => "PACK",
         IFurnitureGetter => "FURN", IActivatorGetter => "ACTI", ILocationGetter => "LCTN",
+        // INFO records — the Mutagen class name (DialogResponses) doesn't match
+        // Bethesda's 4-char code. Without this case the fallback yields
+        // "DIALOGRESPONSES" — symmetry with RecordReader.cs:365 where the same
+        // mapping already lives.
+        IDialogResponsesGetter => "INFO",
         _ => record.Registration.ClassType.Name.ToUpperInvariant(),
     };
 

@@ -337,6 +337,25 @@ functions remain in-scope-no-op (back-compat preserved per v2.7.1+ behavior).
   to keep the per-phase scoreboard clean. Total race-probe surface: 7 P2A +
   3 P2B + 4 P2C + 1 P2D = 15 PASS.
 
+### Changed — bridge
+
+- **`override` failure error message names the 4-char record type code, not the
+  internal Mutagen overlay class name (Phase 4 DX bonus-catch).** When
+  `mo2_create_patch` with `op: "override"` targets a record type the bridge's
+  `CopyAsOverride` switch doesn't handle, the per-record error now reads
+  `Could not create override for INFO` (or `ARMO`, `RACE`, etc.) instead of
+  `Could not create override for DialogResponsesBinaryOverlay` (or whichever
+  Mutagen `*BinaryOverlay` runtime type the source mod's overlay loader
+  produced). PatchEngine.cs:180 swaps `sourceRecord.GetType().Name` for
+  `RecordTypeCode(sourceRecord)` (the same helper the success path already
+  uses for `detail.RecordType`), and the `RecordTypeCode` switch grows an
+  `IDialogResponsesGetter => "INFO"` case for symmetry with `RecordReader.cs:365`
+  (without the explicit case the fallback would yield `"DIALOGRESPONSES"`).
+  Surfaced when Phase 3's Scenario 3.1 (dialog GetIsID on INFO) BLOCKED at
+  patch creation against an unsupported record type and the live error string
+  leaked the internal class name; fix is per-record-type-agnostic, so any
+  future record type missing from the switch surfaces a clean diagnostic.
+
 ### Documentation
 
 - **`tools_patching.py` schema** — added the v2.9 `parameters` key to the
@@ -373,6 +392,26 @@ functions remain in-scope-no-op (back-compat preserved per v2.7.1+ behavior).
 
 ### Out of scope (v2.9.x candidates within release line)
 
+- **INFO record `op: "override"` (Phase 4 architectural finding — sub-session
+  deferral).** Phase 3's Scenario 3.1 (dialog GetIsID on INFO Skyrim.esm:000E3D)
+  BLOCKED at patch creation: PatchEngine's `CopyAsOverride` switch lacks an
+  `IDialogResponsesGetter` branch and falls through to `_ => null`. Phase 3's
+  bug entry proposed `IDialogResponsesGetter r => patchMod.DialogResponses.GetOrAddAsOverride(r)`
+  as the fix; Phase 4's pre-flight reflection check refuted the fix shape —
+  Mutagen 0.53.1's `SkyrimMod` has no `DialogResponses` property. INFO records
+  are nested under `DialogTopic.Responses` (a plain `Noggog.ExtendedList<DialogResponses>`
+  with no override-add helper), so real INFO override requires parent-topic
+  resolution + `patchMod.DialogTopics.GetOrAddAsOverride(parentTopic)` +
+  child-response find-by-FormKey + new rollback semantics design — multi-hour
+  scope expansion beyond Phase 4's "small fix-and-regress" budget. Deferred to
+  a Phase 4-INFO sub-session (or later v2.9.x point release if the sub-session
+  doesn't ship before v2.9.0). The architectural archaeology is preserved in
+  `tools/race-probe/Program.cs` (v2.9 P4 section — diagnostic dump of
+  alternative override surfaces). Phase 4 still landed the line-180 error
+  message DX bonus-catch (see § Changed — bridge above), so the user-facing
+  failure for INFO override is now a clean `Could not create override for INFO`
+  per-record error instead of the leaky `DialogResponsesBinaryOverlay` internal
+  class name.
 - **Boolean primitive branch** (deferred to v2.9.x — design-only in v2.9.0).
   PLAN.md § A names Boolean as one of six dispatcher branches, but zero
   v2.9.0 in-scope functions need it (verified across 199 dispatcher-wired

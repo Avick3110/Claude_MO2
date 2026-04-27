@@ -2185,11 +2185,111 @@ int p2dFailures = 0;
 }
 Console.WriteLine($"=== v2.9 P2D probes: {(p2dFailures == 0 ? "ALL PASS" : $"{p2dFailures} FAILURE(S)")} ===");
 
+// ─── v2.9 P4 — INFO override architectural archaeology (deferred) ───
+// Phase 3 surfaced `info_override_missing_in_copyasoverride`: Scenario 3.1
+// (dialog GetIsID on INFO) BLOCKED at patch creation because
+// PatchEngine.CopyAsOverride's switch lacks an IDialogResponsesGetter branch
+// — INFO source records fall through to `_ => null`, and the caller throws
+// "Could not create override for DialogResponsesBinaryOverlay" at PatchEngine.cs:180.
+// Phase 3's bug entry proposed `IDialogResponsesGetter r => patchMod.DialogResponses.GetOrAddAsOverride(r)`
+// as the fix, on the assumption that SkyrimMod exposes a top-level
+// DialogResponses group parallel to DialogTopics, Quests, Spells, etc.
+//
+// Phase 4's pre-flight reflection check (this section) refuted that assumption:
+// SkyrimMod has no DialogResponses property in Mutagen 0.53.1. INFO records
+// are nested under DialogTopic.Responses in Bethesda's plugin format, and
+// Mutagen 0.53.1 does not surface them as an independently-overridable group.
+// Real INFO override requires parent-DialogTopic-level GetOrAddAsOverride
+// + child-response mutation — a multi-hour architectural change with new
+// failure modes (parent topic resolution, rollback granularity, etc.).
+//
+// Decision (Aaron, Phase 4 mid-session, 2026-04-27): defer INFO override
+// implementation to a Phase 4-INFO sub-session. Phase 4 (this session) lands
+// only the line-180 error-message DX bonus-catch (Item 2). This probe section
+// stays as architectural archaeology to bootstrap the Phase 4-INFO sub-session
+// — no production code change, no failure count contribution.
+//
+// (a) Pre-flight reflection on SkyrimMod's INFO surface — confirms the
+//     architectural finding + dumps alternative override surfaces (DialogTopic
+//     responses list, *MixIn helpers) for the sub-session to evaluate.
+// (b) Skipped — bridge-direct repro requires (a) to find a viable override API.
+//     The current-state behavior (CopyAsOverride returns null for IDialogResponsesGetter)
+//     is documented in Phase 3 handoff § Bugs surfaced; no need to re-verify here.
+Section("v2.9 P4 — INFO override architectural archaeology (deferred)");
+
+int p4Failures = 0;
+{
+    // (a) Reflection: SkyrimMod.DialogResponses property exists?
+    var dlgRespProp = typeof(SkyrimMod).GetProperty("DialogResponses",
+        BindingFlags.Public | BindingFlags.Instance);
+    if (dlgRespProp == null)
+    {
+        Console.WriteLine("  ARCHAEOLOGY (a): typeof(SkyrimMod).GetProperty(\"DialogResponses\") returned null.");
+        Console.WriteLine("    Confirms Phase 3's recommended fix shape `patchMod.DialogResponses.GetOrAddAsOverride(r)` is not viable.");
+        Console.WriteLine("    INFO records nested under DialogTopic.Responses (Bethesda format) — Mutagen 0.53.1 doesn't surface them as a top-level group.");
+        Console.WriteLine();
+        Console.WriteLine("  ALTERNATIVE OVERRIDE SURFACES (for Phase 4-INFO sub-session):");
+        Console.WriteLine("    SkyrimMod properties matching Dialog/Info/Response:");
+        foreach (var p in typeof(SkyrimMod).GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => p.Name.Contains("Dialog") || p.Name.Contains("Info") || p.Name.Contains("Response")))
+            Console.WriteLine($"      SkyrimMod.{p.Name}: {FriendlyType(p.PropertyType)}");
+
+        Console.WriteLine("    DialogTopic.Responses property type:");
+        var respProp = typeof(DialogTopic).GetProperty("Responses", BindingFlags.Public | BindingFlags.Instance);
+        if (respProp != null)
+        {
+            Console.WriteLine($"      DialogTopic.Responses: {FriendlyType(respProp.PropertyType)}");
+            foreach (var m in respProp.PropertyType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .Where(m => m.Name.Contains("Override") || m.Name == "Add" || m.Name == "Insert" ||
+                            m.Name == "GetOrAdd" || m.Name == "Set"))
+            {
+                var ps = string.Join(", ", m.GetParameters().Select(x => FriendlyType(x.ParameterType)));
+                Console.WriteLine($"        .{m.Name}({ps}) -> {FriendlyType(m.ReturnType)}");
+            }
+        }
+
+        Console.WriteLine("    Static MixIn methods accepting IDialogResponsesGetter / DialogResponses (Duplicate / DeepCopy candidates for sub-session):");
+        var asm = typeof(SkyrimMod).Assembly;
+        foreach (var t in asm.GetTypes().Where(t => t.IsSealed && t.IsAbstract))
+        {
+            foreach (var m in t.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .Where(m => (m.Name == "Duplicate" || m.Name == "DeepCopy") &&
+                            m.GetParameters().Any(p =>
+                                p.ParameterType.Name == "IDialogResponsesGetter" ||
+                                p.ParameterType.Name == "DialogResponses")))
+            {
+                var ps = string.Join(", ", m.GetParameters().Select(x => FriendlyType(x.ParameterType)));
+                Console.WriteLine($"      {t.Name}.{m.Name}({ps}) -> {FriendlyType(m.ReturnType)}");
+            }
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("  Likely sub-session implementation shape: scan source mod's DialogTopics for the");
+        Console.WriteLine("  parent topic of the target INFO FormKey → patchMod.DialogTopics.GetOrAddAsOverride(parent)");
+        Console.WriteLine("  → locate the matching DialogResponses by FormKey inside override topic.Responses → return it.");
+        Console.WriteLine("  Requires CopyAsOverride to thread the source-mod context (signature change).");
+        Console.WriteLine();
+        Console.WriteLine("  STATUS: DEFERRED to Phase 4-INFO sub-session (Aaron call, 2026-04-27, mid-Phase-4).");
+        Console.WriteLine("    Phase 4 (this session) lands only the line-180 error-message DX bonus-catch.");
+        Console.WriteLine("    No failure recorded — current-state INFO override gap is documented in Phase 3 handoff § Bugs surfaced.");
+    }
+    else
+    {
+        // Defensive: if a future Mutagen version adds SkyrimMod.DialogResponses, the
+        // archaeology is no longer needed and the sub-session premise inverts. Print so
+        // the next probe run signals the change clearly.
+        Console.WriteLine($"  ARCHAEOLOGY (a) UNEXPECTED: SkyrimMod.DialogResponses now exists — Mutagen surface evolved.");
+        Console.WriteLine($"    declared type={FriendlyType(dlgRespProp.PropertyType)}");
+        Console.WriteLine("    Phase 4-INFO sub-session premise inverts: revisit fix shape vs the original Phase 3 proposal.");
+    }
+}
+Console.WriteLine($"=== v2.9 P4 probes: DEFERRED — INFO override deferred to Phase 4-INFO sub-session; Item 2 (line-180 DX) lands this session ===");
+
 Console.WriteLine();
-int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures + p2dFailures;
+int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures + p2dFailures + p4Failures;
 if (totalFailures > 0)
 {
-    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C + {p2dFailures} v2.9 P2D) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
+    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C + {p2dFailures} v2.9 P2D + {p4Failures} v2.9 P4) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
     Environment.Exit(1);
 }
 Console.WriteLine("=== probe complete ===");

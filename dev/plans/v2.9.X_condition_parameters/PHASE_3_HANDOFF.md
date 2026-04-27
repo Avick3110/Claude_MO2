@@ -131,14 +131,34 @@ Default if no response: A (spawn).
 
 ## Preconditions for Phase 5
 
+Per PLAN.md § Phase 5 conductor decisions: **"Layer 3 workflow re-run is required if Phase 4 ran."** Both scenarios re-run against the post-Phase-4 bridge — 3.1 to lift from BLOCKED → PASS, 3.2 to confirm no regression of this session's 12/12.
+
 | Precondition | State |
 |---|---|
 | Live install at v2.9.0 | ✓ — synced in Phase 3; live bridge SHA matches P2D `2e3a1094…f8293975e`. Phase 5's `dotnet publish` will produce a new ship SHA different from this build SHA. |
-| Layer 3 Scenario 3.2 verified live | ✓ — 12/12 sub-assertions PASS in this session |
-| Layer 3 Scenario 3.1 needs re-run after Phase 4 lands the INFO fix | ⏸️ Phase 5 owns. Same record selection (`Skyrim.esm:000E3D` MQ101 dialog INFO + Lydia `Skyrim.esm:000A2C8E` Object slot) per § Known issues. |
+| Layer 3 Scenario 3.1 — re-run required | ⏸️ Phase 5 owns. **BLOCKED in this session** by the INFO override gap (see § Bugs surfaced); Phase 4 lands the fix; Phase 5 re-runs against the post-fix bridge to lift to PASS. Same record selection: carrier INFO `Skyrim.esm:000E3D` (MQ101 Stormcloak/Imperial dialog), `Object` slot Lydia `Skyrim.esm:000A2C8E`. Full 9-assertion checklist carried forward — see § Scenario 3.1 assertion checklist (carried forward) below. |
+| Layer 3 Scenario 3.2 — re-run required | ⏸️ Phase 5 owns. **Verified PASS in this session** (12/12) against P2D bridge SHA `2e3a1094…f8293975e`, but Phase 4 may land bridge changes (CopyAsOverride + TryRemoveOverride switches + line-180 error wording) that warrant regression confirmation. Same record selection (PERK `Skyrim.esm:0CB413` REQ_Smithing_DaedricSmithing + `Perk: Skyrim.esm:05218E` + `Spell: Skyrim.esm:08CB03`) and same 12-assertion checklist (3.2.A–3.2.L per § Verification performed) re-evaluated end-to-end. |
 | Final ship SHA | ⏸️ Phase 5 produces via `dotnet publish` (not `dotnet build`). Different SHA from Phase 2/3/4 build SHAs — that's the canonical v2.9.0 ship SHA, must be byte-identical across smoke matrix + installer bundle + live install per kickoff §4 + PLAN.md § Phase 5. |
 | Coverage-smoke ship-SHA re-run | ⏸️ Phase 5 owns — runs against the published ship SHA, not the build SHA |
 | Race-probe ship-SHA re-run | ⏸️ Phase 5 owns |
+
+### Scenario 3.1 assertion checklist (carried forward — Phase 5 evaluates against post-Phase-4 bridge)
+
+**Patch:** `v2.9-scenario-1.esp` (or whatever Phase 5 names it during re-run) overriding INFO `Skyrim.esm:000E3D` (MQ101 Helgen-escape Stormcloak/Imperial dialog response) with one `add_conditions` entry: `function: "GetIsID"`, `operator: "=="`, `value: 1`, `parameters: {Object: "Skyrim.esm:000A2C8E"}` (Lydia / HousecarlWhiterun).
+
+**Source pre-state** (verified at Phase 3 record-selection time, snapshot in § What was done): INFO carries 5 existing DialogConditions — `GetStage(MQ101)<70` (multi-slot Quest+Stage/AND) + `GetIsID(Player)/Object/OR` + `GetInFaction(MQ101StormcloakDialogueFaction)/Faction/OR` + `GetInFaction(MQ101ImperialDialogueFaction)/Faction/OR` + `GetIsID(Ulfric)/Object/OR`.
+
+| # | Assertion | Expected |
+|---|---|---|
+| 3.1.A | Patch response `success` | `true` (post-Phase-4-fix; PRE-fix this asserts BLOCKED) |
+| 3.1.B | `details[0].modifications.conditions_added` | `1` |
+| 3.1.C | Readback `Conditions.Count` | `6` (5 source + 1 new) |
+| 3.1.D | New condition's `Data.Object.Link` | `Skyrim.esm:000A2C8E (Lydia)` (NOT FormID 0) — **THE core v2.9 assertion** |
+| 3.1.E | New condition's discriminating slot | `Object` (NOT `Keyword`/`Faction`/etc.) — proves dispatched to `GetIsIDConditionData` |
+| 3.1.F | New condition's `ComparisonValue` / `CompareOperator` | `1` / `EqualTo` — ConditionFloat literal + operator landed |
+| 3.1.G | Source conditions 1–5 preserved with original slot values + flag bitmap | `GetStage(MQ101)<70` (AND) + 4 OR-flagged conditions all intact |
+| 3.1.H | Output ESP `masters` list | `[Skyrim.esm]` only (no override-winner leak — bridge writes FormKey by-value, doesn't follow override chain) |
+| 3.1.I | xEdit-style sanity | output ESP loads without unresolved-FormID warnings (verified by clean readback; no separate xEdit run required) |
 
 ## Files of interest for Phase 4
 

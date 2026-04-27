@@ -114,6 +114,23 @@ in place with a cross-reference to the new canonical Layer 1.D.01 cell.
   surfaces on `IQuestAliasGetter` + `IQuestLogEntryGetter`, deferred to
   v2.9.x).
 
+### Fixed — bridge
+
+- **`condition_target` passthrough plumbing.** Phase 2 added `condition_target` to the
+  `add_conditions`/`remove_conditions` tool argument schema in `tools_patching.py` and to
+  the C# `RecordOperation` model + `ResolveConditionListProperty` dispatcher in the
+  bridge, but missed adding it to the explicit `passthrough_keys` whitelist that
+  marshals record-level fields from the MCP layer into bridge stdin. Result: every
+  `condition_target` value was silently dropped by the Python wrapper before reaching
+  the bridge — every QUST `add_conditions`/`remove_conditions` call surfaced the Q3
+  missing-target error regardless of whether `condition_target` was supplied.
+  Race-probe + coverage-smoke didn't catch this because both invoke the bridge
+  subprocess directly with hand-built JSON, bypassing the `tools_patching.py`
+  wrapper. Phase 3's live workflow against the Authoria modlist was the first
+  end-to-end MCP→bridge exercise; preflight caught the gap on the first call.
+  Fix: add `condition_target` to `passthrough_keys` (single line, alphabetic
+  placement near `add_conditions`/`remove_conditions`).
+
 ---
 
 ## v2.9.0 — 2026-04-27

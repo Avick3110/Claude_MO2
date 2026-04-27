@@ -437,6 +437,7 @@ def _resolve_record_paths(idx, organizer, rec_spec: dict, index: int) -> dict:
             "add_form_list_entries", "remove_form_list_entries",
             "add_items",
             "add_conditions", "remove_conditions",
+            "condition_target",
             "attach_scripts",
             "set_enchantment", "clear_enchantment",
         )

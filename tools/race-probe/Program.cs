@@ -2411,11 +2411,307 @@ int p4InfoFailures = 0;
 }
 Console.WriteLine($"=== v2.9 P4-INFO probes: {(p4InfoFailures == 0 ? "ALL PASS" : $"{p4InfoFailures} FAILURE(S)")} ===");
 
+// ─── v2.9.1 P1 — Multi-condition record schema sweep ─────────────────────
+//
+// Phase 1 of v2.9.1 (Quest condition disambiguation). Confirms:
+//   1. General sweep: every concrete major-record class in
+//      Mutagen.Bethesda.Skyrim with public-instance properties whose name
+//      ends in "Conditions" (case-insensitive). Drives the generality-scope
+//      decision (QUST-only vs expand) via the conductor relay.
+//   2. QUST negative confirmation: IQuestGetter exposes EXACTLY
+//      DialogConditions + EventConditions and no third top-level
+//      *Conditions* property. v2.9.1's list-target dispatch is bivariate;
+//      a third top-level list would change the dispatch design.
+//   3. Nested-conditions surfaces: alias-/stage-/objective-/scene-action-/
+//      package-procedure-level *Conditions* properties — flagged as
+//      out-of-scope-but-documented for v2.9.x candidates per PLAN.md § D.
+//   4. QUST anchor selection: a vanilla Skyrim.esm QUST with both
+//      DialogConditions.Count > 0 AND EventConditions.Count > 0 for
+//      round-trip-distinguishability in Phase 2's coverage-smoke cells.
+//      PLAN.md § Phase 1 step 2 names MQ101 (Skyrim.esm:000242) as a
+//      candidate; sweep falls through to first qualifying quest if MQ101
+//      doesn't qualify.
+//
+// CONDUCTOR_KICKOFF.md line 38: 5+ additional multi-condition record types
+// triggers a halt — exceeds v2.9.1 scope envelope.
+Section("v2.9.1 P1 — Multi-condition record schema sweep");
+
+int p1MultiCondFailures = 0;
+{
+    var skyrimAssembly = typeof(IQuestGetter).Assembly;
+
+    // Concrete major-record classes — what the bridge's runtime dispatch
+    // (record.GetType().GetProperty("Conditions", ...) at PatchEngine.cs:1576
+    // + :2264) actually sees. SkyrimMajorRecord is the abstract base; filter
+    // excludes interfaces, abstracts, and non-Skyrim-namespace types.
+    var concreteRecords = skyrimAssembly.GetTypes()
+        .Where(t => t.IsClass && !t.IsAbstract && !t.IsInterface)
+        .Where(t => t.Namespace == "Mutagen.Bethesda.Skyrim")
+        .Where(t => typeof(SkyrimMajorRecord).IsAssignableFrom(t))
+        .OrderBy(t => t.Name)
+        .ToList();
+
+    Console.WriteLine($"  Sweep: {concreteRecords.Count} concrete major-record classes in Mutagen.Bethesda.Skyrim");
+
+    // Try-derive 4-char ESP record type code from <Class>.StaticRegistration.
+    // Print-time aid only — not load-bearing for the schema finding.
+    static string TryRecordTypeCode(Type t)
+    {
+        try
+        {
+            var regField = t.GetField("StaticRegistration",
+                BindingFlags.Public | BindingFlags.Static | BindingFlags.NonPublic);
+            object? reg = regField?.GetValue(null);
+            if (reg == null)
+            {
+                var regProp = t.GetProperty("StaticRegistration",
+                    BindingFlags.Public | BindingFlags.Static | BindingFlags.NonPublic);
+                reg = regProp?.GetValue(null);
+            }
+            if (reg == null) return "????";
+            var rtProp = reg.GetType().GetProperty("RecordType",
+                BindingFlags.Public | BindingFlags.Instance);
+            object? rt = rtProp?.GetValue(reg);
+            if (rt == null) return "????";
+            var typeProp = rt.GetType().GetProperty("Type",
+                BindingFlags.Public | BindingFlags.Instance);
+            return (typeProp?.GetValue(rt) as string) ?? "????";
+        }
+        catch { return "????"; }
+    }
+
+    // Pass 1: collect every concrete record class with at least one
+    // *Conditions property (single or multi).
+    var allCondCarriers = new List<(string Code, string ClassName, string GetterInterface,
+                                    List<(string PropName, string PropType)> Props)>();
+    foreach (var rec in concreteRecords)
+    {
+        var condProps = rec.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => p.Name.EndsWith("Conditions", StringComparison.OrdinalIgnoreCase))
+            .Where(p => p.GetIndexParameters().Length == 0)
+            .OrderBy(p => p.Name)
+            .ToList();
+        if (condProps.Count == 0) continue;
+        var props = condProps.Select(p => (p.Name, p.PropertyType.ToString())).ToList();
+        allCondCarriers.Add((TryRecordTypeCode(rec), rec.Name, $"I{rec.Name}Getter", props));
+    }
+
+    Console.WriteLine();
+    Console.WriteLine($"  ── General sweep: {allCondCarriers.Count} concrete major-record class(es) carry *Conditions property(s) ──");
+    foreach (var entry in allCondCarriers)
+    {
+        var marker = entry.Props.Count >= 2 ? "MULTI" : "single";
+        Console.WriteLine($"    [{marker,-6}]  {entry.Code,-4}  {entry.ClassName,-22}  {entry.GetterInterface}");
+        foreach (var (propName, propType) in entry.Props)
+        {
+            Console.WriteLine($"             - {propName,-25} {propType}");
+        }
+    }
+
+    var multiOnly = allCondCarriers.Where(e => e.Props.Count >= 2).ToList();
+    Console.WriteLine();
+    Console.WriteLine($"  ── Multi-condition record types (≥2 *Conditions properties): {multiOnly.Count} ──");
+    if (multiOnly.Count == 0)
+    {
+        Console.WriteLine($"    (none — single-Conditions carriers only; see general sweep above)");
+    }
+    else
+    {
+        foreach (var entry in multiOnly)
+        {
+            Console.WriteLine($"    {entry.Code,-4}  {entry.ClassName,-22}  {entry.GetterInterface}");
+            foreach (var (propName, propType) in entry.Props)
+            {
+                Console.WriteLine($"             - {propName,-25} {propType}");
+            }
+        }
+    }
+
+    // Sub-section 2: QUST negative confirmation — IQuestGetter top-level
+    // properties matching '*Conditions*' (Contains, broader than EndsWith
+    // — catches anomalies like ConditionsExtra). v2.9.1 assumes exactly
+    // two: DialogConditions + EventConditions.
+    Console.WriteLine();
+    Console.WriteLine("  ── QUST negative confirmation: IQuestGetter properties matching '*Conditions*' (case-insensitive Contains) ──");
+    var iquestGetter = typeof(IQuestGetter);
+    var questCondProps = iquestGetter.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+        .Where(p => p.Name.IndexOf("Conditions", StringComparison.OrdinalIgnoreCase) >= 0)
+        .OrderBy(p => p.Name)
+        .ToList();
+    Console.WriteLine($"    IQuestGetter exposes {questCondProps.Count} '*Conditions*' property(s):");
+    foreach (var p in questCondProps)
+    {
+        Console.WriteLine($"      - {p.Name,-25} {p.PropertyType}");
+    }
+    bool hasDialog = questCondProps.Any(p => p.Name.Equals("DialogConditions", StringComparison.OrdinalIgnoreCase));
+    bool hasEvent = questCondProps.Any(p => p.Name.Equals("EventConditions", StringComparison.OrdinalIgnoreCase));
+    if (questCondProps.Count != 2 || !hasDialog || !hasEvent)
+    {
+        Console.WriteLine($"    *** UNEXPECTED: expected exactly 2 (DialogConditions + EventConditions), found {questCondProps.Count} ***");
+        Console.WriteLine($"        (DialogConditions={hasDialog}, EventConditions={hasEvent}); v2.9.1 scope assumes bivariate.");
+        p1MultiCondFailures++;
+    }
+    else
+    {
+        Console.WriteLine($"    PASS  exactly DialogConditions + EventConditions; no third top-level condition list");
+    }
+
+    // Sub-section 3: nested-condition surfaces (out-of-scope for v2.9.1).
+    Console.WriteLine();
+    Console.WriteLine("  ── Nested-condition surfaces (out-of-scope-but-documented for v2.9.x candidates) ──");
+    var nestedCandidates = new[]
+    {
+        "Mutagen.Bethesda.Skyrim.IQuestAliasGetter",
+        "Mutagen.Bethesda.Skyrim.IQuestStageGetter",
+        "Mutagen.Bethesda.Skyrim.IQuestObjectiveGetter",
+        "Mutagen.Bethesda.Skyrim.IQuestLogEntryGetter",
+        "Mutagen.Bethesda.Skyrim.ISceneActionGetter",
+        "Mutagen.Bethesda.Skyrim.IPackageProcedureGetter",
+    };
+    int nestedCount = 0;
+    foreach (var typeName in nestedCandidates)
+    {
+        var nt = skyrimAssembly.GetType(typeName);
+        var shortName = typeName.Replace("Mutagen.Bethesda.Skyrim.", "");
+        if (nt == null)
+        {
+            Console.WriteLine($"      (interface not found: {shortName})");
+            continue;
+        }
+        var nProps = nt.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => p.Name.EndsWith("Conditions", StringComparison.OrdinalIgnoreCase))
+            .Where(p => p.GetIndexParameters().Length == 0)
+            .OrderBy(p => p.Name)
+            .ToList();
+        if (nProps.Count == 0)
+        {
+            Console.WriteLine($"      [no nested *Conditions on {shortName}]");
+            continue;
+        }
+        foreach (var p in nProps)
+        {
+            Console.WriteLine($"      [nested] {shortName}.{p.Name,-25} {p.PropertyType}");
+            nestedCount++;
+        }
+    }
+    Console.WriteLine($"    Total nested-condition surfaces flagged: {nestedCount}");
+
+    // Sub-section 4: QUST anchor selection — vanilla Skyrim.esm quest with
+    // both lists populated (round-trip-distinguishability anchor for
+    // Phase 2's coverage-smoke cells per MATRIX.md § Layer 1.P).
+    Console.WriteLine();
+    Console.WriteLine("  ── QUST anchor selection: vanilla Skyrim.esm quest with both lists populated ──");
+    if (!File.Exists(SkyrimEsmForBatch7))
+    {
+        Console.WriteLine($"    SKIP: Skyrim.esm not found at {SkyrimEsmForBatch7}; QUST anchor selection deferred.");
+    }
+    else
+    {
+        try
+        {
+            Console.WriteLine($"    Loading: {SkyrimEsmForBatch7}");
+            var srcMod = SkyrimMod.CreateFromBinary(SkyrimEsmForBatch7, SkyrimRelease.SkyrimSE);
+            var skyrimEsmKey = ModKey.FromNameAndExtension("Skyrim.esm");
+
+            // PLAN.md § Phase 1 step 2 candidate: MQ101 at Skyrim.esm:000242.
+            // Print regardless of qualification — informs anchor pick even
+            // if MQ101 doesn't have both lists populated.
+            var mq101Fk = new FormKey(skyrimEsmKey, 0x000242);
+            var mq101 = srcMod.Quests.FirstOrDefault(q => q.FormKey == mq101Fk);
+            if (mq101 != null)
+            {
+                Console.WriteLine($"    MQ101 candidate (Skyrim.esm:000242):");
+                Console.WriteLine($"      EditorID:               {mq101.EditorID ?? "(null)"}");
+                Console.WriteLine($"      DialogConditions.Count: {mq101.DialogConditions.Count}");
+                Console.WriteLine($"      EventConditions.Count:  {mq101.EventConditions.Count}");
+                if (mq101.DialogConditions.Count > 0 && mq101.EventConditions.Count > 0)
+                    Console.WriteLine($"      → qualifies as round-trip-distinguishability anchor");
+                else
+                    Console.WriteLine($"      → does NOT qualify (one or both lists empty); first qualifying anchor below");
+            }
+            else
+            {
+                Console.WriteLine($"    MQ101 (Skyrim.esm:000242) not found in Skyrim.esm");
+            }
+
+            // Sweep — first 10 quests with both lists populated.
+            var qualifying = srcMod.Quests
+                .Where(q => q.DialogConditions.Count > 0 && q.EventConditions.Count > 0)
+                .OrderBy(q => q.FormKey.ID)
+                .Take(10)
+                .ToList();
+            Console.WriteLine();
+            Console.WriteLine($"    First {qualifying.Count} qualifying quest(s) (Dialog>0 AND Event>0):");
+            foreach (var q in qualifying)
+            {
+                Console.WriteLine($"      Skyrim.esm:{q.FormKey.ID:X6}  {q.EditorID ?? "(null)",-30}  Dialog={q.DialogConditions.Count}  Event={q.EventConditions.Count}");
+            }
+
+            if (qualifying.Count == 0)
+            {
+                // Mandatory halt per kickoff: anchor must populate both lists.
+                Console.WriteLine($"    *** UNEXPECTED: no vanilla Skyrim.esm QUST has both DialogConditions and EventConditions populated ***");
+                Console.WriteLine($"        Phase 2 fixture must come from synthetic in-memory build — escalate to conductor.");
+                p1MultiCondFailures++;
+            }
+            else
+            {
+                // Per-list function-name distribution for the first qualifying
+                // anchor. Forward-look for Phase 2's 1.P.remove.<dialog|event>.
+                // byfunc cells — pick a function present in only one list for
+                // cleaner round-trip-distinguishability assertions.
+                var anchor = qualifying[0];
+                Console.WriteLine();
+                Console.WriteLine($"    ── Anchor candidate detail: {anchor.EditorID ?? "(null)"} (Skyrim.esm:{anchor.FormKey.ID:X6}) ──");
+                Console.WriteLine($"      DialogConditions function-name distribution:");
+                foreach (var grp in anchor.DialogConditions
+                    .GroupBy(c => c.Data?.GetType().Name ?? "<null>")
+                    .OrderBy(g => g.Key))
+                {
+                    Console.WriteLine($"        {grp.Key,-32} count={grp.Count()}");
+                }
+                Console.WriteLine($"      EventConditions function-name distribution:");
+                foreach (var grp in anchor.EventConditions
+                    .GroupBy(c => c.Data?.GetType().Name ?? "<null>")
+                    .OrderBy(g => g.Key))
+                {
+                    Console.WriteLine($"        {grp.Key,-32} count={grp.Count()}");
+                }
+
+                var dialogFns = anchor.DialogConditions
+                    .Select(c => c.Data?.GetType().Name ?? "<null>")
+                    .Distinct().ToHashSet();
+                var eventFns = anchor.EventConditions
+                    .Select(c => c.Data?.GetType().Name ?? "<null>")
+                    .Distinct().ToHashSet();
+                var dialogOnly = dialogFns.Except(eventFns).ToList();
+                var eventOnly = eventFns.Except(dialogFns).ToList();
+                Console.WriteLine($"      Dialog-only function names (Phase 2 byfunc candidates): {(dialogOnly.Count == 0 ? "(none)" : string.Join(", ", dialogOnly))}");
+                Console.WriteLine($"      Event-only  function names (Phase 2 byfunc candidates): {(eventOnly.Count == 0 ? "(none)" : string.Join(", ", eventOnly))}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"    *** FAIL: load/scan threw: {ex.GetType().Name} — {ex.Message}");
+            p1MultiCondFailures++;
+        }
+    }
+
+    // Summary
+    Console.WriteLine();
+    Console.WriteLine("  ── Sweep summary ──");
+    Console.WriteLine($"    All-Conditions carriers (single + multi):   {allCondCarriers.Count}");
+    Console.WriteLine($"    Multi-condition record types (≥2 *Cond):    {multiOnly.Count}");
+    Console.WriteLine($"    QUST top-level *Conditions* properties:     {questCondProps.Count} (expected 2)");
+    Console.WriteLine($"    Nested-condition surfaces flagged:          {nestedCount}");
+}
+Console.WriteLine($"=== v2.9.1 P1 multi-condition sweep: {(p1MultiCondFailures == 0 ? "ALL PASS" : $"{p1MultiCondFailures} FAILURE(S)")} ===");
+
 Console.WriteLine();
-int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures + p2dFailures + p4InfoFailures;
+int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures + p2dFailures + p4InfoFailures + p1MultiCondFailures;
 if (totalFailures > 0)
 {
-    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C + {p2dFailures} v2.9 P2D + {p4InfoFailures} v2.9 P4-INFO) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
+    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C + {p2dFailures} v2.9 P2D + {p4InfoFailures} v2.9 P4-INFO + {p1MultiCondFailures} v2.9.1 P1 multi-cond sweep) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
     Environment.Exit(1);
 }
 Console.WriteLine("=== probe complete ===");

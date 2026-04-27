@@ -4,11 +4,11 @@
 
 **Methodology.** Every cell is one bridge invocation (or one Mutagen direct call for race-probe functional probes), with the listed operation against the listed source record, and a documented expected result. Layers 1, 2, 4, 5 run via `tools/coverage-smoke/` against vanilla Skyrim.esm at `E:\SteamLibrary\steamapps\common\Skyrim Special Edition\Data\Skyrim.esm`. Layer 3 runs via `mo2_create_patch` against the live Authoria modlist, output to `<modlist>/mods/Claude Output/v2.9.1-scenario-N.esp`, deleted post-verification.
 
-**Record selection.** Layer 1 / 2 / 4 use `coverage-smoke`'s existing `FirstOrDefault` predicate selection where possible; the QUST anchor for the per-list-target cells needs a vanilla Skyrim.esm quest with both `DialogConditions` and `EventConditions` populated for round-trip-distinguishability (Phase 1's schema probe picks the specific FormID — PLAN.md § Phase 1 step 2 names `MQ101` `Skyrim.esm:000242` as a candidate; Phase 1 confirms via Mutagen-direct read or selects an alternative). This matrix locks the *what* and *how*, not the precise FormID.
+**Record selection.** Layer 1 / 2 / 4 use `coverage-smoke`'s existing `FirstOrDefault` predicate selection where possible; the QUST anchor for the per-list-target cells needs a vanilla Skyrim.esm quest with both `DialogConditions` and `EventConditions` populated for round-trip-distinguishability. **Phase 1 selected `Skyrim.esm:04C49D` (FollowerCommentary01)** — Dialog=1 (`GetInFaction`) + Event=1 (`GetEventData`), disjoint function distribution ideal for byfunc round-trip-distinguishability. PLAN.md § Phase 1 step 2's `MQ101` `Skyrim.esm:000242` candidate does NOT exist in vanilla Skyrim.esm (the MQ101 INFO at `Skyrim.esm:000E3D` from v2.9.0 P4-INFO is a distinct record); see PHASE_1_HANDOFF.md § Deviations from plan. Secondary anchor `Skyrim.esm:0E3145` (CR12) — Dialog=3, Event=3 — available if Phase 2 needs higher pre-state variance.
 
 **Pass/fail contract.** Every row's "Expected" column is the assertion the harness checks. PASS = response matches Expected exactly. FAIL = surface as a bug entry in the appropriate phase's handoff, including the actual response payload.
 
-**Phase fill-in cadence.** Phase 0 (this commit) lays down the layer scaffold + cell-naming convention + Layer 3 scenario use-case descriptions. **Phase 1** replaces the `<QUST-anchor>` placeholder with the probe-confirmed FormID + (if the schema probe surfaces additional multi-condition record types and Aaron locks them in scope) extends Layer 1.P with their `1.P.<op>.<target>.<RecordType>` cells. **Phase 2** runs the harness end-to-end after wiring `condition_target` in `Models.cs` + `PatchEngine.cs`. **Phase 3** picks live FormIDs for Layer 3 scenarios.
+**Phase fill-in cadence.** Phase 0 (commit `144f021`) laid down the layer scaffold + cell-naming convention + Layer 3 scenario use-case descriptions. **Phase 1 (this commit)** anchored Layer 1.P on `Skyrim.esm:04C49D` (FollowerCommentary01), populated the byfunc cells with `GetInFaction` (dialog) + `GetEventData` (event), and locked generality scope to QUST-only (probe found 1 multi-condition record — Quest only — in Mutagen.Bethesda.Skyrim 0.53.1; halt threshold 5+ trivially satisfied at 0). **Phase 2** runs the harness end-to-end after wiring `condition_target` in `Models.cs` + `PatchEngine.cs`. **Phase 3** picks live FormIDs for Layer 3 scenarios.
 
 ---
 
@@ -25,7 +25,7 @@
 
 The `1.P.<op>.<target>.<RecordType>` form anchors on **list target** (the v2.9.1 unit of work) — not function name (v2.9.0's anchor) or operator-tier (v2.8.0's). v2.9.1's mechanism dispatches on which `*Conditions` list to read/write; per-function coverage is v2.9.0's already-shipped surface and rolls into Layer 5 regression. `1.D.<NN>` carries v2.9.0's negative-band convention forward. Layer 4's only sub-grouping is `dsl` (parameter-value-form edges) — v2.9.0's `slot` / `formid` / `enum` / `compat` / `carry` sub-groups don't apply because v2.9.1 doesn't change the per-Condition build pipeline.
 
-**Per-list-target coverage is QUST-anchored.** If Phase 1's schema probe finds additional multi-condition record types in `Mutagen.Bethesda.Skyrim` (e.g. PACK / SCEN / SMQN) and Aaron locks them in scope via the conductor relay (per PLAN.md § D), Layer 1.P extends with one cell per `(op, target, RecordType)` triple. Phase 0 documents this extensibility but doesn't pre-bake cells — v2.9.1's locked default is QUST-only.
+**Per-list-target coverage is QUST-only (Phase 1 confirmed).** Phase 1's schema probe (output at `<workspace>/scratch/v2.9.1-phase-1-multi-condition-sweep.txt`) found **1 multi-condition record type** in `Mutagen.Bethesda.Skyrim` 0.53.1: Quest. The other 15 condition-carrying records (PERK / PACK / IDLE / MGEF / DialogResponses / Faction / Scene / MusicTrack / SoundDescriptor / IdleAnimation / LoadScreen / CameraPath / ConstructibleObject / StoryManagerBranchNode / StoryManagerEventNode / StoryManagerQuestNode) are all single-`Conditions`. Halt threshold (5+ types per CONDUCTOR_KICKOFF.md line 38) trivially satisfied at 0. Generality scope locked to QUST-only via conductor relay; Phase 0's extensibility scaffold preserved structurally but Layer 1.P remains 6 cells.
 
 ---
 
@@ -37,7 +37,7 @@ Each row's expected result follows the shape:
 
 > bridge response `mods.conditions_added=N` (for add) or `mods.conditions_removed=N` (for remove); readback via Mutagen-direct against the output ESP shows the condition lands in / leaves the targeted list (`DialogConditions` or `EventConditions`); the **non-targeted list is unchanged** (round-trip-distinguishability).
 
-**Carrier convention.** QUST is the canonical and only carrier for v2.9.1 Layer 1.P. Phase 1's probe picks the specific anchor FormID — a vanilla Skyrim.esm quest with both `DialogConditions.Count > 0` and `EventConditions.Count > 0` for round-trip-distinguishability. PLAN.md § Phase 1 step 2 names `MQ101` (`Skyrim.esm:000242`) as a candidate; Phase 1 confirms or selects an alternative.
+**Carrier convention.** QUST is the canonical and only carrier for v2.9.1 Layer 1.P. Phase 1's probe selected **`Skyrim.esm:04C49D` (FollowerCommentary01)** as the anchor — Dialog=1 (`GetInFaction`) + Event=1 (`GetEventData`), disjoint function distribution ideal for byfunc round-trip-distinguishability (the function name in each list does not appear in the other, so byfunc removal against the targeted list has zero ambiguity vs the non-targeted list). Secondary anchor **`Skyrim.esm:0E3145` (CR12)** — Dialog=3, Event=3 — available if Phase 2 needs higher pre-state variance.
 
 **Source-of-truth for property names:** Phase 1's `tools/race-probe/Program.cs` schema sweep against `IQuestGetter` in Mutagen 0.53.1. The matrix names the friendly target names (`dialog`, `event`) per PLAN.md § B baseline; the property literal mapping (`DialogConditions`, `EventConditions`) is Phase 1-confirmed.
 
@@ -45,15 +45,15 @@ Each row's expected result follows the shape:
 
 | # | Op | Target | Carrier | Operation | Expected |
 |---|----|--------|---------|-----------|----------|
-| `1.P.add.dialog.QUST` | add_conditions | `dialog` (→ `DialogConditions`) | `<QUST-anchor>` (Phase 1 picks) | add 1 condition with `function: "GetIsID"`, `parameters: {Object: "<NPC-FormID>"}`, `condition_target: "dialog"` | mods.conditions_added=1; readback `DialogConditions.Count == anchor.DialogConditions.Count + 1`; new condition's `Data.Object.FormKey` resolves; `EventConditions.Count` unchanged (round-trip-distinguishability) |
-| `1.P.add.event.QUST` | add_conditions | `event` (→ `EventConditions`) | `<QUST-anchor>` | as above with `condition_target: "event"` and a representative event-list condition (e.g. `function: "HasPerk"`, `parameters: {Perk: "<PERK-FormID>"}`) | mods.conditions_added=1; readback `EventConditions.Count == anchor.EventConditions.Count + 1`; new condition's `Data.Perk.FormKey` resolves; `DialogConditions.Count` unchanged |
+| `1.P.add.dialog.QUST` | add_conditions | `dialog` (→ `DialogConditions`) | `Skyrim.esm:04C49D` | add 1 condition with `function: "GetIsID"`, `parameters: {Object: "<NPC-FormID>"}`, `condition_target: "dialog"` | mods.conditions_added=1; readback `DialogConditions.Count == anchor.DialogConditions.Count + 1`; new condition's `Data.Object.FormKey` resolves; `EventConditions.Count` unchanged (round-trip-distinguishability) |
+| `1.P.add.event.QUST` | add_conditions | `event` (→ `EventConditions`) | `Skyrim.esm:04C49D` | as above with `condition_target: "event"` and a representative event-list condition (e.g. `function: "HasPerk"`, `parameters: {Perk: "<PERK-FormID>"}`) | mods.conditions_added=1; readback `EventConditions.Count == anchor.EventConditions.Count + 1`; new condition's `Data.Perk.FormKey` resolves; `DialogConditions.Count` unchanged |
 
 ### 1.P.remove — remove_conditions by index from a targeted list
 
 | # | Op | Target | Carrier | Operation | Expected |
 |---|----|--------|---------|-----------|----------|
-| `1.P.remove.dialog.QUST` | remove_conditions | `dialog` | `<QUST-anchor>` | remove condition at `index: 0` from DialogConditions with `condition_target: "dialog"` | mods.conditions_removed=1; readback `DialogConditions.Count == anchor.DialogConditions.Count - 1`; the previous index-0 entry is gone (function name + slot values match the pre-state index-0); `EventConditions` unchanged |
-| `1.P.remove.event.QUST` | remove_conditions | `event` | `<QUST-anchor>` | remove condition at `index: 0` from EventConditions with `condition_target: "event"` | mods.conditions_removed=1; readback `EventConditions.Count == anchor.EventConditions.Count - 1`; previous index-0 entry gone; `DialogConditions` unchanged |
+| `1.P.remove.dialog.QUST` | remove_conditions | `dialog` | `Skyrim.esm:04C49D` | remove condition at `index: 0` from DialogConditions with `condition_target: "dialog"` | mods.conditions_removed=1; readback `DialogConditions.Count == anchor.DialogConditions.Count - 1`; the previous index-0 entry is gone (function name + slot values match the pre-state index-0); `EventConditions` unchanged |
+| `1.P.remove.event.QUST` | remove_conditions | `event` | `Skyrim.esm:04C49D` | remove condition at `index: 0` from EventConditions with `condition_target: "event"` | mods.conditions_removed=1; readback `EventConditions.Count == anchor.EventConditions.Count - 1`; previous index-0 entry gone; `DialogConditions` unchanged |
 
 ### 1.P.remove.byfunc — remove_conditions by function name from a targeted list
 
@@ -61,8 +61,8 @@ Phase 1's probe pre-confirms which condition functions appear in the anchor QUST
 
 | # | Op | Target | Carrier | Operation | Expected |
 |---|----|--------|---------|-----------|----------|
-| `1.P.remove.dialog.byfunc.QUST` | remove_conditions | `dialog` | `<QUST-anchor>` | remove all conditions with `function: "<F-in-dialog>"` from DialogConditions with `condition_target: "dialog"` | mods.conditions_removed=N (where N = pre-state count of `<F-in-dialog>` in DialogConditions); readback DialogConditions has zero conditions with that function name; `EventConditions` matching-function entries (if any) are NOT removed |
-| `1.P.remove.event.byfunc.QUST` | remove_conditions | `event` | `<QUST-anchor>` | remove all conditions with `function: "<F-in-event>"` from EventConditions with `condition_target: "event"` | mods.conditions_removed=N; readback EventConditions has zero conditions with that function name; `DialogConditions` matching-function entries (if any) are NOT removed |
+| `1.P.remove.dialog.byfunc.QUST` | remove_conditions | `dialog` | `Skyrim.esm:04C49D` | remove all conditions with `function: "GetInFaction"` from DialogConditions with `condition_target: "dialog"` | mods.conditions_removed=N (where N = pre-state count of `GetInFaction` in DialogConditions); readback DialogConditions has zero conditions with that function name; `EventConditions` matching-function entries (if any) are NOT removed |
+| `1.P.remove.event.byfunc.QUST` | remove_conditions | `event` | `Skyrim.esm:04C49D` | remove all conditions with `function: "GetEventData"` from EventConditions with `condition_target: "event"` | mods.conditions_removed=N; readback EventConditions has zero conditions with that function name; `DialogConditions` matching-function entries (if any) are NOT removed |
 
 ---
 
@@ -224,12 +224,12 @@ Skips are not failures, but listed in PHASE_2_HANDOFF.md so Aaron can decide whe
 
 ## Phase fill-in checklist (Phase 1 hand-back)
 
-Phase 1 closes with these MATRIX edits:
+Phase 1 closed (this commit; see PHASE_1_HANDOFF.md) with these MATRIX edits landed:
 
-- [ ] **Anchor QUST FormID** — replace `<QUST-anchor>` placeholder in Layer 1.P cells with the probe-confirmed FormID (e.g. `Skyrim.esm:000242` if MQ101 confirmed, or alternative if a better fixture exists).
-- [ ] **Anchor QUST condition function names** — for `1.P.remove.dialog.byfunc.QUST` and `1.P.remove.event.byfunc.QUST`, replace `<F-in-dialog>` / `<F-in-event>` with function names confirmed-present in the anchor's respective lists. If a single function is present in both lists, pick functions that appear in only one for cleaner round-trip-distinguishability.
-- [ ] **Generality scope confirmation** — Phase 1's schema probe sweep identifies any additional multi-condition record types in `Mutagen.Bethesda.Skyrim`. If found and Aaron locks them in v2.9.1 scope (via conductor relay), Layer 1.P extends with `1.P.<op>.<target>.<RecordType>` cells per the probe finding. If Aaron locks QUST-only, Phase 1's handoff documents the deferred record types under § Carry-overs and no MATRIX edits.
-- [ ] **Property name mapping table** — confirm Phase 0's baseline naming (`"dialog" → "DialogConditions"`, `"event" → "EventConditions"`) matches Mutagen 0.53.1's schema literally. If the schema property names differ (`Dialog Conditions`, `EventCondition`, etc. — unexpected), the friendly target names may need to adjust or an explicit mapping comment lands in the matrix.
+- [x] **Anchor QUST FormID** — anchored Layer 1.P on `Skyrim.esm:04C49D` (FollowerCommentary01); secondary anchor `Skyrim.esm:0E3145` (CR12) flagged for higher-variance Phase 2 needs. PLAN.md candidate `Skyrim.esm:000242` (MQ101) does NOT exist in vanilla Skyrim.esm; documented in PHASE_1_HANDOFF.md § Deviations from plan.
+- [x] **Anchor QUST condition function names** — `1.P.remove.dialog.byfunc.QUST` uses `GetInFaction` (only function in FollowerCommentary01.DialogConditions); `1.P.remove.event.byfunc.QUST` uses `GetEventData` (only function in FollowerCommentary01.EventConditions). Disjoint function distribution → zero ambiguity for byfunc round-trip-distinguishability.
+- [x] **Generality scope confirmation** — schema probe found **1 multi-condition record type** in Mutagen.Bethesda.Skyrim 0.53.1: Quest. The other 15 condition-carriers are all single-`Conditions`. Halt threshold (5+) trivially satisfied at 0; QUST-only locked via conductor relay. Layer 1.P stays at 6 cells.
+- [x] **Property name mapping table** — confirmed: `IQuestGetter` exposes exactly `DialogConditions: IReadOnlyList<IConditionGetter>` + `EventConditions: IReadOnlyList<IConditionGetter>` (writer side `Quest` exposes `Noggog.ExtendedList<Condition>` for both). Friendly mapping `dialog → DialogConditions` / `event → EventConditions` matches Mutagen 0.53.1 literally; no adjustment needed.
 
 ---
 

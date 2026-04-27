@@ -4937,9 +4937,16 @@ Skip("4.esl.01", "Layer 4 ESL master interaction requires live modlist; deferred
 // mods key, and Tier D's coverage check fires uniformly. Phase 2's harness
 // accepted EITHER shape (Tier D OR helper-throw); Phase 4 tightens to
 // Tier D only.
+// v2.9.1 — expectation flipped from Tier D unmatched_operators to the new
+// explicit Q3 error. PLAN.md § Phase 2 step 11 moves Quest condition
+// disambiguation from carry-over to covered; this cell is the test-side
+// codification of the now-covered (QUST, add_conditions) pair when
+// condition_target is absent. See MATRIX.md § Layer 1.D 1.D.01 (Test 389)
+// for the canonical v2.9.1 home; this cell preserves the historical
+// 4.c.01-carry anchor with the updated assertion shape.
 if (firstQuest != null)
 {
-    Console.WriteLine($"── Test 157 [4.c.01-carry]: QUST + add_conditions (Tier D unification) ──");
+    Console.WriteLine($"── Test 157 [4.c.01-carry]: QUST + add_conditions WITHOUT condition_target → Q3 explicit error (v2.9.1 contract flip) ──");
     var record = new Dictionary<string, object>
     {
         ["op"] = "override",
@@ -4957,20 +4964,21 @@ if (firstQuest != null)
     else
     {
         var d0 = details[0];
-        if (!d0.TryGetProperty("unmatched_operators", out var unm) || unm.ValueKind != JsonValueKind.Array)
+        if (!d0.TryGetProperty("error", out var errEl))
         {
-            Console.WriteLine("  FAIL: per-record detail should carry unmatched_operators array (Tier D shape)");
+            Console.WriteLine("  FAIL: per-record detail should carry error field (v2.9.1 Q3 explicit error shape)");
             ok = false;
         }
         else
         {
-            var ops = unm.EnumerateArray().Select(e => e.GetString()).Where(s => s != null).ToList();
-            if (ops.Count != 1 || ops[0] != "add_conditions")
+            var err = errEl.GetString() ?? "";
+            bool sentinel = err.Contains("requires a condition_target parameter") && err.Contains("Quest");
+            if (!sentinel)
             {
-                Console.WriteLine($"  FAIL: unmatched_operators should equal [\"add_conditions\"], got [{string.Join(", ", ops)}]");
+                Console.WriteLine($"  FAIL: error sentinel not matched (expected 'requires a condition_target parameter' + 'Quest'): {err}");
                 ok = false;
             }
-            else Console.WriteLine($"  rejection confirmed: unmatched_operators=[\"add_conditions\"] (Tier D unified shape)");
+            else Console.WriteLine($"  rejection confirmed: Q3 explicit error matches v2.9.1 sentinel — \"{err}\"");
         }
     }
     Console.WriteLine(ok ? "  PASS" : "  FAIL");
@@ -7598,6 +7606,1085 @@ else Skip("4.c.01-carry", "no QUST");
         Console.WriteLine(ok ? "  PASS" : "  FAIL");
         if (!ok) failures++;
         Console.WriteLine();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// v2.9.1 Layer 1.P / 1.D / 2 / 4.dsl — Quest condition disambiguation
+// (per dev/plans/v2.9.1_quest_condition_disambiguation/MATRIX.md)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Anchor: Skyrim.esm:04C49D (FollowerCommentary01) — Phase 1 selected;
+// Dialog=1 (GetInFaction) + Event=1 (GetEventData), disjoint function
+// distribution gives unambiguous round-trip-distinguishability for byfunc
+// removal cells. Hadvar (Skyrim.esm:02BF9F) reused as the Object slot
+// (vanilla-confirmed by v2.9.0 P4-INFO).
+{
+    var v291QuestFk = new FormKey(ModKey.FromNameAndExtension("Skyrim.esm"), 0x04C49D);
+    const string v291QuestFidStr = "Skyrim.esm:04C49D";
+    const string v291HadvarFidStr = "Skyrim.esm:02BF9F";
+    var v291HadvarFk = new FormKey(ModKey.FromNameAndExtension("Skyrim.esm"), 0x02BF9F);
+
+    var anchorQust = source.EnumerateMajorRecords<IQuestGetter>().FirstOrDefault(r => r.FormKey == v291QuestFk);
+    if (anchorQust == null)
+    {
+        Skip("v2.9.1.anchor", $"QUST {v291QuestFidStr} (FollowerCommentary01) not found in vanilla Skyrim.esm");
+    }
+    else
+    {
+        int origDialog = anchorQust.DialogConditions.Count;
+        int origEvent = anchorQust.EventConditions.Count;
+        Console.WriteLine($"v2.9.1 anchor: QUST {v291QuestFidStr} ({anchorQust.EditorID}) — Dialog={origDialog}, Event={origEvent}");
+        Console.WriteLine();
+
+        // Helper for asserting the override QUST shape on readback.
+        (IReadOnlyList<IConditionGetter> Dialog, IReadOnlyList<IConditionGetter> Event)? ReadbackQuest291(string outPath)
+        {
+            var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+            var q = outMod.EnumerateMajorRecords<IQuestGetter>().FirstOrDefault(r => r.FormKey == v291QuestFk);
+            if (q == null) return null;
+            return (q.DialogConditions, q.EventConditions);
+        }
+
+        // ─── Test 383 [1.P.add.dialog.QUST] — add to DialogConditions ───
+        {
+            Console.WriteLine($"── Test 383 [1.P.add.dialog.QUST]: QUST + add_conditions condition_target=dialog (GetIsID(Object=Hadvar)) ──");
+            var outPath = Path.Combine(outDir, "test383-1p-add-dialog.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "coverage-smoke",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = v291QuestFidStr,
+                        source_path = SkyrimEsm,
+                        condition_target = "dialog",
+                        add_conditions = new object[]
+                        {
+                            new
+                            {
+                                function = "GetIsID",
+                                @operator = "==",
+                                value = 1f,
+                                parameters = new Dictionary<string, object> { ["Object"] = v291HadvarFidStr },
+                            },
+                        },
+                    },
+                },
+                load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+            };
+            var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            bool ok = root.GetProperty("success").GetBoolean();
+            if (!ok) { Console.WriteLine($"  FAIL: bridge success=false: {stdout}"); }
+            else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+            else
+            {
+                int condsAdded = -1;
+                if (root.TryGetProperty("details", out var det) && det.GetArrayLength() == 1
+                    && det[0].TryGetProperty("modifications", out var mods)
+                    && mods.TryGetProperty("conditions_added", out var ca))
+                    condsAdded = ca.GetInt32();
+                if (condsAdded != 1) { Console.WriteLine($"  FAIL: mods.conditions_added expected 1, got {condsAdded}"); ok = false; }
+                var rb = ReadbackQuest291(outPath);
+                if (rb == null) { Console.WriteLine("  FAIL: override QUST missing"); ok = false; }
+                else
+                {
+                    bool dialogOk = rb.Value.Dialog.Count == origDialog + 1;
+                    bool eventOk = rb.Value.Event.Count == origEvent;
+                    bool gotIdInDialog = rb.Value.Dialog.Any(c => c.Data?.GetType().Name == "GetIsIDConditionData");
+                    bool gotIdInEvent = rb.Value.Event.Any(c => c.Data?.GetType().Name == "GetIsIDConditionData");
+                    Console.WriteLine($"  readback: Dialog={rb.Value.Dialog.Count} ({(dialogOk ? "✓ +1" : "✗")}), Event={rb.Value.Event.Count} ({(eventOk ? "✓ unchanged" : "✗")})");
+                    Console.WriteLine($"  readback: GetIsID-in-Dialog={gotIdInDialog} ({(gotIdInDialog ? "✓" : "✗")}), GetIsID-in-Event={gotIdInEvent} ({(!gotIdInEvent ? "✓ absent" : "✗ leaked")})");
+                    if (!dialogOk || !eventOk || !gotIdInDialog || gotIdInEvent) ok = false;
+                }
+            }
+            Console.WriteLine(ok ? "  PASS" : "  FAIL");
+            if (!ok) failures++;
+            Console.WriteLine();
+        }
+
+        // ─── Test 384 [1.P.add.event.QUST] — add to EventConditions ───
+        {
+            Console.WriteLine($"── Test 384 [1.P.add.event.QUST]: QUST + add_conditions condition_target=event (GetIsID(Object=Hadvar)) ──");
+            var outPath = Path.Combine(outDir, "test384-1p-add-event.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "coverage-smoke",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = v291QuestFidStr,
+                        source_path = SkyrimEsm,
+                        condition_target = "event",
+                        add_conditions = new object[]
+                        {
+                            new
+                            {
+                                function = "GetIsID",
+                                @operator = "==",
+                                value = 1f,
+                                parameters = new Dictionary<string, object> { ["Object"] = v291HadvarFidStr },
+                            },
+                        },
+                    },
+                },
+                load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+            };
+            var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            bool ok = root.GetProperty("success").GetBoolean();
+            if (!ok) { Console.WriteLine($"  FAIL: bridge success=false: {stdout}"); }
+            else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+            else
+            {
+                var rb = ReadbackQuest291(outPath);
+                if (rb == null) { Console.WriteLine("  FAIL: override QUST missing"); ok = false; }
+                else
+                {
+                    bool dialogOk = rb.Value.Dialog.Count == origDialog;
+                    bool eventOk = rb.Value.Event.Count == origEvent + 1;
+                    bool gotIdInDialog = rb.Value.Dialog.Any(c => c.Data?.GetType().Name == "GetIsIDConditionData");
+                    bool gotIdInEvent = rb.Value.Event.Any(c => c.Data?.GetType().Name == "GetIsIDConditionData");
+                    Console.WriteLine($"  readback: Dialog={rb.Value.Dialog.Count} ({(dialogOk ? "✓ unchanged" : "✗")}), Event={rb.Value.Event.Count} ({(eventOk ? "✓ +1" : "✗")})");
+                    Console.WriteLine($"  readback: GetIsID-in-Event={gotIdInEvent} ({(gotIdInEvent ? "✓" : "✗")}), GetIsID-in-Dialog={gotIdInDialog} ({(!gotIdInDialog ? "✓ absent" : "✗ leaked")})");
+                    if (!dialogOk || !eventOk || !gotIdInEvent || gotIdInDialog) ok = false;
+                }
+            }
+            Console.WriteLine(ok ? "  PASS" : "  FAIL");
+            if (!ok) failures++;
+            Console.WriteLine();
+        }
+
+        // ─── Test 385 [1.P.remove.dialog.QUST] — remove by index from DialogConditions ───
+        {
+            Console.WriteLine($"── Test 385 [1.P.remove.dialog.QUST]: QUST + remove_conditions condition_target=dialog index=0 ──");
+            var outPath = Path.Combine(outDir, "test385-1p-rm-dialog-idx.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "coverage-smoke",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = v291QuestFidStr,
+                        source_path = SkyrimEsm,
+                        condition_target = "dialog",
+                        remove_conditions = new[]
+                        {
+                            new { index = 0, function = (string?)null }
+                        },
+                    },
+                },
+                load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+            };
+            var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            bool ok = root.GetProperty("success").GetBoolean();
+            if (!ok) { Console.WriteLine($"  FAIL: bridge success=false: {stdout}"); }
+            else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+            else
+            {
+                var rb = ReadbackQuest291(outPath);
+                if (rb == null) { Console.WriteLine("  FAIL: override QUST missing"); ok = false; }
+                else
+                {
+                    bool dialogOk = rb.Value.Dialog.Count == origDialog - 1;
+                    bool eventOk = rb.Value.Event.Count == origEvent;
+                    Console.WriteLine($"  readback: Dialog={rb.Value.Dialog.Count} ({(dialogOk ? "✓ -1" : "✗")}), Event={rb.Value.Event.Count} ({(eventOk ? "✓ unchanged" : "✗")})");
+                    if (!dialogOk || !eventOk) ok = false;
+                }
+            }
+            Console.WriteLine(ok ? "  PASS" : "  FAIL");
+            if (!ok) failures++;
+            Console.WriteLine();
+        }
+
+        // ─── Test 386 [1.P.remove.event.QUST] — remove by index from EventConditions ───
+        {
+            Console.WriteLine($"── Test 386 [1.P.remove.event.QUST]: QUST + remove_conditions condition_target=event index=0 ──");
+            var outPath = Path.Combine(outDir, "test386-1p-rm-event-idx.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "coverage-smoke",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = v291QuestFidStr,
+                        source_path = SkyrimEsm,
+                        condition_target = "event",
+                        remove_conditions = new[]
+                        {
+                            new { index = 0, function = (string?)null }
+                        },
+                    },
+                },
+                load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+            };
+            var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            bool ok = root.GetProperty("success").GetBoolean();
+            if (!ok) { Console.WriteLine($"  FAIL: bridge success=false: {stdout}"); }
+            else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+            else
+            {
+                var rb = ReadbackQuest291(outPath);
+                if (rb == null) { Console.WriteLine("  FAIL: override QUST missing"); ok = false; }
+                else
+                {
+                    bool dialogOk = rb.Value.Dialog.Count == origDialog;
+                    bool eventOk = rb.Value.Event.Count == origEvent - 1;
+                    Console.WriteLine($"  readback: Dialog={rb.Value.Dialog.Count} ({(dialogOk ? "✓ unchanged" : "✗")}), Event={rb.Value.Event.Count} ({(eventOk ? "✓ -1" : "✗")})");
+                    if (!dialogOk || !eventOk) ok = false;
+                }
+            }
+            Console.WriteLine(ok ? "  PASS" : "  FAIL");
+            if (!ok) failures++;
+            Console.WriteLine();
+        }
+
+        // ─── Test 387 [1.P.remove.dialog.byfunc.QUST] — remove byfunc GetInFaction ───
+        {
+            Console.WriteLine($"── Test 387 [1.P.remove.dialog.byfunc.QUST]: QUST + remove_conditions condition_target=dialog GetInFaction ──");
+            var outPath = Path.Combine(outDir, "test387-1p-rm-dialog-byfunc.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "coverage-smoke",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = v291QuestFidStr,
+                        source_path = SkyrimEsm,
+                        condition_target = "dialog",
+                        remove_conditions = new object[]
+                        {
+                            new { function = "GetInFaction" },
+                        },
+                    },
+                },
+                load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+            };
+            var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            bool ok = root.GetProperty("success").GetBoolean();
+            if (!ok) { Console.WriteLine($"  FAIL: bridge success=false: {stdout}"); }
+            else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+            else
+            {
+                var rb = ReadbackQuest291(outPath);
+                if (rb == null) { Console.WriteLine("  FAIL: override QUST missing"); ok = false; }
+                else
+                {
+                    bool dialogNoInFaction = !rb.Value.Dialog.Any(c => c.Data?.GetType().Name == "GetInFactionConditionData");
+                    bool eventStillHasEventData = rb.Value.Event.Any(c => c.Data?.GetType().Name == "GetEventDataConditionData");
+                    bool eventCountUnchanged = rb.Value.Event.Count == origEvent;
+                    Console.WriteLine($"  readback: Dialog={rb.Value.Dialog.Count} (GetInFaction-removed={dialogNoInFaction}), Event={rb.Value.Event.Count} (unchanged={eventCountUnchanged}, GetEventData-still-present={eventStillHasEventData})");
+                    if (!dialogNoInFaction || !eventCountUnchanged || !eventStillHasEventData) ok = false;
+                }
+            }
+            Console.WriteLine(ok ? "  PASS" : "  FAIL");
+            if (!ok) failures++;
+            Console.WriteLine();
+        }
+
+        // ─── Test 388 [1.P.remove.event.byfunc.QUST] — remove byfunc GetEventData ───
+        {
+            Console.WriteLine($"── Test 388 [1.P.remove.event.byfunc.QUST]: QUST + remove_conditions condition_target=event GetEventData ──");
+            var outPath = Path.Combine(outDir, "test388-1p-rm-event-byfunc.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "coverage-smoke",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = v291QuestFidStr,
+                        source_path = SkyrimEsm,
+                        condition_target = "event",
+                        remove_conditions = new object[]
+                        {
+                            new { function = "GetEventData" },
+                        },
+                    },
+                },
+                load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+            };
+            var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            bool ok = root.GetProperty("success").GetBoolean();
+            if (!ok) { Console.WriteLine($"  FAIL: bridge success=false: {stdout}"); }
+            else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+            else
+            {
+                var rb = ReadbackQuest291(outPath);
+                if (rb == null) { Console.WriteLine("  FAIL: override QUST missing"); ok = false; }
+                else
+                {
+                    bool eventNoEventData = !rb.Value.Event.Any(c => c.Data?.GetType().Name == "GetEventDataConditionData");
+                    bool dialogStillHasInFaction = rb.Value.Dialog.Any(c => c.Data?.GetType().Name == "GetInFactionConditionData");
+                    bool dialogCountUnchanged = rb.Value.Dialog.Count == origDialog;
+                    Console.WriteLine($"  readback: Event={rb.Value.Event.Count} (GetEventData-removed={eventNoEventData}), Dialog={rb.Value.Dialog.Count} (unchanged={dialogCountUnchanged}, GetInFaction-still-present={dialogStillHasInFaction})");
+                    if (!eventNoEventData || !dialogCountUnchanged || !dialogStillHasInFaction) ok = false;
+                }
+            }
+            Console.WriteLine(ok ? "  PASS" : "  FAIL");
+            if (!ok) failures++;
+            Console.WriteLine();
+        }
+
+        // ─── Test 389 [1.D.01] — QUST add_conditions WITHOUT condition_target → Q3 ───
+        {
+            Console.WriteLine($"── Test 389 [1.D.01]: QUST + add_conditions WITHOUT condition_target → Q3 explicit error ──");
+            var outPath = Path.Combine(outDir, "test389-1d-01-q3-add.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "coverage-smoke",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = v291QuestFidStr,
+                        source_path = SkyrimEsm,
+                        // NO condition_target
+                        add_conditions = new object[]
+                        {
+                            new
+                            {
+                                function = "GetIsID",
+                                @operator = "==",
+                                value = 1f,
+                                parameters = new Dictionary<string, object> { ["Object"] = v291HadvarFidStr },
+                            },
+                        },
+                    },
+                },
+                load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+            };
+            var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            bool ok = !root.GetProperty("success").GetBoolean();
+            if (!ok) { Console.WriteLine($"  FAIL: success should be false (Q3 expected): {stdout}"); }
+            if (File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP should not be written"); ok = false; }
+            var details = root.GetProperty("details");
+            if (details.GetArrayLength() != 1) { Console.WriteLine($"  FAIL: details should have 1 entry"); ok = false; }
+            else
+            {
+                var err = details[0].TryGetProperty("error", out var e) ? e.GetString() ?? "" : "";
+                bool sentinel = err.Contains("requires a condition_target parameter") && err.Contains("Quest");
+                Console.WriteLine($"  matched error: \"{err}\"");
+                if (!sentinel) { Console.WriteLine($"  FAIL: error sentinel not matched (expected 'requires a condition_target parameter' + 'Quest')"); ok = false; }
+            }
+            Console.WriteLine(ok ? "  PASS" : "  FAIL");
+            if (!ok) failures++;
+            Console.WriteLine();
+        }
+
+        // ─── Test 390 [1.D.02] — QUST remove_conditions WITHOUT condition_target → Q3 ───
+        {
+            Console.WriteLine($"── Test 390 [1.D.02]: QUST + remove_conditions WITHOUT condition_target → Q3 explicit error ──");
+            var outPath = Path.Combine(outDir, "test390-1d-02-q3-rm.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "coverage-smoke",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = v291QuestFidStr,
+                        source_path = SkyrimEsm,
+                        // NO condition_target
+                        remove_conditions = new[]
+                        {
+                            new { index = 0, function = (string?)null }
+                        },
+                    },
+                },
+                load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+            };
+            var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            bool ok = !root.GetProperty("success").GetBoolean();
+            if (!ok) { Console.WriteLine($"  FAIL: success should be false (Q3 expected): {stdout}"); }
+            if (File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP should not be written"); ok = false; }
+            var details = root.GetProperty("details");
+            if (details.GetArrayLength() != 1) { Console.WriteLine($"  FAIL: details should have 1 entry"); ok = false; }
+            else
+            {
+                var err = details[0].TryGetProperty("error", out var e) ? e.GetString() ?? "" : "";
+                bool sentinel = err.Contains("requires a condition_target parameter") && err.Contains("remove_conditions");
+                Console.WriteLine($"  matched error: \"{err}\"");
+                if (!sentinel) { Console.WriteLine($"  FAIL: error sentinel not matched (expected 'requires a condition_target parameter' + 'remove_conditions')"); ok = false; }
+            }
+            Console.WriteLine(ok ? "  PASS" : "  FAIL");
+            if (!ok) failures++;
+            Console.WriteLine();
+        }
+
+        // ─── Test 391 [1.D.03] — QUST + condition_target="story" → §C#3 ───
+        {
+            Console.WriteLine($"── Test 391 [1.D.03]: QUST + add_conditions condition_target='story' → §C#3 bad-value error ──");
+            var outPath = Path.Combine(outDir, "test391-1d-03-bad-value.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "coverage-smoke",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = v291QuestFidStr,
+                        source_path = SkyrimEsm,
+                        condition_target = "story",
+                        add_conditions = new object[]
+                        {
+                            new
+                            {
+                                function = "GetIsID",
+                                @operator = "==",
+                                value = 1f,
+                                parameters = new Dictionary<string, object> { ["Object"] = v291HadvarFidStr },
+                            },
+                        },
+                    },
+                },
+                load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+            };
+            var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            bool ok = !root.GetProperty("success").GetBoolean();
+            if (!ok) { Console.WriteLine($"  FAIL: success should be false: {stdout}"); }
+            if (File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP should not be written"); ok = false; }
+            var details = root.GetProperty("details");
+            if (details.GetArrayLength() != 1) { Console.WriteLine($"  FAIL: details should have 1 entry"); ok = false; }
+            else
+            {
+                var err = details[0].TryGetProperty("error", out var e) ? e.GetString() ?? "" : "";
+                bool sentinel = err.Contains("Unknown condition_target") && err.Contains("'story'");
+                Console.WriteLine($"  matched error: \"{err}\"");
+                if (!sentinel) { Console.WriteLine($"  FAIL: error sentinel not matched (expected 'Unknown condition_target' + \"'story'\")"); ok = false; }
+            }
+            Console.WriteLine(ok ? "  PASS" : "  FAIL");
+            if (!ok) failures++;
+            Console.WriteLine();
+        }
+
+        // ─── Test 392 [1.D.04] — PERK + condition_target → Q4 reject ───
+        {
+            Console.WriteLine($"── Test 392 [1.D.04]: PERK + add_conditions condition_target='dialog' → Q4 reject ──");
+            var anyPerk = source.Perks.FirstOrDefault();
+            if (anyPerk == null) Skip("1.D.04", "no PERK in vanilla Skyrim.esm");
+            else
+            {
+                var outPath = Path.Combine(outDir, "test392-1d-04-q4-reject.esp");
+                if (File.Exists(outPath)) File.Delete(outPath);
+                var req = new
+                {
+                    command = "patch",
+                    output_path = outPath,
+                    esl_flag = false,
+                    author = "coverage-smoke",
+                    records = new[]
+                    {
+                        new
+                        {
+                            op = "override",
+                            formid = FormatFormKey(anyPerk.FormKey),
+                            source_path = SkyrimEsm,
+                            condition_target = "dialog",
+                            add_conditions = new object[]
+                            {
+                                new
+                                {
+                                    function = "GetIsID",
+                                    @operator = "==",
+                                    value = 1f,
+                                    parameters = new Dictionary<string, object> { ["Object"] = v291HadvarFidStr },
+                                },
+                            },
+                        },
+                    },
+                    load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+                };
+                var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+                using var doc = JsonDocument.Parse(stdout);
+                var root = doc.RootElement;
+                bool ok = !root.GetProperty("success").GetBoolean();
+                if (!ok) { Console.WriteLine($"  FAIL: success should be false (Q4 reject expected): {stdout}"); }
+                if (File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP should not be written"); ok = false; }
+                var details = root.GetProperty("details");
+                if (details.GetArrayLength() != 1) { Console.WriteLine($"  FAIL: details should have 1 entry"); ok = false; }
+                else
+                {
+                    var err = details[0].TryGetProperty("error", out var e) ? e.GetString() ?? "" : "";
+                    bool sentinel = err.Contains("uses a single Conditions list") && err.Contains("omit condition_target");
+                    Console.WriteLine($"  perk: {FormatFormKey(anyPerk.FormKey)} ({anyPerk.EditorID})");
+                    Console.WriteLine($"  matched error: \"{err}\"");
+                    if (!sentinel) { Console.WriteLine($"  FAIL: error sentinel not matched"); ok = false; }
+                }
+                Console.WriteLine(ok ? "  PASS" : "  FAIL");
+                if (!ok) failures++;
+                Console.WriteLine();
+            }
+        }
+
+        // ─── Test 393 [1.D.05] — ARMO + condition_target → Tier D fallthrough ───
+        // Per Q4 refinement: ARMO has NO Conditions property at all, so the
+        // resolver's "no condition list at all" branch returns null → Tier D's
+        // uniform unmatched_operators shape fires (matches v2.9.0 behavior
+        // bit-identically). Distinguishes from 1.D.04 (PERK has Conditions,
+        // wrong target → Q4 reject) — different error shapes for different
+        // failure modes.
+        {
+            Console.WriteLine($"── Test 393 [1.D.05]: ARMO + add_conditions condition_target='dialog' → Tier D unmatched_operators ──");
+            var outPath = Path.Combine(outDir, "test393-1d-05-armo-tierd.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "coverage-smoke",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = FormatFormKey(firstArmor.FormKey),
+                        source_path = SkyrimEsm,
+                        condition_target = "dialog",
+                        add_conditions = new object[]
+                        {
+                            new
+                            {
+                                function = "GetIsID",
+                                @operator = "==",
+                                value = 1f,
+                                parameters = new Dictionary<string, object> { ["Object"] = v291HadvarFidStr },
+                            },
+                        },
+                    },
+                },
+                load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+            };
+            var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            bool ok = !root.GetProperty("success").GetBoolean();
+            if (!ok) { Console.WriteLine($"  FAIL: success should be false: {stdout}"); }
+            if (File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP should not be written"); ok = false; }
+            var details = root.GetProperty("details");
+            if (details.GetArrayLength() != 1) { Console.WriteLine($"  FAIL: details should have 1 entry"); ok = false; }
+            else
+            {
+                var d0 = details[0];
+                if (!d0.TryGetProperty("unmatched_operators", out var unm) || unm.ValueKind != JsonValueKind.Array)
+                {
+                    Console.WriteLine("  FAIL: per-record detail should carry unmatched_operators array (Tier D shape)");
+                    ok = false;
+                }
+                else
+                {
+                    var ops = unm.EnumerateArray().Select(e => e.GetString()).Where(s => s != null).ToList();
+                    if (ops.Count != 1 || ops[0] != "add_conditions")
+                    { Console.WriteLine($"  FAIL: unmatched_operators expected [\"add_conditions\"], got [{string.Join(", ", ops)}]"); ok = false; }
+                    else
+                    Console.WriteLine($"  matched Tier D shape: unmatched_operators=[{string.Join(", ", ops)}]");
+                }
+            }
+            Console.WriteLine(ok ? "  PASS" : "  FAIL");
+            if (!ok) failures++;
+            Console.WriteLine();
+        }
+
+        // ─── Test 394 [2.01] — multi-condition single op (one list target) ───
+        {
+            Console.WriteLine($"── Test 394 [2.01]: QUST + add_conditions condition_target=dialog × 3 conditions (multi-condition single op) ──");
+            var outPath = Path.Combine(outDir, "test394-2-01-multi-cond.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "coverage-smoke",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = v291QuestFidStr,
+                        source_path = SkyrimEsm,
+                        condition_target = "dialog",
+                        add_conditions = new object[]
+                        {
+                            new
+                            {
+                                function = "GetIsID",
+                                @operator = "==",
+                                value = 1f,
+                                parameters = new Dictionary<string, object> { ["Object"] = v291HadvarFidStr },
+                            },
+                            new
+                            {
+                                function = "GetInFaction",
+                                @operator = "==",
+                                value = 1f,
+                                parameters = new Dictionary<string, object> { ["Faction"] = v291HadvarFidStr },
+                            },
+                            new
+                            {
+                                function = "HasPerk",
+                                @operator = "==",
+                                value = 1f,
+                                parameters = new Dictionary<string, object> { ["Perk"] = v291HadvarFidStr },
+                            },
+                        },
+                    },
+                },
+                load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+            };
+            var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            bool ok = root.GetProperty("success").GetBoolean();
+            if (!ok) { Console.WriteLine($"  FAIL: bridge success=false: {stdout}"); }
+            else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+            else
+            {
+                var rb = ReadbackQuest291(outPath);
+                if (rb == null) { Console.WriteLine("  FAIL: override QUST missing"); ok = false; }
+                else
+                {
+                    bool dialogOk = rb.Value.Dialog.Count == origDialog + 3;
+                    bool eventOk = rb.Value.Event.Count == origEvent;
+                    Console.WriteLine($"  readback: Dialog={rb.Value.Dialog.Count} ({(dialogOk ? "✓ +3" : "✗")}), Event={rb.Value.Event.Count} ({(eventOk ? "✓ unchanged" : "✗")})");
+                    if (!dialogOk || !eventOk) ok = false;
+                }
+            }
+            Console.WriteLine(ok ? "  PASS" : "  FAIL");
+            if (!ok) failures++;
+            Console.WriteLine();
+        }
+
+        // ─── Test 395 [2.02] — two ops, one record, opposing list targets ───
+        // Per MATRIX § Layer 2.02 + PLAN.md § B: two op blocks in one request,
+        // each with its own condition_target. This verifies the request-shape
+        // structural limitation (one add_conditions field per op) doesn't
+        // prevent mixed dialog + event writes within one mo2_create_patch call.
+        {
+            Console.WriteLine($"── Test 395 [2.02]: QUST × 2 ops with opposing list targets (dialog + event in one call) ──");
+            var outPath = Path.Combine(outDir, "test395-2-02-opposing.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "coverage-smoke",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = v291QuestFidStr,
+                        source_path = SkyrimEsm,
+                        condition_target = "dialog",
+                        add_conditions = new object[]
+                        {
+                            new
+                            {
+                                function = "GetIsID",
+                                @operator = "==",
+                                value = 1f,
+                                parameters = new Dictionary<string, object> { ["Object"] = v291HadvarFidStr },
+                            },
+                            new
+                            {
+                                function = "GetInFaction",
+                                @operator = "==",
+                                value = 1f,
+                                parameters = new Dictionary<string, object> { ["Faction"] = v291HadvarFidStr },
+                            },
+                        },
+                    },
+                    new
+                    {
+                        op = "override",
+                        formid = v291QuestFidStr,
+                        source_path = SkyrimEsm,
+                        condition_target = "event",
+                        add_conditions = new object[]
+                        {
+                            new
+                            {
+                                function = "HasPerk",
+                                @operator = "==",
+                                value = 1f,
+                                parameters = new Dictionary<string, object> { ["Perk"] = v291HadvarFidStr },
+                            },
+                        },
+                    },
+                },
+                load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+            };
+            var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            bool ok = root.GetProperty("success").GetBoolean();
+            if (!ok) { Console.WriteLine($"  FAIL: bridge success=false: {stdout}"); }
+            else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+            else
+            {
+                var rb = ReadbackQuest291(outPath);
+                if (rb == null) { Console.WriteLine("  FAIL: override QUST missing"); ok = false; }
+                else
+                {
+                    bool dialogOk = rb.Value.Dialog.Count == origDialog + 2;
+                    bool eventOk = rb.Value.Event.Count == origEvent + 1;
+                    Console.WriteLine($"  readback: Dialog={rb.Value.Dialog.Count} ({(dialogOk ? "✓ +2" : "✗")}), Event={rb.Value.Event.Count} ({(eventOk ? "✓ +1" : "✗")})");
+                    if (!dialogOk || !eventOk) ok = false;
+                }
+            }
+            Console.WriteLine(ok ? "  PASS" : "  FAIL");
+            if (!ok) failures++;
+            Console.WriteLine();
+        }
+
+        // ─── Test 396 [2.03] — v2.9.1 × v2.9.0 surface composition ───
+        // GetIsID + parameters{Object} on QUST with condition_target=dialog.
+        // Verifies v2.9.0's RouteParameterSlot composes underneath v2.9.1's
+        // list-target dispatch — Object slot resolves through the dispatcher
+        // and lands in DialogConditions (not EventConditions) with the
+        // FormKey preserved.
+        {
+            Console.WriteLine($"── Test 396 [2.03]: QUST dialog + GetIsID + parameters{{Object}} (v2.9.1 × v2.9.0 composition) ──");
+            var outPath = Path.Combine(outDir, "test396-2-03-composition.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "coverage-smoke",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = v291QuestFidStr,
+                        source_path = SkyrimEsm,
+                        condition_target = "dialog",
+                        add_conditions = new object[]
+                        {
+                            new
+                            {
+                                function = "GetIsID",
+                                @operator = "==",
+                                value = 1f,
+                                parameters = new Dictionary<string, object> { ["Object"] = v291HadvarFidStr },
+                            },
+                        },
+                    },
+                },
+                load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+            };
+            var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            bool ok = root.GetProperty("success").GetBoolean();
+            if (!ok) { Console.WriteLine($"  FAIL: bridge success=false: {stdout}"); }
+            else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+            else
+            {
+                var rb = ReadbackQuest291(outPath);
+                if (rb == null) { Console.WriteLine("  FAIL: override QUST missing"); ok = false; }
+                else
+                {
+                    var addedCond = rb.Value.Dialog
+                        .Where(c => c.Data?.GetType().Name == "GetIsIDConditionData")
+                        .FirstOrDefault(c =>
+                        {
+                            var obj = c.Data!.GetType().GetProperty("Object")?.GetValue(c.Data);
+                            var link = obj?.GetType().GetProperty("Link")?.GetValue(obj);
+                            var fk = link?.GetType().GetProperty("FormKey")?.GetValue(link);
+                            return fk is FormKey k && k == v291HadvarFk;
+                        });
+                    if (addedCond == null)
+                    { Console.WriteLine("  FAIL: GetIsIDConditionData with Object.FormKey=Hadvar not found in DialogConditions (v2.9.0 dispatcher composition broke)"); ok = false; }
+                    else
+                    Console.WriteLine($"  readback: GetIsID(Object.FormKey={v291HadvarFk}) lands in DialogConditions ✓ (v2.9.0 RouteParameterSlot + v2.9.1 list-target dispatch composed end-to-end)");
+                }
+            }
+            Console.WriteLine(ok ? "  PASS" : "  FAIL");
+            if (!ok) failures++;
+            Console.WriteLine();
+        }
+
+        // ─── Test 397 [4.dsl.01] — empty-string condition_target → §C#3 ───
+        {
+            Console.WriteLine($"── Test 397 [4.dsl.01]: QUST + condition_target='' (empty string) → bad-value error ──");
+            var outPath = Path.Combine(outDir, "test397-4dsl-01-empty.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "coverage-smoke",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = v291QuestFidStr,
+                        source_path = SkyrimEsm,
+                        condition_target = "",
+                        add_conditions = new object[]
+                        {
+                            new
+                            {
+                                function = "GetIsID",
+                                @operator = "==",
+                                value = 1f,
+                                parameters = new Dictionary<string, object> { ["Object"] = v291HadvarFidStr },
+                            },
+                        },
+                    },
+                },
+                load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+            };
+            var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            bool ok = !root.GetProperty("success").GetBoolean();
+            if (!ok) { Console.WriteLine($"  FAIL: success should be false: {stdout}"); }
+            if (File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP should not be written"); ok = false; }
+            var details = root.GetProperty("details");
+            if (details.GetArrayLength() != 1) { Console.WriteLine($"  FAIL: details should have 1 entry"); ok = false; }
+            else
+            {
+                var err = details[0].TryGetProperty("error", out var e) ? e.GetString() ?? "" : "";
+                bool sentinel = err.Contains("Unknown condition_target") && err.Contains("''");
+                Console.WriteLine($"  matched error: \"{err}\"");
+                if (!sentinel) { Console.WriteLine($"  FAIL: empty-string sentinel not matched (expected 'Unknown condition_target' + \"''\")"); ok = false; }
+            }
+            Console.WriteLine(ok ? "  PASS" : "  FAIL");
+            if (!ok) failures++;
+            Console.WriteLine();
+        }
+
+        // ─── Test 398 [4.dsl.02] — JSON-null condition_target → field-absent (Q3) ───
+        // JSON null deserializes to C# null on a `string?` field — same as
+        // missing-field, fires Q3 missing-target error.
+        {
+            Console.WriteLine($"── Test 398 [4.dsl.02]: QUST + condition_target=null (JSON null) → Q3 (treated as missing) ──");
+            var outPath = Path.Combine(outDir, "test398-4dsl-02-null.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            // Manually serialize to send JSON null (anonymous-record path coerces null props to property absence in some writers).
+            var reqJson = "{" +
+                "\"command\":\"patch\"," +
+                $"\"output_path\":{JsonSerializer.Serialize(outPath)}," +
+                "\"esl_flag\":false," +
+                "\"author\":\"coverage-smoke\"," +
+                "\"records\":[{" +
+                    "\"op\":\"override\"," +
+                    $"\"formid\":\"{v291QuestFidStr}\"," +
+                    $"\"source_path\":{JsonSerializer.Serialize(SkyrimEsm)}," +
+                    "\"condition_target\":null," +
+                    "\"add_conditions\":[{" +
+                        "\"function\":\"GetIsID\"," +
+                        "\"operator\":\"==\"," +
+                        "\"value\":1.0," +
+                        $"\"parameters\":{{\"Object\":\"{v291HadvarFidStr}\"}}" +
+                    "}]" +
+                "}]," +
+                "\"load_order\":{" +
+                    "\"game_release\":\"SkyrimSE\"," +
+                    $"\"listings\":[{{\"mod_key\":\"Skyrim.esm\",\"path\":{JsonSerializer.Serialize(SkyrimEsm)},\"enabled\":true}}]" +
+                "}" +
+            "}";
+            var (stdout, _, exit) = RunBridge(bridgeExe, reqJson);
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            bool ok = !root.GetProperty("success").GetBoolean();
+            if (!ok) { Console.WriteLine($"  FAIL: success should be false (Q3 expected): {stdout}"); }
+            if (File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP should not be written"); ok = false; }
+            var details = root.GetProperty("details");
+            if (details.GetArrayLength() != 1) { Console.WriteLine($"  FAIL: details should have 1 entry"); ok = false; }
+            else
+            {
+                var err = details[0].TryGetProperty("error", out var e) ? e.GetString() ?? "" : "";
+                bool sentinel = err.Contains("requires a condition_target parameter") && err.Contains("Quest");
+                Console.WriteLine($"  matched error: \"{err}\"");
+                if (!sentinel) { Console.WriteLine($"  FAIL: JSON null should fire Q3 (expected 'requires a condition_target parameter' + 'Quest')"); ok = false; }
+            }
+            Console.WriteLine(ok ? "  PASS" : "  FAIL");
+            if (!ok) failures++;
+            Console.WriteLine();
+        }
+
+        // ─── Test 399 [4.dsl.03] — case-insensitivity (Q5 lock) ───
+        {
+            Console.WriteLine($"── Test 399 [4.dsl.03]: QUST + condition_target='Dialog' (TitleCase) → DialogConditions (Q5) ──");
+            var outPath = Path.Combine(outDir, "test399-4dsl-03-case.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "coverage-smoke",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = v291QuestFidStr,
+                        source_path = SkyrimEsm,
+                        condition_target = "Dialog",
+                        add_conditions = new object[]
+                        {
+                            new
+                            {
+                                function = "GetIsID",
+                                @operator = "==",
+                                value = 1f,
+                                parameters = new Dictionary<string, object> { ["Object"] = v291HadvarFidStr },
+                            },
+                        },
+                    },
+                },
+                load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+            };
+            var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            bool ok = root.GetProperty("success").GetBoolean();
+            if (!ok) { Console.WriteLine($"  FAIL: bridge success=false (case-insensitive Q5 lock not honored): {stdout}"); }
+            else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+            else
+            {
+                var rb = ReadbackQuest291(outPath);
+                if (rb == null) { Console.WriteLine("  FAIL: override QUST missing"); ok = false; }
+                else
+                {
+                    bool gotIdInDialog = rb.Value.Dialog.Any(c => c.Data?.GetType().Name == "GetIsIDConditionData");
+                    bool gotIdInEvent = rb.Value.Event.Any(c => c.Data?.GetType().Name == "GetIsIDConditionData");
+                    Console.WriteLine($"  readback: GetIsID-in-Dialog={gotIdInDialog} ({(gotIdInDialog ? "✓" : "✗")}), GetIsID-in-Event={gotIdInEvent} ({(!gotIdInEvent ? "✓" : "✗ leaked")})");
+                    if (!gotIdInDialog || gotIdInEvent) ok = false;
+                }
+            }
+            Console.WriteLine(ok ? "  PASS" : "  FAIL");
+            if (!ok) failures++;
+            Console.WriteLine();
+        }
+
+        // ─── Test 400 [4.dsl.04] — condition_target alongside unrelated operator ───
+        // condition_target is operator-level but only consumed by add/remove_conditions.
+        // When the op carries an unrelated operator (add_keywords) and no
+        // conditions sub-operator, condition_target is silently ignored.
+        // RACE supports add_keywords (Test 7 [1.A.01]) and has no Conditions
+        // property (Phase 1 sweep — RACE is not in the 16-carrier set), so
+        // condition_target on a RACE op with only add_keywords verifies the
+        // op-level ignore-when-no-conditions-sub-op behavior cleanly.
+        {
+            Console.WriteLine($"── Test 400 [4.dsl.04]: RACE + add_keywords + condition_target=dialog (no conditions sub-op) → keywords succeed, ct ignored ──");
+            var anyKeyword = source.Keywords.FirstOrDefault();
+            if (anyKeyword == null) Skip("4.dsl.04", "no KYWD in vanilla Skyrim.esm");
+            else
+            {
+                var outPath = Path.Combine(outDir, "test400-4dsl-04-orthogonal.esp");
+                if (File.Exists(outPath)) File.Delete(outPath);
+                var req = new
+                {
+                    command = "patch",
+                    output_path = outPath,
+                    esl_flag = false,
+                    author = "coverage-smoke",
+                    records = new[]
+                    {
+                        new
+                        {
+                            op = "override",
+                            formid = FormatFormKey(pickedRace.FormKey),
+                            source_path = SkyrimEsm,
+                            condition_target = "dialog", // benign: no conditions sub-op
+                            add_keywords = new[] { FormatFormKey(anyKeyword.FormKey) },
+                        },
+                    },
+                    load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+                };
+                var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+                using var doc = JsonDocument.Parse(stdout);
+                var root = doc.RootElement;
+                bool ok = root.GetProperty("success").GetBoolean();
+                if (!ok) { Console.WriteLine($"  FAIL: bridge success=false (condition_target should be benignly ignored when no conditions sub-op present): {stdout}"); }
+                else
+                {
+                    Console.WriteLine($"  readback: RACE override succeeded; condition_target='dialog' silently ignored when no add/remove_conditions present (orthogonal field semantics verified)");
+                }
+                Console.WriteLine(ok ? "  PASS" : "  FAIL");
+                if (!ok) failures++;
+                Console.WriteLine();
+            }
+        }
     }
 }
 

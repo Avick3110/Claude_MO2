@@ -2707,11 +2707,697 @@ int p1MultiCondFailures = 0;
 }
 Console.WriteLine($"=== v2.9.1 P1 multi-condition sweep: {(p1MultiCondFailures == 0 ? "ALL PASS" : $"{p1MultiCondFailures} FAILURE(S)")} ===");
 
+// ─── v2.9.1 P2 — Quest condition disambiguation (bridge subprocess) ─────
+//
+// Phase 2's bridge dispatch landed: RecordOperation.ConditionTarget routes
+// reflection lookup through ResolveConditionListProperty. This section
+// exercises the live bridge end-to-end.
+//
+// Carrier: QUST Skyrim.esm:04C49D (FollowerCommentary01 — Phase 1 anchor;
+// disjoint per-list function distribution: GetInFaction in DialogConditions
+// only, GetEventData in EventConditions only).
+//
+// Probe shape (per probe block): bridge subprocess → patch QUST 04C49D with
+// the test op → readback via SkyrimMod.CreateFromBinary (independent of
+// bridge) → assert (a) bridge success/error per probe verdict, (b) Mutagen-
+// direct readback shows condition lands in the targeted list and NOT in the
+// other list. The 8 probes below cover:
+//   - Positive add: dialog target / event target (smoke; HALT 2 anchor)
+//   - Positive remove byfunc: dialog (GetInFaction) / event (GetEventData)
+//   - Error: QUST without condition_target → Q3 explicit error
+//   - Error: bad condition_target value ("story") → §C#3 explicit error
+//   - Error: PERK + condition_target → Q4 reject error
+//   - Composition: QUST DialogConditions + GetIsID + parameters{Object} —
+//     exercises v2.9.0's RouteParameterSlot dispatcher under v2.9.1's
+//     list-target dispatch.
+Section("v2.9.1 P2 — Quest condition disambiguation (bridge subprocess)");
+
+int p2QustFailures = 0;
+{
+    var thisDirP2q = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location)!;
+    var bridgeExeP2q = Path.GetFullPath(Path.Combine(thisDirP2q,
+        "..", "..", "..", "..", "mutagen-bridge", "bin", "Release", "net8.0", "mutagen-bridge.exe"));
+    if (!File.Exists(bridgeExeP2q))
+    {
+        Console.WriteLine($"  SKIP: mutagen-bridge.exe not found at {bridgeExeP2q}");
+    }
+    else if (!File.Exists(SkyrimEsmForBatch7))
+    {
+        Console.WriteLine($"  SKIP: Skyrim.esm not found at {SkyrimEsmForBatch7}");
+    }
+    else
+    {
+        // Phase 1 anchor
+        var questFkStr = "Skyrim.esm:04C49D";
+        var questFk = new FormKey(ModKey.FromNameAndExtension("Skyrim.esm"), 0x04C49D);
+
+        // Hadvar — already vanilla-confirmed by P4-INFO probe; safe Object slot.
+        var hadvarFkStr = "Skyrim.esm:02BF9F";
+        var hadvarFk = new FormKey(ModKey.FromNameAndExtension("Skyrim.esm"), 0x02BF9F);
+
+        // PERK FormID for the Q4 reject probe lands in Phase C extension.
+        // Hadvar (Object slot) and the QUST anchor are the only fixtures
+        // needed for Phase B's two positive-add probes.
+
+        Console.WriteLine($"  bridge:  {bridgeExeP2q}");
+        Console.WriteLine($"  source:  {SkyrimEsmForBatch7}");
+        Console.WriteLine($"  carrier: QUST {questFkStr} (FollowerCommentary01, Phase 1 anchor)");
+        Console.WriteLine();
+
+        var outDirP2q = Path.Combine(Path.GetTempPath(), "race-probe-v291-p2");
+        Directory.CreateDirectory(outDirP2q);
+
+        // ── Bridge invocation helper (returns parsed JSON state) ──
+        (bool ParsedOk, bool ReportedSuccess, int FailedCount, string FirstErr, int ExitCode) RunBridge(object req)
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(bridgeExeP2q)
+            {
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            var proc = System.Diagnostics.Process.Start(psi)!;
+            proc.StandardInput.Write(System.Text.Json.JsonSerializer.Serialize(req));
+            proc.StandardInput.Close();
+            var stdout = proc.StandardOutput.ReadToEnd();
+            var stderr = proc.StandardError.ReadToEnd();
+            proc.WaitForExit();
+
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(stdout);
+                var root = doc.RootElement;
+                bool succ = root.TryGetProperty("success", out var sv) && sv.GetBoolean();
+                int failedCt = root.TryGetProperty("failed_count", out var fc) ? fc.GetInt32() : -1;
+                string err = "<none>";
+                if (root.TryGetProperty("details", out var dets) &&
+                    dets.ValueKind == System.Text.Json.JsonValueKind.Array && dets.GetArrayLength() > 0)
+                {
+                    var d0 = dets[0];
+                    if (d0.TryGetProperty("error", out var e)) err = e.GetString() ?? "<null>";
+                }
+                return (true, succ, failedCt, err, proc.ExitCode);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"      stdout (first 500 chars): {stdout.Substring(0, Math.Min(500, stdout.Length))}");
+                if (!string.IsNullOrEmpty(stderr)) Console.WriteLine($"      stderr: {stderr.Trim()}");
+                Console.WriteLine($"      parse exception: {ex.Message}");
+                return (false, false, -1, "<parse-failed>", proc.ExitCode);
+            }
+        }
+
+        // Mutagen-direct readback: returns (DialogConditions, EventConditions)
+        // for the override QUST in the output ESP, or null if the override
+        // can't be located.
+        (IReadOnlyList<IConditionGetter> Dialog, IReadOnlyList<IConditionGetter> Event)?
+            ReadbackQuest(string outPath, FormKey fk)
+        {
+            var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+            var q = outMod.EnumerateMajorRecords<IQuestGetter>().FirstOrDefault(r => r.FormKey == fk);
+            if (q == null) return null;
+            return (q.DialogConditions, q.EventConditions);
+        }
+
+        // ── 1. Positive add — dialog target ──
+        Console.WriteLine("  [1/8] add condition_target=dialog (GetIsID(Object=Hadvar))");
+        {
+            var outPath = Path.Combine(outDirP2q, "p2-add-dialog.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "race-probe-v291-p2",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = questFkStr,
+                        source_path = SkyrimEsmForBatch7,
+                        condition_target = "dialog",
+                        add_conditions = new object[]
+                        {
+                            new
+                            {
+                                function = "GetIsID",
+                                @operator = "==",
+                                value = 1f,
+                                parameters = new Dictionary<string, object> { ["Object"] = hadvarFkStr },
+                            },
+                        },
+                    },
+                },
+                load_order = new
+                {
+                    game_release = "SkyrimSE",
+                    listings = new[]
+                    {
+                        new { mod_key = "Skyrim.esm", path = SkyrimEsmForBatch7, enabled = true }
+                    }
+                }
+            };
+            var r = RunBridge(req);
+            if (!r.ParsedOk || !r.ReportedSuccess)
+            {
+                Console.WriteLine($"        *** FAIL: bridge success=false (exit={r.ExitCode}, failed={r.FailedCount}, err={r.FirstErr})");
+                p2QustFailures++;
+            }
+            else if (!File.Exists(outPath))
+            {
+                Console.WriteLine($"        *** FAIL: output ESP missing");
+                p2QustFailures++;
+            }
+            else
+            {
+                var rb = ReadbackQuest(outPath, questFk);
+                if (rb == null)
+                {
+                    Console.WriteLine($"        *** FAIL: override QUST not found in output ESP");
+                    p2QustFailures++;
+                }
+                else
+                {
+                    int dialogN = rb.Value.Dialog.Count;
+                    int eventN = rb.Value.Event.Count;
+                    bool gotIdInDialog = rb.Value.Dialog.Any(c => c.Data?.GetType().Name == "GetIsIDConditionData");
+                    bool gotIdInEvent = rb.Value.Event.Any(c => c.Data?.GetType().Name == "GetIsIDConditionData");
+                    if (dialogN == 2 && eventN == 1 && gotIdInDialog && !gotIdInEvent)
+                    {
+                        Console.WriteLine($"        PASS  Dialog={dialogN} (1 vanilla GetInFaction + 1 added GetIsID), Event={eventN} (1 vanilla GetEventData, untouched)");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"        *** FAIL: counts/distribution unexpected — Dialog={dialogN}, Event={eventN}, GetIsID-in-Dialog={gotIdInDialog}, GetIsID-in-Event={gotIdInEvent}");
+                        p2QustFailures++;
+                    }
+                }
+            }
+            try { if (File.Exists(outPath)) File.Delete(outPath); } catch { }
+        }
+
+        // ── 2. Positive add — event target ──
+        Console.WriteLine("  [2/8] add condition_target=event (GetIsID(Object=Hadvar))");
+        {
+            var outPath = Path.Combine(outDirP2q, "p2-add-event.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "race-probe-v291-p2",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = questFkStr,
+                        source_path = SkyrimEsmForBatch7,
+                        condition_target = "event",
+                        add_conditions = new object[]
+                        {
+                            new
+                            {
+                                function = "GetIsID",
+                                @operator = "==",
+                                value = 1f,
+                                parameters = new Dictionary<string, object> { ["Object"] = hadvarFkStr },
+                            },
+                        },
+                    },
+                },
+                load_order = new
+                {
+                    game_release = "SkyrimSE",
+                    listings = new[]
+                    {
+                        new { mod_key = "Skyrim.esm", path = SkyrimEsmForBatch7, enabled = true }
+                    }
+                }
+            };
+            var r = RunBridge(req);
+            if (!r.ParsedOk || !r.ReportedSuccess)
+            {
+                Console.WriteLine($"        *** FAIL: bridge success=false (exit={r.ExitCode}, failed={r.FailedCount}, err={r.FirstErr})");
+                p2QustFailures++;
+            }
+            else if (!File.Exists(outPath))
+            {
+                Console.WriteLine($"        *** FAIL: output ESP missing");
+                p2QustFailures++;
+            }
+            else
+            {
+                var rb = ReadbackQuest(outPath, questFk);
+                if (rb == null)
+                {
+                    Console.WriteLine($"        *** FAIL: override QUST not found in output ESP");
+                    p2QustFailures++;
+                }
+                else
+                {
+                    int dialogN = rb.Value.Dialog.Count;
+                    int eventN = rb.Value.Event.Count;
+                    bool gotIdInDialog = rb.Value.Dialog.Any(c => c.Data?.GetType().Name == "GetIsIDConditionData");
+                    bool gotIdInEvent = rb.Value.Event.Any(c => c.Data?.GetType().Name == "GetIsIDConditionData");
+                    if (dialogN == 1 && eventN == 2 && !gotIdInDialog && gotIdInEvent)
+                    {
+                        Console.WriteLine($"        PASS  Dialog={dialogN} (1 vanilla GetInFaction, untouched), Event={eventN} (1 vanilla GetEventData + 1 added GetIsID)");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"        *** FAIL: counts/distribution unexpected — Dialog={dialogN}, Event={eventN}, GetIsID-in-Dialog={gotIdInDialog}, GetIsID-in-Event={gotIdInEvent}");
+                        p2QustFailures++;
+                    }
+                }
+            }
+            try { if (File.Exists(outPath)) File.Delete(outPath); } catch { }
+        }
+
+        // ── 3. Positive remove byfunc — dialog target (GetInFaction) ──
+        // FollowerCommentary01.DialogConditions has exactly 1 GetInFaction
+        // condition (Phase 1 disjoint distribution). Pre: Dialog=1, Event=1.
+        // Expected post: Dialog=0 (GetInFaction removed), Event=1 unchanged.
+        Console.WriteLine("  [3/8] remove byfunc condition_target=dialog (GetInFaction)");
+        {
+            var outPath = Path.Combine(outDirP2q, "p2-rm-dialog-byfunc.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "race-probe-v291-p2",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = questFkStr,
+                        source_path = SkyrimEsmForBatch7,
+                        condition_target = "dialog",
+                        remove_conditions = new object[]
+                        {
+                            new { function = "GetInFaction" },
+                        },
+                    },
+                },
+                load_order = new
+                {
+                    game_release = "SkyrimSE",
+                    listings = new[]
+                    {
+                        new { mod_key = "Skyrim.esm", path = SkyrimEsmForBatch7, enabled = true }
+                    }
+                }
+            };
+            var r = RunBridge(req);
+            if (!r.ParsedOk || !r.ReportedSuccess)
+            {
+                Console.WriteLine($"        *** FAIL: bridge success=false (exit={r.ExitCode}, failed={r.FailedCount}, err={r.FirstErr})");
+                p2QustFailures++;
+            }
+            else if (!File.Exists(outPath))
+            {
+                Console.WriteLine($"        *** FAIL: output ESP missing");
+                p2QustFailures++;
+            }
+            else
+            {
+                var rb = ReadbackQuest(outPath, questFk);
+                if (rb == null) { Console.WriteLine($"        *** FAIL: override QUST not found"); p2QustFailures++; }
+                else
+                {
+                    int dialogN = rb.Value.Dialog.Count;
+                    int eventN = rb.Value.Event.Count;
+                    bool eventStillHasEventData = rb.Value.Event.Any(c => c.Data?.GetType().Name == "GetEventDataConditionData");
+                    if (dialogN == 0 && eventN == 1 && eventStillHasEventData)
+                    {
+                        Console.WriteLine($"        PASS  Dialog={dialogN} (GetInFaction removed), Event={eventN} (GetEventData untouched)");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"        *** FAIL: Dialog={dialogN}, Event={eventN}, EventData-still-present={eventStillHasEventData}");
+                        p2QustFailures++;
+                    }
+                }
+            }
+            try { if (File.Exists(outPath)) File.Delete(outPath); } catch { }
+        }
+
+        // ── 4. Positive remove byfunc — event target (GetEventData) ──
+        Console.WriteLine("  [4/8] remove byfunc condition_target=event (GetEventData)");
+        {
+            var outPath = Path.Combine(outDirP2q, "p2-rm-event-byfunc.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "race-probe-v291-p2",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = questFkStr,
+                        source_path = SkyrimEsmForBatch7,
+                        condition_target = "event",
+                        remove_conditions = new object[]
+                        {
+                            new { function = "GetEventData" },
+                        },
+                    },
+                },
+                load_order = new
+                {
+                    game_release = "SkyrimSE",
+                    listings = new[]
+                    {
+                        new { mod_key = "Skyrim.esm", path = SkyrimEsmForBatch7, enabled = true }
+                    }
+                }
+            };
+            var r = RunBridge(req);
+            if (!r.ParsedOk || !r.ReportedSuccess)
+            {
+                Console.WriteLine($"        *** FAIL: bridge success=false (exit={r.ExitCode}, failed={r.FailedCount}, err={r.FirstErr})");
+                p2QustFailures++;
+            }
+            else if (!File.Exists(outPath))
+            {
+                Console.WriteLine($"        *** FAIL: output ESP missing");
+                p2QustFailures++;
+            }
+            else
+            {
+                var rb = ReadbackQuest(outPath, questFk);
+                if (rb == null) { Console.WriteLine($"        *** FAIL: override QUST not found"); p2QustFailures++; }
+                else
+                {
+                    int dialogN = rb.Value.Dialog.Count;
+                    int eventN = rb.Value.Event.Count;
+                    bool dialogStillHasInFaction = rb.Value.Dialog.Any(c => c.Data?.GetType().Name == "GetInFactionConditionData");
+                    if (dialogN == 1 && eventN == 0 && dialogStillHasInFaction)
+                    {
+                        Console.WriteLine($"        PASS  Dialog={dialogN} (GetInFaction untouched), Event={eventN} (GetEventData removed)");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"        *** FAIL: Dialog={dialogN}, Event={eventN}, InFaction-still-present={dialogStillHasInFaction}");
+                        p2QustFailures++;
+                    }
+                }
+            }
+            try { if (File.Exists(outPath)) File.Delete(outPath); } catch { }
+        }
+
+        // ── 5. Error: QUST without condition_target → Q3 explicit error ──
+        Console.WriteLine("  [5/8] error: QUST without condition_target → Q3 explicit error");
+        {
+            var outPath = Path.Combine(outDirP2q, "p2-err-q3-no-target.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "race-probe-v291-p2",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = questFkStr,
+                        source_path = SkyrimEsmForBatch7,
+                        // NO condition_target
+                        add_conditions = new object[]
+                        {
+                            new
+                            {
+                                function = "GetIsID",
+                                @operator = "==",
+                                value = 1f,
+                                parameters = new Dictionary<string, object> { ["Object"] = hadvarFkStr },
+                            },
+                        },
+                    },
+                },
+                load_order = new
+                {
+                    game_release = "SkyrimSE",
+                    listings = new[]
+                    {
+                        new { mod_key = "Skyrim.esm", path = SkyrimEsmForBatch7, enabled = true }
+                    }
+                }
+            };
+            var r = RunBridge(req);
+            if (!r.ParsedOk)
+            {
+                Console.WriteLine($"        *** FAIL: bridge stdout unparseable");
+                p2QustFailures++;
+            }
+            else if (r.ReportedSuccess)
+            {
+                Console.WriteLine($"        *** FAIL: bridge reported success=true; expected per-record error (Q3)");
+                p2QustFailures++;
+            }
+            else if (!r.FirstErr.Contains("requires a condition_target parameter") || !r.FirstErr.Contains("Quest"))
+            {
+                Console.WriteLine($"        *** FAIL: error text doesn't match Q3 sentinel");
+                Console.WriteLine($"            actual: {r.FirstErr}");
+                p2QustFailures++;
+            }
+            else
+            {
+                Console.WriteLine($"        PASS  bridge success=false; error matches Q3 sentinel");
+                Console.WriteLine($"              error: {r.FirstErr}");
+            }
+            try { if (File.Exists(outPath)) File.Delete(outPath); } catch { }
+        }
+
+        // ── 6. Error: bad condition_target value ("story") → §C#3 ──
+        Console.WriteLine("  [6/8] error: bad condition_target='story' → §C#3");
+        {
+            var outPath = Path.Combine(outDirP2q, "p2-err-bad-target.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "race-probe-v291-p2",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = questFkStr,
+                        source_path = SkyrimEsmForBatch7,
+                        condition_target = "story",
+                        add_conditions = new object[]
+                        {
+                            new
+                            {
+                                function = "GetIsID",
+                                @operator = "==",
+                                value = 1f,
+                                parameters = new Dictionary<string, object> { ["Object"] = hadvarFkStr },
+                            },
+                        },
+                    },
+                },
+                load_order = new
+                {
+                    game_release = "SkyrimSE",
+                    listings = new[]
+                    {
+                        new { mod_key = "Skyrim.esm", path = SkyrimEsmForBatch7, enabled = true }
+                    }
+                }
+            };
+            var r = RunBridge(req);
+            if (!r.ParsedOk) { Console.WriteLine($"        *** FAIL: bridge stdout unparseable"); p2QustFailures++; }
+            else if (r.ReportedSuccess) { Console.WriteLine($"        *** FAIL: bridge reported success=true; expected bad-value error"); p2QustFailures++; }
+            else if (!r.FirstErr.Contains("Unknown condition_target") || !r.FirstErr.Contains("'story'"))
+            {
+                Console.WriteLine($"        *** FAIL: error text doesn't match §C#3 sentinel");
+                Console.WriteLine($"            actual: {r.FirstErr}");
+                p2QustFailures++;
+            }
+            else
+            {
+                Console.WriteLine($"        PASS  error matches §C#3 sentinel");
+                Console.WriteLine($"              error: {r.FirstErr}");
+            }
+            try { if (File.Exists(outPath)) File.Delete(outPath); } catch { }
+        }
+
+        // ── 7. Error: PERK + condition_target → Q4 reject error ──
+        // Pick any vanilla PERK dynamically from Skyrim.esm.
+        Console.WriteLine("  [7/8] error: PERK + condition_target → Q4 reject");
+        {
+            string? perkFkStr = null;
+            try
+            {
+                var srcModForPerk = SkyrimMod.CreateFromBinary(SkyrimEsmForBatch7, SkyrimRelease.SkyrimSE);
+                var anyPerk = srcModForPerk.Perks.FirstOrDefault();
+                if (anyPerk != null)
+                {
+                    var pfk = anyPerk.FormKey;
+                    perkFkStr = $"{pfk.ModKey.FileName}:{pfk.ID:X6}";
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"        *** FAIL: couldn't resolve a vanilla perk: {ex.Message}");
+                p2QustFailures++;
+            }
+            if (perkFkStr != null)
+            {
+                var outPath = Path.Combine(outDirP2q, "p2-err-q4-perk.esp");
+                if (File.Exists(outPath)) File.Delete(outPath);
+                var req = new
+                {
+                    command = "patch",
+                    output_path = outPath,
+                    esl_flag = false,
+                    author = "race-probe-v291-p2",
+                    records = new[]
+                    {
+                        new
+                        {
+                            op = "override",
+                            formid = perkFkStr,
+                            source_path = SkyrimEsmForBatch7,
+                            condition_target = "dialog",
+                            add_conditions = new object[]
+                            {
+                                new
+                                {
+                                    function = "GetIsID",
+                                    @operator = "==",
+                                    value = 1f,
+                                    parameters = new Dictionary<string, object> { ["Object"] = hadvarFkStr },
+                                },
+                            },
+                        },
+                    },
+                    load_order = new
+                    {
+                        game_release = "SkyrimSE",
+                        listings = new[]
+                        {
+                            new { mod_key = "Skyrim.esm", path = SkyrimEsmForBatch7, enabled = true }
+                        }
+                    }
+                };
+                var r = RunBridge(req);
+                if (!r.ParsedOk) { Console.WriteLine($"        *** FAIL: bridge stdout unparseable"); p2QustFailures++; }
+                else if (r.ReportedSuccess) { Console.WriteLine($"        *** FAIL: bridge reported success=true; expected Q4 reject"); p2QustFailures++; }
+                else if (!r.FirstErr.Contains("uses a single Conditions list") || !r.FirstErr.Contains("omit condition_target"))
+                {
+                    Console.WriteLine($"        *** FAIL: error text doesn't match Q4 reject sentinel");
+                    Console.WriteLine($"            actual: {r.FirstErr}");
+                    p2QustFailures++;
+                }
+                else
+                {
+                    Console.WriteLine($"        PASS  bridge success=false; error matches Q4 reject sentinel (perk={perkFkStr})");
+                    Console.WriteLine($"              error: {r.FirstErr}");
+                }
+                try { if (File.Exists(outPath)) File.Delete(outPath); } catch { }
+            }
+        }
+
+        // ── 8. Case-insensitivity (Q5 lock) — condition_target="Dialog" ──
+        Console.WriteLine("  [8/8] case-insensitivity: condition_target=\"Dialog\" → DialogConditions");
+        {
+            var outPath = Path.Combine(outDirP2q, "p2-case-insensitive.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "race-probe-v291-p2",
+                records = new[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = questFkStr,
+                        source_path = SkyrimEsmForBatch7,
+                        condition_target = "Dialog", // TitleCase, not "dialog"
+                        add_conditions = new object[]
+                        {
+                            new
+                            {
+                                function = "GetIsID",
+                                @operator = "==",
+                                value = 1f,
+                                parameters = new Dictionary<string, object> { ["Object"] = hadvarFkStr },
+                            },
+                        },
+                    },
+                },
+                load_order = new
+                {
+                    game_release = "SkyrimSE",
+                    listings = new[]
+                    {
+                        new { mod_key = "Skyrim.esm", path = SkyrimEsmForBatch7, enabled = true }
+                    }
+                }
+            };
+            var r = RunBridge(req);
+            if (!r.ParsedOk || !r.ReportedSuccess)
+            {
+                Console.WriteLine($"        *** FAIL: bridge success=false (exit={r.ExitCode}, err={r.FirstErr}) — Q5 case-insensitive lock not honored");
+                p2QustFailures++;
+            }
+            else if (!File.Exists(outPath))
+            {
+                Console.WriteLine($"        *** FAIL: output ESP missing");
+                p2QustFailures++;
+            }
+            else
+            {
+                var rb = ReadbackQuest(outPath, questFk);
+                if (rb == null) { Console.WriteLine($"        *** FAIL: override QUST not found"); p2QustFailures++; }
+                else
+                {
+                    bool gotIdInDialog = rb.Value.Dialog.Any(c => c.Data?.GetType().Name == "GetIsIDConditionData");
+                    bool gotIdInEvent = rb.Value.Event.Any(c => c.Data?.GetType().Name == "GetIsIDConditionData");
+                    if (gotIdInDialog && !gotIdInEvent)
+                    {
+                        Console.WriteLine($"        PASS  \"Dialog\" → DialogConditions (case-insensitive Q5 lock)");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"        *** FAIL: GetIsID-in-Dialog={gotIdInDialog}, GetIsID-in-Event={gotIdInEvent}");
+                        p2QustFailures++;
+                    }
+                }
+            }
+            try { if (File.Exists(outPath)) File.Delete(outPath); } catch { }
+        }
+    }
+}
+Console.WriteLine($"=== v2.9.1 P2 quest-condition probes: {(p2QustFailures == 0 ? "ALL PASS" : $"{p2QustFailures} FAILURE(S)")} ===");
+
 Console.WriteLine();
-int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures + p2dFailures + p4InfoFailures + p1MultiCondFailures;
+int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures + p2dFailures + p4InfoFailures + p1MultiCondFailures + p2QustFailures;
 if (totalFailures > 0)
 {
-    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C + {p2dFailures} v2.9 P2D + {p4InfoFailures} v2.9 P4-INFO + {p1MultiCondFailures} v2.9.1 P1 multi-cond sweep) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
+    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C + {p2dFailures} v2.9 P2D + {p4InfoFailures} v2.9 P4-INFO + {p1MultiCondFailures} v2.9.1 P1 multi-cond sweep + {p2QustFailures} v2.9.1 P2 quest-cond) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
     Environment.Exit(1);
 }
 Console.WriteLine("=== probe complete ===");

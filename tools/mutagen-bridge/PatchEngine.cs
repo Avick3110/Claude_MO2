@@ -883,13 +883,13 @@ public class PatchEngine
         // structurally different error path.
         if (op.AddConditions?.Count > 0)
         {
-            var added = ApplyAddConditions(record, op.AddConditions);
+            var added = ApplyAddConditions(record, op.AddConditions, op.ConditionTarget);
             if (added.HasValue) mods["conditions_added"] = added.Value;
         }
 
         if (op.RemoveConditions?.Count > 0)
         {
-            var removed = ApplyRemoveConditions(record, op.RemoveConditions);
+            var removed = ApplyRemoveConditions(record, op.RemoveConditions, op.ConditionTarget);
             if (removed.HasValue) mods["conditions_removed"] = removed.Value;
         }
 
@@ -1561,6 +1561,95 @@ public class PatchEngine
     // ═══════════════════════════════════════════════════════════════
 
     /// <summary>
+    /// v2.9.1 — friendly-name → property-name map for the
+    /// <c>condition_target</c> operator parameter. Phase 1 schema probe
+    /// confirmed Quest is the SOLE multi-condition record type in
+    /// Mutagen.Bethesda.Skyrim 0.53.1 (zero other carriers expose ≥2
+    /// <c>*Conditions</c> properties). Both targeted properties are
+    /// <c>Noggog.ExtendedList&lt;Condition&gt;</c> on the writer side. Keyed
+    /// case-insensitive per Phase 0 lock. See PHASE_1_HANDOFF.md.
+    /// </summary>
+    private static readonly Dictionary<string, string> ConditionTargetMap =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["dialog"] = "DialogConditions",
+            ["event"] = "EventConditions",
+        };
+
+    /// <summary>
+    /// v2.9.1 — resolves which <c>*Conditions</c> property on the record to
+    /// write to / remove from for <c>add_conditions</c> / <c>remove_conditions</c>.
+    /// Defaults to the legacy <c>"Conditions"</c> lookup when
+    /// <c>conditionTarget</c> is null (back-compat preserved for all v2.9.0
+    /// carriers: MGEF / PERK / PACK / IDLE / INFO etc.).
+    ///
+    /// Three new error paths land in v2.9.1 per PLAN § C:
+    /// <list type="number">
+    ///   <item>QUST without <c>condition_target</c> — pre-flight throw with
+    ///   the explicit "available targets" message.</item>
+    ///   <item>Unknown <c>condition_target</c> value — string-enum throw
+    ///   listing the valid set.</item>
+    ///   <item>Single-Conditions carrier with <c>condition_target</c>
+    ///   supplied — Q4 reject throw. Distinguished from the
+    ///   no-condition-list case (e.g. ARMO) by probing for the legacy
+    ///   <c>"Conditions"</c> property: present → Q4 reject; absent →
+    ///   return null so Tier D's uniform <c>unmatched_operators</c> shape
+    ///   fires (matches MATRIX 1.D.04 vs 1.D.05 separation).</item>
+    /// </list>
+    /// </summary>
+    private static PropertyInfo? ResolveConditionListProperty(
+        IMajorRecord record, string? conditionTarget, string operatorName)
+    {
+        // Pre-flight 1: QUST requires condition_target. § C #2.
+        if (record is IQuestGetter && conditionTarget == null)
+        {
+            throw new ArgumentException(
+                $"Record type Quest requires a condition_target parameter on {operatorName}. " +
+                "Available targets: 'dialog' (DialogConditions) | 'event' (EventConditions). " +
+                "Quest records carry two condition lists rather than a single Conditions list — " +
+                "see KNOWN_ISSUES.md § Patching write surface.");
+        }
+
+        if (conditionTarget == null)
+        {
+            // Legacy path — single-Conditions carriers (MGEF / PERK / PACK / IDLE
+            // / INFO etc.). Null return = unsupported carrier (e.g. ARMO) →
+            // Tier D unmatched_operators shape.
+            return record.GetType().GetProperty("Conditions",
+                BindingFlags.Public | BindingFlags.Instance);
+        }
+
+        // Pre-flight 2: bad target value. § C #3.
+        if (!ConditionTargetMap.TryGetValue(conditionTarget, out var propName))
+        {
+            throw new ArgumentException(
+                $"Unknown condition_target: '{conditionTarget}'. " +
+                "Valid values: 'dialog' | 'event'.");
+        }
+
+        var resolved = record.GetType().GetProperty(propName,
+            BindingFlags.Public | BindingFlags.Instance);
+        if (resolved != null) return resolved;
+
+        // Q4 reject path: condition_target supplied but the targeted property
+        // doesn't exist on this record type. Distinguish PERK-style (HAS a
+        // single Conditions list, just not the targeted alias) from ARMO-style
+        // (no condition list at all → Tier D fallthrough).
+        var legacyProp = record.GetType().GetProperty("Conditions",
+            BindingFlags.Public | BindingFlags.Instance);
+        if (legacyProp != null)
+        {
+            throw new ArgumentException(
+                $"Record type {record.GetType().Name} uses a single Conditions list — " +
+                $"omit condition_target. (condition_target='{conditionTarget}' resolved to " +
+                $"{propName}, which this record does not expose.)");
+        }
+
+        // No condition list at all — fall through to Tier D's uniform shape.
+        return null;
+    }
+
+    /// <summary>
     /// v2.8.0 — return type changed from <c>int</c> to <c>int?</c>: null
     /// signals "this record type has no Conditions property", letting the
     /// caller skip writing the <c>conditions_added</c> mods key so Tier D's
@@ -1569,12 +1658,14 @@ public class PatchEngine
     /// every other unsupported (operator, record-type) combo. Pre-v2.8.0
     /// the helper threw <c>"Record type X does not support conditions"</c>
     /// directly, producing a structurally different error response.
+    /// v2.9.1 — adds <c>conditionTarget</c> parameter routing to alternate
+    /// <c>*Conditions</c> properties (e.g. QUST.DialogConditions /
+    /// EventConditions) via <see cref="ResolveConditionListProperty"/>.
     /// </summary>
-    private static int? ApplyAddConditions(IMajorRecord record, List<ConditionEntry> conditions)
+    private static int? ApplyAddConditions(
+        IMajorRecord record, List<ConditionEntry> conditions, string? conditionTarget)
     {
-        // Get the conditions list via reflection (many record types have it).
-        var condProp = record.GetType().GetProperty("Conditions",
-            BindingFlags.Public | BindingFlags.Instance);
+        var condProp = ResolveConditionListProperty(record, conditionTarget, "add_conditions");
         if (condProp == null) return null; // unsupported — let Tier D fire
 
         var condList = condProp.GetValue(record) as ExtendedList<Condition>;
@@ -2258,11 +2349,14 @@ public class PatchEngine
     /// returned 0 (Tier D misread as "supported but empty"); v2.7.1 threw
     /// directly (Tier D bypassed); v2.8.0 returns null (Tier D fires
     /// uniformly across every unsupported combo).
+    /// v2.9.1 — adds <c>conditionTarget</c> parameter routing to alternate
+    /// <c>*Conditions</c> properties (e.g. QUST.DialogConditions /
+    /// EventConditions) via <see cref="ResolveConditionListProperty"/>.
     /// </summary>
-    private static int? ApplyRemoveConditions(IMajorRecord record, List<ConditionRemoval> removals)
+    private static int? ApplyRemoveConditions(
+        IMajorRecord record, List<ConditionRemoval> removals, string? conditionTarget)
     {
-        var condProp = record.GetType().GetProperty("Conditions",
-            BindingFlags.Public | BindingFlags.Instance);
+        var condProp = ResolveConditionListProperty(record, conditionTarget, "remove_conditions");
         if (condProp == null) return null; // unsupported — let Tier D fire
 
         // condList == null is the legitimate "supported but empty" state —

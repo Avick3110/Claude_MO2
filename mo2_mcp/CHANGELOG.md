@@ -19,6 +19,103 @@ Net: ~190 lines cut from docs loaded every session, plus repo-only dev/README.md
 
 ---
 
+## v2.9.1 — TBD
+
+Quest condition disambiguation — fills the v2.7.1+ carry-over gap that left
+QUST records out of `add_conditions`/`remove_conditions` coverage. QUST is the
+sole multi-condition record type in Mutagen.Bethesda.Skyrim 0.53.1 (Phase 1
+schema probe confirmed; the other 15 condition-carrying records are all
+single-`Conditions`). The fix is a single new operator parameter
+(`condition_target`) routing the bridge's reflection lookup to
+`DialogConditions` or `EventConditions` instead of the hardcoded `Conditions`
+slot. v2.9.0's generic Condition-parameter dispatcher composes underneath
+untouched — the per-Condition build pipeline is unchanged; only the carrier
+list lookup changes. All 382 v2.9.0 coverage-smoke cells stay green; the one
+v2.7.1-era cell whose expectation flipped under v2.9.1's contract (`Test 157
+[4.c.01-carry]`: QUST + add_conditions previously asserted Tier D
+`unmatched_operators`; now asserts the new explicit error sentinel) is updated
+in place with a cross-reference to the new canonical Layer 1.D.01 cell.
+
+### Added — bridge
+
+- **Quest condition disambiguation via `condition_target` operator parameter.**
+  QUST records carry `DialogConditions` and `EventConditions` rather than a
+  single `Conditions` list. The new `condition_target` operator parameter on
+  `add_conditions` / `remove_conditions` selects which list to write to /
+  remove from. Valid values: `"dialog"` (→ `DialogConditions`), `"event"`
+  (→ `EventConditions`). Case-insensitive (per `StringComparer.OrdinalIgnoreCase`
+  on the friendly-name lookup table). Required on QUST records; missing
+  `condition_target` on a QUST `add_conditions`/`remove_conditions` call
+  surfaces a clean per-record error: `"Record type Quest requires a
+  condition_target parameter on add_conditions/remove_conditions. Available
+  targets: 'dialog' (DialogConditions) | 'event' (EventConditions). Quest
+  records carry two condition lists rather than a single Conditions list — see
+  KNOWN_ISSUES.md § Patching write surface."` Bad target value (e.g.
+  `condition_target: "story"`) surfaces `"Unknown condition_target: '<value>'.
+  Valid values: 'dialog' | 'event'."`. Records with a single `Conditions`
+  property (MagicEffect / Perk / Package / IdleAnimation / INFO via
+  response-level conditions / 11 other carriers — Phase 1 schema sweep
+  enumerated) reject `condition_target` explicitly with `"Record type {Name}
+  uses a single Conditions list — omit condition_target. (condition_target='X'
+  resolved to {Property}, which this record does not expose.)"`. Records with
+  no condition list at all (e.g. ARMO) fall through to Tier D's uniform
+  `unmatched_operators` error shape — bit-identical to v2.9.0 behavior. The
+  Q4-vs-Tier-D distinction is preserved by a defensive `GetProperty("Conditions")`
+  probe on targeted-lookup miss: present → Q4 explicit reject; absent → null
+  return → Tier D fallthrough.
+  v2.9.1 in-scope record types: QUST only (Phase 1 generality lock — Mutagen
+  0.53.1 schema probe found Quest is the sole multi-condition top-level record
+  type; halt threshold of 5+ additional types trivially satisfied at 0).
+  Nested `*Conditions` surfaces (`IQuestAliasGetter.Conditions` +
+  `IQuestLogEntryGetter.Conditions`) deferred to v2.9.x — different mechanism
+  (`condition_path` for nested-major sub-records, similar to v2.9.0's INFO
+  override parent-topic-resolution + child-DeepCopy pattern).
+  Composes with v2.9.0's generic Condition-parameter dispatcher untouched —
+  the per-Condition build pipeline is unchanged; only the carrier list lookup
+  changes. All 382 v2.9.0 coverage-smoke cells pass unchanged; one v2.7.1-era
+  cell (`Test 157 [4.c.01-carry]`, "QUST + add_conditions") was flipped
+  in-place to assert the new Q3 explicit error sentinel — historical anchor
+  preserved with v2.9.1-correct semantics + cross-reference to Layer 1.D.01
+  (`Test 389`, the canonical v2.9.1 home).
+
+### Changed — schema
+
+- **`add_conditions` / `remove_conditions` operator-level schema** —
+  `condition_target: "dialog" | "event"` parameter added to the operator-level
+  schema. The v2.9.0 caveat about "QUST records use DialogConditions /
+  EventConditions which require a parameter not yet exposed" is removed; the
+  parameter now exists.
+
+### Test infrastructure
+
+- **race-probe** — extended with `=== v2.9.1 P2 — Quest condition
+  disambiguation (bridge subprocess) ===` section (8 probes anchored on QUST
+  `Skyrim.esm:04C49D` FollowerCommentary01): 2 positive add (dialog + event),
+  2 positive remove byfunc (`GetInFaction` / `GetEventData` — disjoint
+  function distribution gives unambiguous round-trip-distinguishability),
+  3 error paths (Q3 explicit / bad-value / Q4 reject), 1 case-insensitivity
+  end-to-end (TitleCase `"Dialog"` → `DialogConditions`). All 8 PASS via
+  bridge subprocess + Mutagen-direct readback.
+- **coverage-smoke** — 18 new cells (Tests 383–400) per `MATRIX.md`
+  § Layer 1.P (6: positive add/remove×{dialog,event} + remove-byfunc×{dialog,event}),
+  § Layer 1.D (5: Q3 add / Q3 remove / bad-value / PERK Q4 reject / ARMO Tier D),
+  § Layer 2 (3: multi-condition single op, opposing-target two-ops, v2.9.1×v2.9.0
+  composition), § Layer 4.dsl (4: empty string / JSON null / case-insensitive /
+  orthogonal-with-add_keywords). Total: 400 cells (382 v2.9.0 + 18 v2.9.1),
+  ALL PASS.
+
+### Documentation
+
+- **`tools_patching.py` schema descriptions** updated — `condition_target`
+  parameter documented; v2.9.0 "not yet exposed" QUST caveat removed.
+- **`KNOWN_ISSUES.md`** — Quest condition disambiguation moved from gap-list
+  to new "Covered as of v2.9.1" subsection. New gap entry added for
+  multi-condition record types beyond QUST top-level (nested-conditions
+  surfaces on `IQuestAliasGetter` + `IQuestLogEntryGetter`, deferred to
+  v2.9.x).
+
+---
+
 ## v2.9.0 — 2026-04-27
 
 Generic Condition-function parameter dispatch — a reusable infrastructure that

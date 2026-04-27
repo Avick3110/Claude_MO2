@@ -428,6 +428,21 @@ public class RecordOperation
     [JsonPropertyName("remove_conditions")]
     public List<ConditionRemoval>? RemoveConditions { get; set; }
 
+    /// <summary>
+    /// v2.9.1 — selects which condition list on a multi-condition-list carrier
+    /// to write to / remove from. Required on QUST records (which expose
+    /// <c>DialogConditions</c> and <c>EventConditions</c> rather than a single
+    /// <c>Conditions</c> list); rejected on records exposing a single
+    /// <c>Conditions</c> property (PERK / PACK / IDLE / MGEF / INFO via
+    /// response-level conditions). Records with no condition list at all
+    /// fall through to Tier D's uniform <c>unmatched_operators</c> shape.
+    /// Valid values: "dialog" (→ DialogConditions), "event" (→ EventConditions).
+    /// Case-insensitive per Phase 0 lock. See KNOWN_ISSUES.md § Patching write
+    /// surface.
+    /// </summary>
+    [JsonPropertyName("condition_target")]
+    public string? ConditionTarget { get; set; }
+
     // ── VMAD script attachment ──
 
     [JsonPropertyName("attach_scripts")]

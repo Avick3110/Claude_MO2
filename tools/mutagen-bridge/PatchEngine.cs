@@ -174,7 +174,7 @@ public class PatchEngine
             throw new KeyNotFoundException(
                 $"Record {op.FormId} not found in {Path.GetFileName(op.SourcePath)}");
 
-        var overrideRecord = CopyAsOverride(patchMod, sourceRecord);
+        var overrideRecord = CopyAsOverride(patchMod, sourceMod, sourceRecord);
         if (overrideRecord == null)
             throw new InvalidOperationException(
                 $"Could not create override for {RecordTypeCode(sourceRecord)}");
@@ -2511,69 +2511,130 @@ public class PatchEngine
     };
 
     private static IMajorRecord? CopyAsOverride(
-        SkyrimMod patchMod, IMajorRecordGetter sourceRecord) => sourceRecord switch
+        SkyrimMod patchMod, ISkyrimModGetter sourceMod, IMajorRecordGetter sourceRecord)
     {
-        // Items & equipment
-        IArmorGetter r => patchMod.Armors.GetOrAddAsOverride(r),
-        IWeaponGetter r => patchMod.Weapons.GetOrAddAsOverride(r),
-        IAmmunitionGetter r => patchMod.Ammunitions.GetOrAddAsOverride(r),
-        IBookGetter r => patchMod.Books.GetOrAddAsOverride(r),
-        IIngredientGetter r => patchMod.Ingredients.GetOrAddAsOverride(r),
-        IIngestibleGetter r => patchMod.Ingestibles.GetOrAddAsOverride(r),
-        IMiscItemGetter r => patchMod.MiscItems.GetOrAddAsOverride(r),
-        IScrollGetter r => patchMod.Scrolls.GetOrAddAsOverride(r),
-        IKeyGetter r => patchMod.Keys.GetOrAddAsOverride(r),
-        ISoulGemGetter r => patchMod.SoulGems.GetOrAddAsOverride(r),
-        // Actors & AI
-        INpcGetter r => patchMod.Npcs.GetOrAddAsOverride(r),
-        IFactionGetter r => patchMod.Factions.GetOrAddAsOverride(r),
-        IPackageGetter r => patchMod.Packages.GetOrAddAsOverride(r),
-        IOutfitGetter r => patchMod.Outfits.GetOrAddAsOverride(r),
-        ICombatStyleGetter r => patchMod.CombatStyles.GetOrAddAsOverride(r),
-        IClassGetter r => patchMod.Classes.GetOrAddAsOverride(r),
-        IRaceGetter r => patchMod.Races.GetOrAddAsOverride(r),
-        // Leveled lists
-        ILeveledItemGetter r => patchMod.LeveledItems.GetOrAddAsOverride(r),
-        ILeveledNpcGetter r => patchMod.LeveledNpcs.GetOrAddAsOverride(r),
-        ILeveledSpellGetter r => patchMod.LeveledSpells.GetOrAddAsOverride(r),
-        // Magic
-        ISpellGetter r => patchMod.Spells.GetOrAddAsOverride(r),
-        IPerkGetter r => patchMod.Perks.GetOrAddAsOverride(r),
-        IMagicEffectGetter r => patchMod.MagicEffects.GetOrAddAsOverride(r),
-        IShoutGetter r => patchMod.Shouts.GetOrAddAsOverride(r),
-        IWordOfPowerGetter r => patchMod.WordsOfPower.GetOrAddAsOverride(r),
-        IObjectEffectGetter r => patchMod.ObjectEffects.GetOrAddAsOverride(r),
-        // World & cells
-        IActivatorGetter r => patchMod.Activators.GetOrAddAsOverride(r),
-        IContainerGetter r => patchMod.Containers.GetOrAddAsOverride(r),
-        IDoorGetter r => patchMod.Doors.GetOrAddAsOverride(r),
-        IFloraGetter r => patchMod.Florae.GetOrAddAsOverride(r),
-        IFurnitureGetter r => patchMod.Furniture.GetOrAddAsOverride(r),
-        ILightGetter r => patchMod.Lights.GetOrAddAsOverride(r),
-        ITreeGetter r => patchMod.Trees.GetOrAddAsOverride(r),
-        // Quests & dialogue
-        IQuestGetter r => patchMod.Quests.GetOrAddAsOverride(r),
-        IDialogTopicGetter r => patchMod.DialogTopics.GetOrAddAsOverride(r),
-        // Data records
-        IKeywordGetter r => patchMod.Keywords.GetOrAddAsOverride(r),
-        IGlobalGetter r => patchMod.Globals.GetOrAddAsOverride(r),
-        IFormListGetter r => patchMod.FormLists.GetOrAddAsOverride(r),
-        IEncounterZoneGetter r => patchMod.EncounterZones.GetOrAddAsOverride(r),
-        ILocationGetter r => patchMod.Locations.GetOrAddAsOverride(r),
-        IConstructibleObjectGetter r => patchMod.ConstructibleObjects.GetOrAddAsOverride(r),
-        // Hazards, explosions, projectiles
-        IExplosionGetter r => patchMod.Explosions.GetOrAddAsOverride(r),
-        IHazardGetter r => patchMod.Hazards.GetOrAddAsOverride(r),
-        IProjectileGetter r => patchMod.Projectiles.GetOrAddAsOverride(r),
-        // Misc
-        IRelationshipGetter r => patchMod.Relationships.GetOrAddAsOverride(r),
-        IMessageGetter r => patchMod.Messages.GetOrAddAsOverride(r),
-        IWeatherGetter r => patchMod.Weathers.GetOrAddAsOverride(r),
-        IImageSpaceGetter r => patchMod.ImageSpaces.GetOrAddAsOverride(r),
-        IImageSpaceAdapterGetter r => patchMod.ImageSpaceAdapters.GetOrAddAsOverride(r),
-        IMusicTypeGetter r => patchMod.MusicTypes.GetOrAddAsOverride(r),
-        _ => null,
-    };
+        // INFO records can't go through the standard 1:1 group->GetOrAddAsOverride
+        // pattern: Mutagen 0.53.1 doesn't surface DialogResponses as a top-level
+        // group, only as a child list under DialogTopic.Responses. Override path
+        // requires resolving the parent topic from sourceMod (linear scan;
+        // IDialogResponsesGetter exposes no direct parent getter, only an
+        // ambiguous Topic FormLink), overriding the parent topic, then locating
+        // the matching response by FormKey inside the override topic's Responses.
+        // See dev/plans/v2.9.X_condition_parameters/PHASE_4_INFO_HANDOFF.md.
+        if (sourceRecord is IDialogResponsesGetter response)
+            return CopyDialogResponseAsOverride(patchMod, sourceMod, response);
+
+        return sourceRecord switch
+        {
+            // Items & equipment
+            IArmorGetter r => patchMod.Armors.GetOrAddAsOverride(r),
+            IWeaponGetter r => patchMod.Weapons.GetOrAddAsOverride(r),
+            IAmmunitionGetter r => patchMod.Ammunitions.GetOrAddAsOverride(r),
+            IBookGetter r => patchMod.Books.GetOrAddAsOverride(r),
+            IIngredientGetter r => patchMod.Ingredients.GetOrAddAsOverride(r),
+            IIngestibleGetter r => patchMod.Ingestibles.GetOrAddAsOverride(r),
+            IMiscItemGetter r => patchMod.MiscItems.GetOrAddAsOverride(r),
+            IScrollGetter r => patchMod.Scrolls.GetOrAddAsOverride(r),
+            IKeyGetter r => patchMod.Keys.GetOrAddAsOverride(r),
+            ISoulGemGetter r => patchMod.SoulGems.GetOrAddAsOverride(r),
+            // Actors & AI
+            INpcGetter r => patchMod.Npcs.GetOrAddAsOverride(r),
+            IFactionGetter r => patchMod.Factions.GetOrAddAsOverride(r),
+            IPackageGetter r => patchMod.Packages.GetOrAddAsOverride(r),
+            IOutfitGetter r => patchMod.Outfits.GetOrAddAsOverride(r),
+            ICombatStyleGetter r => patchMod.CombatStyles.GetOrAddAsOverride(r),
+            IClassGetter r => patchMod.Classes.GetOrAddAsOverride(r),
+            IRaceGetter r => patchMod.Races.GetOrAddAsOverride(r),
+            // Leveled lists
+            ILeveledItemGetter r => patchMod.LeveledItems.GetOrAddAsOverride(r),
+            ILeveledNpcGetter r => patchMod.LeveledNpcs.GetOrAddAsOverride(r),
+            ILeveledSpellGetter r => patchMod.LeveledSpells.GetOrAddAsOverride(r),
+            // Magic
+            ISpellGetter r => patchMod.Spells.GetOrAddAsOverride(r),
+            IPerkGetter r => patchMod.Perks.GetOrAddAsOverride(r),
+            IMagicEffectGetter r => patchMod.MagicEffects.GetOrAddAsOverride(r),
+            IShoutGetter r => patchMod.Shouts.GetOrAddAsOverride(r),
+            IWordOfPowerGetter r => patchMod.WordsOfPower.GetOrAddAsOverride(r),
+            IObjectEffectGetter r => patchMod.ObjectEffects.GetOrAddAsOverride(r),
+            // World & cells
+            IActivatorGetter r => patchMod.Activators.GetOrAddAsOverride(r),
+            IContainerGetter r => patchMod.Containers.GetOrAddAsOverride(r),
+            IDoorGetter r => patchMod.Doors.GetOrAddAsOverride(r),
+            IFloraGetter r => patchMod.Florae.GetOrAddAsOverride(r),
+            IFurnitureGetter r => patchMod.Furniture.GetOrAddAsOverride(r),
+            ILightGetter r => patchMod.Lights.GetOrAddAsOverride(r),
+            ITreeGetter r => patchMod.Trees.GetOrAddAsOverride(r),
+            // Quests & dialogue
+            IQuestGetter r => patchMod.Quests.GetOrAddAsOverride(r),
+            IDialogTopicGetter r => patchMod.DialogTopics.GetOrAddAsOverride(r),
+            // Data records
+            IKeywordGetter r => patchMod.Keywords.GetOrAddAsOverride(r),
+            IGlobalGetter r => patchMod.Globals.GetOrAddAsOverride(r),
+            IFormListGetter r => patchMod.FormLists.GetOrAddAsOverride(r),
+            IEncounterZoneGetter r => patchMod.EncounterZones.GetOrAddAsOverride(r),
+            ILocationGetter r => patchMod.Locations.GetOrAddAsOverride(r),
+            IConstructibleObjectGetter r => patchMod.ConstructibleObjects.GetOrAddAsOverride(r),
+            // Hazards, explosions, projectiles
+            IExplosionGetter r => patchMod.Explosions.GetOrAddAsOverride(r),
+            IHazardGetter r => patchMod.Hazards.GetOrAddAsOverride(r),
+            IProjectileGetter r => patchMod.Projectiles.GetOrAddAsOverride(r),
+            // Misc
+            IRelationshipGetter r => patchMod.Relationships.GetOrAddAsOverride(r),
+            IMessageGetter r => patchMod.Messages.GetOrAddAsOverride(r),
+            IWeatherGetter r => patchMod.Weathers.GetOrAddAsOverride(r),
+            IImageSpaceGetter r => patchMod.ImageSpaces.GetOrAddAsOverride(r),
+            IImageSpaceAdapterGetter r => patchMod.ImageSpaceAdapters.GetOrAddAsOverride(r),
+            IMusicTypeGetter r => patchMod.MusicTypes.GetOrAddAsOverride(r),
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// INFO override path. Resolves the parent DialogTopic from the source mod
+    /// (linear scan), overrides the parent topic, then deep-copies the source
+    /// INFO into the override topic's Responses list. Mutagen's
+    /// DialogTopic.GetOrAddAsOverride does NOT auto-carry the topic's nested
+    /// Responses list — INFO records are independent major records nested under
+    /// the topic GRUP only for organization, so the bridge has to explicitly
+    /// clone the targeted INFO via DialogResponsesMixIn.DeepCopy. Idempotent on
+    /// repeat overrides of the same INFO within one patch session: returns the
+    /// existing override response if one is already present.
+    /// Failure modes documented at PHASE_4_INFO_HANDOFF.md § Failure modes.
+    /// </summary>
+    private static IMajorRecord? CopyDialogResponseAsOverride(
+        SkyrimMod patchMod, ISkyrimModGetter sourceMod, IDialogResponsesGetter sourceResponse)
+    {
+        var responseFk = sourceResponse.FormKey;
+
+        // Approach A: linear scan source mod's DialogTopics for the parent topic
+        // whose Responses list contains the target INFO. IDialogResponsesGetter
+        // exposes no direct parent-topic getter; the .Topic IFormLinkNullable
+        // field has ambiguous semantics vs WalkAwayTopic / LinkTo, so we resolve
+        // the parent structurally via the GRUP-nesting that the source plugin
+        // already encodes.
+        var parentTopic = sourceMod.DialogTopics
+            .FirstOrDefault(t => t.Responses.Any(r => r.FormKey == responseFk));
+        if (parentTopic == null)
+            throw new InvalidOperationException(
+                $"INFO {responseFk} has no parent DialogTopic in {sourceMod.ModKey} — record may be orphaned.");
+
+        var parentOverride = patchMod.DialogTopics.GetOrAddAsOverride(parentTopic);
+
+        // Idempotency: if a prior override of this INFO already lives in the
+        // patch topic's Responses list (e.g. caller invoked add_conditions on
+        // the same INFO twice in one patch session), return it instead of
+        // appending a second copy.
+        var existing = parentOverride.Responses.FirstOrDefault(r => r.FormKey == responseFk);
+        if (existing != null)
+            return existing;
+
+        // Deep-copy the source INFO (FormKey preserved) and append to the
+        // override topic. The bridge then mutates the override response through
+        // the standard ApplyModifications path.
+        var responseOverride = sourceResponse.DeepCopy();
+        parentOverride.Responses.Add(responseOverride);
+        return responseOverride;
+    }
 
     /// <summary>
     /// Remove a previously-copied override from the patch mod. Mirrors
@@ -2631,6 +2692,26 @@ public class PatchEngine
                 // Quests & dialogue
                 case IQuestGetter: patchMod.Quests.Remove(fk); break;
                 case IDialogTopicGetter: patchMod.DialogTopics.Remove(fk); break;
+                case IDialogResponsesGetter:
+                    // Option α — response-only rollback. INFO records live nested
+                    // inside DialogTopic.Responses, so we scan patchMod.DialogTopics
+                    // for the override topic that holds this response and remove
+                    // just the response. Leave the parent topic override in place
+                    // even if it now carries no real changes — the outer
+                    // ApplyModifications exception is what surfaces to the caller,
+                    // and a no-op-shaped parent override is strictly less misleading
+                    // than silently swallowing the failure (consistent with this
+                    // method's overall posture for unknown record types).
+                    foreach (var topicOverride in patchMod.DialogTopics)
+                    {
+                        var match = topicOverride.Responses.FirstOrDefault(r => r.FormKey == fk);
+                        if (match != null)
+                        {
+                            topicOverride.Responses.Remove(match);
+                            break;
+                        }
+                    }
+                    break;
                 // Data records
                 case IKeywordGetter: patchMod.Keywords.Remove(fk); break;
                 case IGlobalGetter: patchMod.Globals.Remove(fk); break;

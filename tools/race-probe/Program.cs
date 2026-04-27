@@ -2185,111 +2185,237 @@ int p2dFailures = 0;
 }
 Console.WriteLine($"=== v2.9 P2D probes: {(p2dFailures == 0 ? "ALL PASS" : $"{p2dFailures} FAILURE(S)")} ===");
 
-// ─── v2.9 P4 — INFO override architectural archaeology (deferred) ───
-// Phase 3 surfaced `info_override_missing_in_copyasoverride`: Scenario 3.1
-// (dialog GetIsID on INFO) BLOCKED at patch creation because
-// PatchEngine.CopyAsOverride's switch lacks an IDialogResponsesGetter branch
-// — INFO source records fall through to `_ => null`, and the caller throws
-// "Could not create override for DialogResponsesBinaryOverlay" at PatchEngine.cs:180.
-// Phase 3's bug entry proposed `IDialogResponsesGetter r => patchMod.DialogResponses.GetOrAddAsOverride(r)`
-// as the fix, on the assumption that SkyrimMod exposes a top-level
-// DialogResponses group parallel to DialogTopics, Quests, Spells, etc.
+// ─── v2.9 P4-INFO — INFO override regression (Mutagen-direct via bridge subprocess) ───
 //
-// Phase 4's pre-flight reflection check (this section) refuted that assumption:
-// SkyrimMod has no DialogResponses property in Mutagen 0.53.1. INFO records
-// are nested under DialogTopic.Responses in Bethesda's plugin format, and
-// Mutagen 0.53.1 does not surface them as an independently-overridable group.
-// Real INFO override requires parent-DialogTopic-level GetOrAddAsOverride
-// + child-response mutation — a multi-hour architectural change with new
-// failure modes (parent topic resolution, rollback granularity, etc.).
+// Replaces Phase 4's deferred-state architectural archaeology block. Phase 4-INFO
+// landed the bridge fix: parent-topic resolution (linear scan via sourceMod.DialogTopics)
+// + child-response find-by-FormKey path through CopyAsOverride (signature now
+// threads sourceMod) + symmetric INFO removal in TryRemoveOverride.
 //
-// Decision (Aaron, Phase 4 mid-session, 2026-04-27): defer INFO override
-// implementation to a Phase 4-INFO sub-session. Phase 4 (this session) lands
-// only the line-180 error-message DX bonus-catch (Item 2). This probe section
-// stays as architectural archaeology to bootstrap the Phase 4-INFO sub-session
-// — no production code change, no failure count contribution.
+// Reflection at sub-session start refuted "Approach C — direct parent-topic getter
+// on IDialogResponsesGetter" (no .ParentTopic property; the .Topic IFormLinkNullable
+// field exists but its semantics for "true parent topic of this response" are
+// undocumented and ambiguous vs WalkAwayTopic / LinkTo). Approach A (linear scan)
+// chosen as deterministic primary path — single override per call, no caching needed.
 //
-// (a) Pre-flight reflection on SkyrimMod's INFO surface — confirms the
-//     architectural finding + dumps alternative override surfaces (DialogTopic
-//     responses list, *MixIn helpers) for the sub-session to evaluate.
-// (b) Skipped — bridge-direct repro requires (a) to find a viable override API.
-//     The current-state behavior (CopyAsOverride returns null for IDialogResponsesGetter)
-//     is documented in Phase 3 handoff § Bugs surfaced; no need to re-verify here.
-Section("v2.9 P4 — INFO override architectural archaeology (deferred)");
+// Probe shape: bridge subprocess → patch INFO Skyrim.esm:000E3D (MQ101 Helgen-escape
+// dialog, Phase 3 Scenario 3.1 carrier) with one `add_conditions` entry: GetIsID +
+// parameters: {Object: Skyrim.esm:02BF9F (Hadvar)}. Asserts: bridge success=true,
+// output ESP exists, override INFO carries the new condition, the GetIsID Object
+// slot resolves to Hadvar's FormKey (NOT default 0). Mirrors Scenario 3.1's exact
+// shape — Phase 5 re-runs Scenario 3.1 against the live install + this probe + the
+// 1.P.GetIsID.INFO coverage-smoke cell as a triple-anchor regression.
+//
+// FAIL→PASS pattern: pre-fix (Phase 4 archaeology baseline; CopyAsOverride switch
+// lacks the IDialogResponsesGetter branch) → bridge returns success=false with
+// "Could not create override for INFO" per-record error → probe records FAIL.
+// Post-fix (this section, after Items 1b/1c land) → success=true + override INFO
+// carries the new condition + slot resolved → probe records PASS.
+Section("v2.9 P4-INFO — INFO override regression (bridge subprocess)");
 
-int p4Failures = 0;
+int p4InfoFailures = 0;
 {
-    // (a) Reflection: SkyrimMod.DialogResponses property exists?
-    var dlgRespProp = typeof(SkyrimMod).GetProperty("DialogResponses",
-        BindingFlags.Public | BindingFlags.Instance);
-    if (dlgRespProp == null)
+    var thisDir = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location)!;
+    var bridgeExeP4i = Path.GetFullPath(Path.Combine(thisDir,
+        "..", "..", "..", "..", "mutagen-bridge", "bin", "Release", "net8.0", "mutagen-bridge.exe"));
+    if (!File.Exists(bridgeExeP4i))
     {
-        Console.WriteLine("  ARCHAEOLOGY (a): typeof(SkyrimMod).GetProperty(\"DialogResponses\") returned null.");
-        Console.WriteLine("    Confirms Phase 3's recommended fix shape `patchMod.DialogResponses.GetOrAddAsOverride(r)` is not viable.");
-        Console.WriteLine("    INFO records nested under DialogTopic.Responses (Bethesda format) — Mutagen 0.53.1 doesn't surface them as a top-level group.");
-        Console.WriteLine();
-        Console.WriteLine("  ALTERNATIVE OVERRIDE SURFACES (for Phase 4-INFO sub-session):");
-        Console.WriteLine("    SkyrimMod properties matching Dialog/Info/Response:");
-        foreach (var p in typeof(SkyrimMod).GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Where(p => p.Name.Contains("Dialog") || p.Name.Contains("Info") || p.Name.Contains("Response")))
-            Console.WriteLine($"      SkyrimMod.{p.Name}: {FriendlyType(p.PropertyType)}");
-
-        Console.WriteLine("    DialogTopic.Responses property type:");
-        var respProp = typeof(DialogTopic).GetProperty("Responses", BindingFlags.Public | BindingFlags.Instance);
-        if (respProp != null)
-        {
-            Console.WriteLine($"      DialogTopic.Responses: {FriendlyType(respProp.PropertyType)}");
-            foreach (var m in respProp.PropertyType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
-                .Where(m => m.Name.Contains("Override") || m.Name == "Add" || m.Name == "Insert" ||
-                            m.Name == "GetOrAdd" || m.Name == "Set"))
-            {
-                var ps = string.Join(", ", m.GetParameters().Select(x => FriendlyType(x.ParameterType)));
-                Console.WriteLine($"        .{m.Name}({ps}) -> {FriendlyType(m.ReturnType)}");
-            }
-        }
-
-        Console.WriteLine("    Static MixIn methods accepting IDialogResponsesGetter / DialogResponses (Duplicate / DeepCopy candidates for sub-session):");
-        var asm = typeof(SkyrimMod).Assembly;
-        foreach (var t in asm.GetTypes().Where(t => t.IsSealed && t.IsAbstract))
-        {
-            foreach (var m in t.GetMethods(BindingFlags.Public | BindingFlags.Static)
-                .Where(m => (m.Name == "Duplicate" || m.Name == "DeepCopy") &&
-                            m.GetParameters().Any(p =>
-                                p.ParameterType.Name == "IDialogResponsesGetter" ||
-                                p.ParameterType.Name == "DialogResponses")))
-            {
-                var ps = string.Join(", ", m.GetParameters().Select(x => FriendlyType(x.ParameterType)));
-                Console.WriteLine($"      {t.Name}.{m.Name}({ps}) -> {FriendlyType(m.ReturnType)}");
-            }
-        }
-
-        Console.WriteLine();
-        Console.WriteLine("  Likely sub-session implementation shape: scan source mod's DialogTopics for the");
-        Console.WriteLine("  parent topic of the target INFO FormKey → patchMod.DialogTopics.GetOrAddAsOverride(parent)");
-        Console.WriteLine("  → locate the matching DialogResponses by FormKey inside override topic.Responses → return it.");
-        Console.WriteLine("  Requires CopyAsOverride to thread the source-mod context (signature change).");
-        Console.WriteLine();
-        Console.WriteLine("  STATUS: DEFERRED to Phase 4-INFO sub-session (Aaron call, 2026-04-27, mid-Phase-4).");
-        Console.WriteLine("    Phase 4 (this session) lands only the line-180 error-message DX bonus-catch.");
-        Console.WriteLine("    No failure recorded — current-state INFO override gap is documented in Phase 3 handoff § Bugs surfaced.");
+        Console.WriteLine($"  SKIP: mutagen-bridge.exe not found at {bridgeExeP4i}");
+    }
+    else if (!File.Exists(SkyrimEsmForBatch7))
+    {
+        Console.WriteLine($"  SKIP: Skyrim.esm not found at {SkyrimEsmForBatch7}");
     }
     else
     {
-        // Defensive: if a future Mutagen version adds SkyrimMod.DialogResponses, the
-        // archaeology is no longer needed and the sub-session premise inverts. Print so
-        // the next probe run signals the change clearly.
-        Console.WriteLine($"  ARCHAEOLOGY (a) UNEXPECTED: SkyrimMod.DialogResponses now exists — Mutagen surface evolved.");
-        Console.WriteLine($"    declared type={FriendlyType(dlgRespProp.PropertyType)}");
-        Console.WriteLine("    Phase 4-INFO sub-session premise inverts: revisit fix shape vs the original Phase 3 proposal.");
+        var infoFkStr = "Skyrim.esm:000E3D";
+        var hadvarFkStr = "Skyrim.esm:02BF9F";
+        var infoFk = new FormKey(ModKey.FromNameAndExtension("Skyrim.esm"), 0x000E3D);
+        var hadvarFk = new FormKey(ModKey.FromNameAndExtension("Skyrim.esm"), 0x02BF9F);
+
+        Console.WriteLine($"  bridge:  {bridgeExeP4i}");
+        Console.WriteLine($"  source:  {SkyrimEsmForBatch7}");
+        Console.WriteLine($"  carrier: INFO {infoFkStr} (MQ101 Helgen dialog, Scenario 3.1 record)");
+        Console.WriteLine($"  append:  GetIsID Object={hadvarFkStr} (Hadvar — distinct from source GetIsID slots)");
+
+        var outDir = Path.Combine(Path.GetTempPath(), "race-probe-p4-info");
+        Directory.CreateDirectory(outDir);
+        var outPath = Path.Combine(outDir, "p4-info-regression.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "race-probe-p4-info",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = infoFkStr,
+                    source_path = SkyrimEsmForBatch7,
+                    add_conditions = new object[]
+                    {
+                        new
+                        {
+                            function = "GetIsID",
+                            @operator = "==",
+                            value = 1f,
+                            parameters = new Dictionary<string, object>
+                            {
+                                ["Object"] = hadvarFkStr,
+                            },
+                        },
+                    },
+                },
+            },
+            load_order = new
+            {
+                game_release = "SkyrimSE",
+                listings = new[]
+                {
+                    new { mod_key = "Skyrim.esm", path = SkyrimEsmForBatch7, enabled = true }
+                }
+            }
+        };
+
+        var psi = new System.Diagnostics.ProcessStartInfo(bridgeExeP4i)
+        {
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        var proc = System.Diagnostics.Process.Start(psi)!;
+        proc.StandardInput.Write(System.Text.Json.JsonSerializer.Serialize(req));
+        proc.StandardInput.Close();
+        var stdout = proc.StandardOutput.ReadToEnd();
+        var stderr = proc.StandardError.ReadToEnd();
+        proc.WaitForExit();
+        Console.WriteLine($"  bridge exit: {proc.ExitCode}");
+
+        // Bridge convention: when ALL records fail, the process exits non-zero
+        // with valid JSON on stdout reporting success=false. So parse JSON first
+        // regardless of exit code — the JSON's success field is the primary
+        // pass/fail signal; exit code is a secondary cross-check.
+        bool ok = true;
+        bool jsonParsed = false;
+        bool reportedSuccess = false;
+        int failedCount = -1;
+        string firstErrorText = "<none>";
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            jsonParsed = true;
+            reportedSuccess = root.TryGetProperty("success", out var sv) && sv.GetBoolean();
+            if (root.TryGetProperty("failed_count", out var fc)) failedCount = fc.GetInt32();
+            if (root.TryGetProperty("details", out var dets) &&
+                dets.ValueKind == System.Text.Json.JsonValueKind.Array && dets.GetArrayLength() > 0)
+            {
+                var d0 = dets[0];
+                if (d0.TryGetProperty("error", out var e)) firstErrorText = e.GetString() ?? "<null>";
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  *** FAIL: bridge stdout unparseable as JSON: {ex.Message}");
+            Console.WriteLine($"      stdout (first 800 chars): {stdout.Substring(0, Math.Min(800, stdout.Length))}");
+            if (!string.IsNullOrEmpty(stderr)) Console.WriteLine($"      stderr: {stderr.Trim()}");
+            p4InfoFailures++;
+            ok = false;
+        }
+
+        if (ok && !jsonParsed)
+        {
+            // Defensive — should never hit (parse-failure already handled above)
+            ok = false;
+        }
+        else if (ok && !reportedSuccess)
+        {
+            Console.WriteLine($"  *** FAIL: bridge reports success=false (failed_count={failedCount}, process exit={proc.ExitCode})");
+            Console.WriteLine($"      first error: {firstErrorText}");
+            Console.WriteLine($"      Pre-fix repro: this is the expected trace before CopyAsOverride's");
+            Console.WriteLine($"      IDialogResponsesGetter branch lands. Post-fix, success should be true.");
+            p4InfoFailures++;
+            ok = false;
+        }
+        else if (ok && !File.Exists(outPath))
+        {
+            Console.WriteLine($"  *** FAIL: bridge reported success but output ESP missing at {outPath}");
+            p4InfoFailures++;
+            ok = false;
+        }
+
+        if (ok)
+        {
+            try
+            {
+                var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+                var info = outMod.EnumerateMajorRecords<IDialogResponsesGetter>()
+                    .FirstOrDefault(r => r.FormKey == infoFk);
+                if (info == null)
+                {
+                    Console.WriteLine($"  *** FAIL: override INFO {infoFkStr} not found in output ESP");
+                    Console.WriteLine($"      (EnumerateMajorRecords<IDialogResponsesGetter> yielded nothing matching {infoFk})");
+                    p4InfoFailures++;
+                }
+                else
+                {
+                    Console.WriteLine($"  override INFO {infoFkStr} present in output ESP (Conditions.Count={info.Conditions.Count})");
+
+                    // Find the appended GetIsID condition by Object.FormKey == Hadvar.
+                    // Using the FormKey rather than ordinal position guards against any
+                    // re-ordering across the GetOrAddAsOverride deep-copy. Reflection
+                    // walk Object → .Link → .FormKey mirrors coverage-smoke's pattern
+                    // at coverage-smoke/Program.cs:5293.
+                    static FormKey? ReadObjectFormKey(object condData)
+                    {
+                        var obj = condData.GetType().GetProperty("Object")?.GetValue(condData);
+                        if (obj == null) return null;
+                        var link = obj.GetType().GetProperty("Link")?.GetValue(obj);
+                        if (link == null) return null;
+                        var fk = link.GetType().GetProperty("FormKey")?.GetValue(link);
+                        return fk as FormKey?;
+                    }
+                    var match = info.Conditions
+                        .Where(c => c.Data?.GetType().Name == "GetIsIDConditionData")
+                        .Select(c => (Cond: c, FormKey: ReadObjectFormKey(c.Data!)))
+                        .FirstOrDefault(t => t.FormKey == hadvarFk);
+                    if (match.Cond == null)
+                    {
+                        var getIsIdCount = info.Conditions.Count(c => c.Data?.GetType().Name == "GetIsIDConditionData");
+                        Console.WriteLine($"  *** FAIL: no GetIsIDConditionData with Object={hadvarFkStr} in override INFO");
+                        Console.WriteLine($"      ({getIsIdCount} GetIsIDConditionData entries present, none match Hadvar)");
+                        p4InfoFailures++;
+                    }
+                    else
+                    {
+                        Console.WriteLine($"  PASS  INFO override + GetIsID(Object={hadvarFkStr}) round-trip ✓");
+                        Console.WriteLine($"        slot resolved to {match.FormKey} (NOT FormID 0 default)");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  *** FAIL: readback threw: {ex.GetType().Name} — {ex.Message}");
+                p4InfoFailures++;
+            }
+        }
+
+        try { if (File.Exists(outPath)) File.Delete(outPath); } catch { /* best-effort cleanup */ }
     }
 }
-Console.WriteLine($"=== v2.9 P4 probes: DEFERRED — INFO override deferred to Phase 4-INFO sub-session; Item 2 (line-180 DX) lands this session ===");
+Console.WriteLine($"=== v2.9 P4-INFO probes: {(p4InfoFailures == 0 ? "ALL PASS" : $"{p4InfoFailures} FAILURE(S)")} ===");
 
 Console.WriteLine();
-int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures + p2dFailures + p4Failures;
+int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures + p2dFailures + p4InfoFailures;
 if (totalFailures > 0)
 {
-    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C + {p2dFailures} v2.9 P2D + {p4Failures} v2.9 P4) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
+    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C + {p2dFailures} v2.9 P2D + {p4InfoFailures} v2.9 P4-INFO) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
     Environment.Exit(1);
 }
 Console.WriteLine("=== probe complete ===");

@@ -7497,6 +7497,110 @@ else Skip("4.c.01-carry", "no QUST");
     }
 }
 
+// ─── Test 382 [1.P.GetIsID.INFO] — INFO override regression cell (Phase 4-INFO) ───
+// Scenario 3.1's exact shape (vanilla MQ101 INFO + GetIsID via parameters.Object).
+// Phase 3 BLOCKED Scenario 3.1 at the override-creation layer because
+// CopyAsOverride's switch lacked an IDialogResponsesGetter branch; Phase 4-INFO
+// landed parent-topic resolution + child-response DeepCopy + symmetric removal.
+// This cell + race-probe v2.9 P4-INFO + Phase 5 Scenario 3.1 live re-run form
+// a triple-anchor regression — local + bridge-subprocess + live install.
+{
+    Console.WriteLine($"── Test 382 [1.P.GetIsID.INFO]: INFO override + GetIsID via parameters.Object (v2.9 P4-INFO regression) ──");
+    var infoFk = new FormKey(ModKey.FromNameAndExtension("Skyrim.esm"), 0x000E3D);
+    var infoSourceResp = source.EnumerateMajorRecords<IDialogResponsesGetter>()
+        .FirstOrDefault(r => r.FormKey == infoFk);
+    if (infoSourceResp == null)
+    {
+        Skip("1.P.GetIsID.INFO", "INFO Skyrim.esm:000E3D (MQ101 dialog) not found in vanilla Skyrim.esm");
+    }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test382-1pGetIsIDINFO.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        // Hadvar (Skyrim.esm:02BF9F) — distinct from MQ101 INFO 000E3D's source
+        // GetIsID slots (which target Player + Ulfric per Phase 3 record selection).
+        // Same target as race-probe v2.9 P4-INFO probe — the appended condition is
+        // uniquely identifiable in the readback by its Object.FormKey.
+        const string targetFormIdStr = "Skyrim.esm:02BF9F";
+        var hadvarFk = new FormKey(ModKey.FromNameAndExtension("Skyrim.esm"), 0x02BF9F);
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = "Skyrim.esm:000E3D",
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new
+                        {
+                            function = "GetIsID",
+                            @operator = "==",
+                            value = 1f,
+                            parameters = new Dictionary<string, object>
+                            {
+                                ["Object"] = targetFormIdStr,
+                            },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, stderr, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        Console.WriteLine($"  source: Skyrim.esm:000E3D ({infoSourceResp.EditorID ?? "<no EditorID>"})");
+        Console.WriteLine($"  target: {targetFormIdStr} (parameters.Object — GetIsIDConditionData.Object slot, IFormLinkOrIndex<IReferenceableObjectGetter>)");
+        Console.WriteLine($"  exit: {exit}");
+        using var doc = JsonDocument.Parse(stdout);
+        var root = doc.RootElement;
+        bool ok = root.GetProperty("success").GetBoolean();
+        if (!ok) { Console.WriteLine($"  FAIL: bridge reported success=false: {stdout}"); }
+        else if (!File.Exists(outPath)) { Console.WriteLine("  FAIL: output ESP missing"); ok = false; }
+        else
+        {
+            var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+            var outResp = outMod.EnumerateMajorRecords<IDialogResponsesGetter>()
+                .FirstOrDefault(r => r.FormKey == infoFk);
+            if (outResp == null)
+            { Console.WriteLine($"  FAIL: override INFO Skyrim.esm:000E3D missing in output ESP"); ok = false; }
+            else if (outResp.Conditions == null || outResp.Conditions.Count == 0)
+            { Console.WriteLine($"  FAIL: override INFO Conditions missing or empty (expected source 5 + appended 1 = 6)"); ok = false; }
+            else
+            {
+                Console.WriteLine($"  readback: override INFO present with Conditions.Count={outResp.Conditions.Count} (5 source + 1 appended expected)");
+                // Find the appended condition by Object.FormKey == Hadvar (the
+                // source MQ101 INFO has 2 native GetIsID conditions targeting
+                // Player + Ulfric; the new one is uniquely identifiable by its
+                // distinct slot value).
+                var appendedCond = outResp.Conditions
+                    .Where(c => c.Data?.GetType().Name == "GetIsIDConditionData")
+                    .FirstOrDefault(c =>
+                    {
+                        var obj = c.Data!.GetType().GetProperty("Object")?.GetValue(c.Data);
+                        var link = obj?.GetType().GetProperty("Link")?.GetValue(obj);
+                        var fk = link?.GetType().GetProperty("FormKey")?.GetValue(link);
+                        return fk is FormKey k && k == hadvarFk;
+                    });
+                if (appendedCond == null)
+                { Console.WriteLine($"  FAIL: no GetIsIDConditionData with Object={targetFormIdStr} in override INFO (slot did NOT resolve through dispatcher)"); ok = false; }
+                else
+                {
+                    Console.WriteLine($"  readback: appended condition is GetIsIDConditionData with Object.Link.FormKey={hadvarFk} ✓ (Phase 4-INFO bridge fix verified — INFO override + dispatcher slot resolution end-to-end)");
+                }
+            }
+        }
+        Console.WriteLine(ok ? "  PASS" : "  FAIL");
+        if (!ok) failures++;
+        Console.WriteLine();
+    }
+}
+
 if (skipReasons.Count > 0)
 {
     Console.WriteLine($"=== {skipReasons.Count} SKIP(s) ===");

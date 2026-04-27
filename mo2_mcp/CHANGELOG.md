@@ -356,6 +356,55 @@ functions remain in-scope-no-op (back-compat preserved per v2.7.1+ behavior).
   leaked the internal class name; fix is per-record-type-agnostic, so any
   future record type missing from the switch surfaces a clean diagnostic.
 
+### Fixed — bridge
+
+- **`info_override_missing_in_copyasoverride` (Phase 4-INFO sub-session).**
+  `mo2_create_patch` with `op: "override"` against an INFO FormID now succeeds
+  end-to-end. `CopyAsOverride` grows an `IDialogResponsesGetter` early-return
+  branch that resolves the parent `DialogTopic` from the source mod (linear
+  scan via `sourceMod.DialogTopics.FirstOrDefault(t => t.Responses.Any(...))`
+  — `IDialogResponsesGetter` exposes no direct parent-topic getter; the
+  `.Topic` `IFormLinkNullable` field has ambiguous semantics vs `WalkAwayTopic`
+  / `LinkTo`, so the parent is resolved structurally via the GRUP-nesting that
+  the source plugin already encodes), overrides the parent topic via
+  `patchMod.DialogTopics.GetOrAddAsOverride(parentTopic)`, then **explicitly
+  deep-copies** the source INFO via `DialogResponsesMixIn.DeepCopy` (FormKey
+  preserved) and appends to the override topic's `Responses` list. The signature
+  threads a new `ISkyrimModGetter sourceMod` parameter; the 40+ existing switch
+  arms ignore it. `TryRemoveOverride` grows a symmetric `IDialogResponsesGetter`
+  case (Option α — response-only rollback; leaves the parent topic override in
+  place even if it now carries no real changes, consistent with the method's
+  no-op-shaped-override-is-less-misleading-than-silently-swallowing posture for
+  unknown record types). Idempotency: repeat overrides of the same INFO within
+  one patch session return the existing override response rather than appending
+  a second copy — protects callers issuing multiple ops targeting the same INFO
+  in a single `mo2_create_patch` call.
+
+  **Architectural correction to Phase 4's deferral framing (load-bearing
+  pattern beyond INFO).** Phase 4's pre-flight reflection refuted the original
+  Phase 3 fix shape (`patchMod.DialogResponses.GetOrAddAsOverride(r)`) because
+  `SkyrimMod` doesn't expose a top-level `DialogResponses` group, but Phase 4's
+  resulting outline assumed `DialogTopic.GetOrAddAsOverride` would deep-copy
+  the topic's nested `Responses` list. It doesn't, and that's correct Bethesda
+  format behavior: INFO records are independent major records (their own
+  FormIDs, their own override semantics, their own RGRP membership) nested
+  under DIAL GRUPs purely for organizational reasons. Override-add of a parent
+  topic deep-copies the topic's record-level fields, not its child majors —
+  the explicit `DialogResponsesMixIn.DeepCopy` into the override topic's
+  `Responses` list is the standard Mutagen pattern. This generalizes beyond
+  INFO: any future "child major nested under organizational GRUP parent" gap
+  (similar PERK.Effects sub-record, QUST.Aliases, future Mutagen-modeled child-
+  major patterns) follows the same reference shape — override the parent for
+  the GRUP membership, explicitly deep-copy the targeted child into the
+  parent's child-list. Captured in `dev/plans/v2.9.X_condition_parameters/PHASE_4_INFO_HANDOFF.md`
+  § Findings as the v2.9.x reference shape.
+
+  Verified end-to-end via race-probe `v2.9 P4-INFO` regression block
+  (replaces Phase 4's deferred-state architectural archaeology with a
+  bridge-subprocess FAIL→PASS lift against vanilla Skyrim.esm INFO `000E3D` /
+  MQ101 dialog) and coverage-smoke Test 382 `[1.P.GetIsID.INFO]` — the same
+  shape Phase 5 will re-verify against the live install at Scenario 3.1.
+
 ### Documentation
 
 - **`tools_patching.py` schema** — added the v2.9 `parameters` key to the
@@ -392,26 +441,6 @@ functions remain in-scope-no-op (back-compat preserved per v2.7.1+ behavior).
 
 ### Out of scope (v2.9.x candidates within release line)
 
-- **INFO record `op: "override"` (Phase 4 architectural finding — sub-session
-  deferral).** Phase 3's Scenario 3.1 (dialog GetIsID on INFO Skyrim.esm:000E3D)
-  BLOCKED at patch creation: PatchEngine's `CopyAsOverride` switch lacks an
-  `IDialogResponsesGetter` branch and falls through to `_ => null`. Phase 3's
-  bug entry proposed `IDialogResponsesGetter r => patchMod.DialogResponses.GetOrAddAsOverride(r)`
-  as the fix; Phase 4's pre-flight reflection check refuted the fix shape —
-  Mutagen 0.53.1's `SkyrimMod` has no `DialogResponses` property. INFO records
-  are nested under `DialogTopic.Responses` (a plain `Noggog.ExtendedList<DialogResponses>`
-  with no override-add helper), so real INFO override requires parent-topic
-  resolution + `patchMod.DialogTopics.GetOrAddAsOverride(parentTopic)` +
-  child-response find-by-FormKey + new rollback semantics design — multi-hour
-  scope expansion beyond Phase 4's "small fix-and-regress" budget. Deferred to
-  a Phase 4-INFO sub-session (or later v2.9.x point release if the sub-session
-  doesn't ship before v2.9.0). The architectural archaeology is preserved in
-  `tools/race-probe/Program.cs` (v2.9 P4 section — diagnostic dump of
-  alternative override surfaces). Phase 4 still landed the line-180 error
-  message DX bonus-catch (see § Changed — bridge above), so the user-facing
-  failure for INFO override is now a clean `Could not create override for INFO`
-  per-record error instead of the leaky `DialogResponsesBinaryOverlay` internal
-  class name.
 - **Boolean primitive branch** (deferred to v2.9.x — design-only in v2.9.0).
   PLAN.md § A names Boolean as one of six dispatcher branches, but zero
   v2.9.0 in-scope functions need it (verified across 199 dispatcher-wired

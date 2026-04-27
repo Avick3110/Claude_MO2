@@ -25,15 +25,22 @@ Net: ~190 lines cut from docs loaded every session, plus repo-only dev/README.md
 
 Generic Condition-function parameter dispatch — a reusable infrastructure that
 generalizes v2.8.0's single-purpose `actor_value` handler into a reflection-based
-slot router. Phase 2A wires the FormLink-typed slot space (119 functions:
-113 `IFormLinkOrIndex<T>` + 6 sub-A `IFormLink<T>`). Phase 2B extends to the
+slot router. **Phase 2 feature-complete: 199 dispatcher-wired functions across
+five branches** (5 of 6 PLAN-named branches landed; Boolean is the single
+design-vs-implementation gap, deferred to first v2.9.x consumer trigger).
+Phase 2A wires the FormLink-typed slot space (119 functions: 113
+`IFormLinkOrIndex<T>` + 6 sub-A `IFormLink<T>`). Phase 2B extends to the
 Enum-typed slot space (41 functions across 18 distinct enum types — ActorValue
 family + Sex/Axis/CastSource/FormType/etc.). Phase 2C extends to the MultiSlot
 function space (28 functions, including the 3-slot mixed-shape GetEventData
 canary and the FLI+Int32 GetStageDone canonical) and lands the Int32 + Single
-primitive branches that the multi-slot composition surfaces (Boolean deferred —
-zero v2.9.0 in-scope consumers; lands when first surfaces). Phase 2D will wire
-the 11 PrimitiveOnly functions on top of the now-landed Int32 + Single branches.
+primitive branches that the multi-slot composition surfaces. Phase 2D closes
+the max-band Pareto by wiring the 11 PrimitiveOnly functions (alias-index
+lookups, package-data accessors, GetVATSValueUnknown's Int32 Value+ValueType,
+IsLimbGone) through the existing P2C Int32 branch — pure
+`KnownParameterizedFunctions` extension, zero new dispatcher code. 219 NoParam
+functions remain in-scope-no-op (back-compat preserved per v2.7.1+ behavior).
+6 sub-B String-slot functions deferred to v2.9.x.
 
 ### Added — bridge
 
@@ -48,8 +55,9 @@ the 11 PrimitiveOnly functions on top of the now-landed Int32 + Single branches.
   member name → `System.Enum` via `Enum.Parse(propType, value, ignoreCase: true)`
   (P2B scope; numeric enum-index input is rejected — strings are the documented
   form, matching the v2.8 `actor_value` contract).
-  v2.9.0 in-scope set: **188 functions** (113 single-`IFormLinkOrIndex<T>` P2A +
-  6 sub-A single-`IFormLink<T>` P2A + 41 single-Enum P2B + 28 MultiSlot P2C). The 6 sub-A functions
+  v2.9.0 in-scope set: **199 functions** (113 single-`IFormLinkOrIndex<T>` P2A +
+  6 sub-A single-`IFormLink<T>` P2A + 41 single-Enum P2B + 28 MultiSlot P2C +
+  11 PrimitiveOnly P2D). The 6 sub-A functions
   are the GetVATSValue* family (GetVATSValueCriticalEffect,
   GetVATSValueCriticalEffectOrList, GetVATSValueTarget, GetVATSValueTargetOrList,
   GetVATSValueWeapon, GetVATSValueWeaponOrList — all carrying a `Value` slot of
@@ -107,15 +115,34 @@ the 11 PrimitiveOnly functions on top of the now-landed Int32 + Single branches.
   SceneActionIndex / Unknown's ParameterOne+Two) and by GetWithinDistance's
   Distance slot (Single — only Single-bearing function in v2.9.0 in-scope
   set). Both branches enforce `JsonValueKind.Number` posture (string input
-  → record-level type-coercion error). Pre-positions for P2D's 11
-  PrimitiveOnly functions which all use Int32 — P2D becomes pure
-  `KnownParameterizedFunctions` extension + cells. **Boolean primitive
+  → record-level type-coercion error). Reused by P2D's 11 PrimitiveOnly
+  functions (all Int32-only) — P2D was pure `KnownParameterizedFunctions`
+  extension on top of these now-landed branches. **Boolean primitive
   intentionally NOT landed in v2.9.0** — zero in-scope consumers (verified
   across 199 dispatcher-wired functions); landing without a coverage-smoke
   cell or race-probe means an untested path that future Mutagen drift could
   silently break. PLAN.md § A's design names Boolean as one of six branches;
   v2.9.0 ships five (FLI / IFormLink<T> / System.Enum / Int32 / Single). First
   v2.9.x consumer trigger lands Boolean.
+
+- **PrimitiveOnly closer (P2D — 11 functions).** Closes the max-band Pareto
+  Aaron locked at session start (`KnownParameterizedFunctions` 188 → 199).
+  Pure HashSet extension — zero new dispatcher code, since the Int32 branch
+  landed in P2C for MultiSlot consumers (GetStageDone.Stage and friends);
+  P2D's contribution is letting caller's `parameters` for the 11 PrimitiveOnly
+  functions dispatch through that already-live branch. The 11 functions are
+  all single- or dual-slot Int32 per scratch lines 1532–1554: alias-index
+  lookups (`GetIsAliasRef`/ReferenceAliasIndex used by quest-alias-index
+  gating in dialog/quest patchers, `GetInCurrentLocAlias`/`GetIsEditorLocAlias`/
+  `GetLocationAliasCleared`/`IsLocAliasLoaded`/LocationAliasIndex), package-data
+  accessors (`GetNumericPackageData`/`GetWithinPackageLocation`/`IsNullPackageData`/
+  PackageDataIndex), `GetVATSValueUnknown` (Value+ValueType — the genuinely-
+  Int32-typed VATS variant; distinct from sub-A's `GetVATSValue*` IFormLink<T>
+  family at scratch 1162–1207), `GetPlayerControlsDisabled` (PlayerControls-
+  ParameterOne+Two), `IsLimbGone` (Limb). Drift-detection diff confirms bridge
+  changes scoped to `KnownParameterizedFunctions` HashSet additions plus
+  doc-comment refresh; no `RouteParameterSlot` body changes, no `BuildCondition`
+  changes, no v2.8 `actor_value` handler changes.
 
 - **Footgun-guard for CTDA padding slots.** The dispatcher rejects any
   `parameters` key whose name contains `"Unused"`. Mutagen 0.53.1's
@@ -158,9 +185,10 @@ the 11 PrimitiveOnly functions on top of the now-landed Int32 + Single branches.
   IFormLinkOrIndex<T> + IFormLink<T> + System.Enum + Int32 + Single."
 
 - **`KnownParameterizedFunctions` static frozen set** in `PatchEngine.cs`. Holds
-  the 188 in-scope function names (113 P2A FLI + 6 P2A sub-A IFormLink + 41 P2B
-  Enum + 28 P2C MultiSlot incl. GetEventData absorbed). Functions in the set
-  route through the dispatcher; functions NOT in the set + caller-supplied
+  the 199 in-scope function names (113 P2A FLI + 6 P2A sub-A IFormLink + 41 P2B
+  Enum + 28 P2C MultiSlot incl. GetEventData absorbed + 11 P2D PrimitiveOnly).
+  Closes the max-band Pareto Aaron locked at session start. Functions in the
+  set route through the dispatcher; functions NOT in the set + caller-supplied
   `parameters` → out-of-scope error; functions NOT in the set + no
   `parameters` → preserves v2.7.1+ behavior. NoParam functions (219) are NOT
   in the set per `CONDITIONS_AUDIT.md § NoParam handling` — they accept
@@ -255,6 +283,59 @@ the 11 PrimitiveOnly functions on top of the now-landed Int32 + Single branches.
   only Single-bearing function), GetRelativeAngle (Enum + FLI — Axis enum
   matches P2B probe). Each probe simulates per-slot dispatch inline + asserts
   round-trip. Total race-probe surface: 7 P2A + 3 P2B + 4 P2C = 14 PASS.
+- **+11 v2.9 P2D coverage-smoke cells** (1 PASS-canary + 9 PASS-bulk + 1 SKIP-with-reason):
+  - **Test 371 [1.P.GetIsAliasRef.MGEF]** — PrimitiveOnly canary, 1-slot Int32
+    (ReferenceAliasIndex=42). Halt-and-report rigor checkpoint with verbose
+    formatting modeled on P2C's Test 339; readback confirmed
+    `GetIsAliasRefConditionData.ReferenceAliasIndex==42` (NOT default 0),
+    proving HashSet += name suffices to enable a function through the
+    already-live P2C Int32 branch.
+  - **Tests 372–380 [1.P.\<Function\>.MGEF]** — 9 bulk PrimitiveOnly positives
+    via the existing `RunMultiSlotDispatcherCell` helper (works for
+    PrimitiveOnly out of the box since the helper's switch covers Int32 /
+    Single / Boolean uniformly). 10 of the 11 PrimitiveOnly signatures are
+    1- or 2-slot Int32 only per scratch lines 1532–1554 (no FLI, no Enum,
+    no Single, no Boolean), so each cell's helper trace reduces to
+    "{N}-slot: \<slot>{1}\<Int32>=42 [| \<slot>{2}\<Int32>=42]".
+    GetPlayerControlsDisabled carries 2 Int32 slots (PlayerControlsParameterOne
+    + PlayerControlsParameterTwo); the other 8 PASS-bulk functions are 1-slot
+    Int32.
+  - **1.P.GetVATSValueUnknown.MGEF** — SKIP-with-reason (Mutagen 0.53.1 schema
+    gap, surfaced as bonus-catch during P2D bulk wiring). The bridge
+    dispatcher write IS correct: GetVATSValueUnknownConditionData is
+    constructed via Activator.CreateInstance, both Int32 slots (Value +
+    ValueType) land via reflection. The failure is downstream in Mutagen's
+    binary serializer — `AGetVATSValueConditionData.GetValueFunction()` is
+    abstract on the parent class; the other six `AGetVATSValue*` concrete
+    subclasses (sub-A IFormLink<T> family — CriticalEffect/Target/Weapon ±
+    OrList) override it, but the Unknown subclass does not in Mutagen 0.53.1.
+    `WriteToBinary` throws `NotImplementedException` regardless of slot
+    values. Distinct shape from P2C's `Unknown` CTDA round-trip artifact
+    (which was a read-side reclassification — write succeeded; harness
+    type-name lookup couldn't anchor on read). Resolution: keep
+    GetVATSValueUnknown in `KnownParameterizedFunctions` (dispatcher IS
+    correct + bridge writes the slots successfully — Mutagen's serializer
+    breaks); KNOWN_ISSUES.md documents it under § Patching write surface
+    alongside AMMO enchantment + Outfit/Spell VMAD as a Mutagen 0.53.1
+    schema gap; v2.9.x candidate when upstream Mutagen 0.54+ implements
+    the missing override. Real consumers attempting `function:
+    "GetVATSValueUnknown"` get a clean per-record write-time error today.
+  - Layer 1.D PrimitiveOnly representative: covered by P2C's Test 369
+    (GetStageDone Stage as string → Int32 type-coercion failure). The
+    Int32 branch's `ValueKind != Number` guard fires uniformly inside
+    the Int32 branch regardless of caller function; PrimitiveOnly
+    functions exercise the same code path, so a duplicate cell adds no
+    coverage. Documented at PHASE_2D_HANDOFF.md § Deviations.
+
+  Total smoke surface: 160 v2.8.0 baseline + 134 P2A + 45 P2B + 32 P2C +
+  11 P2D = **382 cells** (376 PASS + 6 SKIP — the 4 v2.8 baseline carryovers +
+  P2C's 1.P.Unknown.MGEF + P2D's 1.P.GetVATSValueUnknown.MGEF; 0 FAIL).
+- **+1 race-probe PrimitiveOnly probe (P2D)** for archival completeness:
+  `IsLimbGone` (1-slot Int32, recognizable name, distinct from Test 371's
+  GetIsAliasRef canary). Reuses P2C's `ProbeMultiSlot` helper since the
+  dispatcher branch is the same code path; failure attribution delta-tracked
+  to keep the per-phase scoreboard clean. Total race-probe surface: 7 P2A +
+  3 P2B + 4 P2C + 1 P2D = 15 PASS.
 
 ### Documentation
 
@@ -265,8 +346,11 @@ the 11 PrimitiveOnly functions on top of the now-landed Int32 + Single branches.
   string-only / case-insensitive contract. P2C extended further to cover the
   28 MultiSlot functions (per-slot composition note + canonical examples)
   + Int32 / Single primitive contracts (number-only / string-rejected) +
-  Boolean-deferred note + Unknown SKIP-with-reason note. Total in-scope
-  count updated 160 → 188.
+  Boolean-deferred note + Unknown SKIP-with-reason note. P2D extended once
+  more to cover the 11 PrimitiveOnly functions and reframe the description
+  as "Phase 2 feature-complete: 5 of 6 PLAN-named branches landed across
+  199 dispatcher-wired functions; Boolean is the single design-vs-
+  implementation gap." Total in-scope count: 160 → 188 → 199.
 - **`KNOWN_ISSUES.md`** — P2A moved "Other Condition-function parameter slots"
   from carry-over to a covered-for entry naming the v2.9.0 in-scope set, and
   added the 2B/2C/2D/sub-B gaps still open. P2B lifted the 41-Enum bullet
@@ -274,9 +358,12 @@ the 11 PrimitiveOnly functions on top of the now-landed Int32 + Single branches.
   detail (ActorValue/Axis/CastSource/etc.). P2C lifts MultiSlot 28 (with
   per-shape detail incl. the Unknown SKIP rationale) + adds the Int32 / Single
   primitive-branch bullet + adds the Boolean-deferred design-vs-implementation
-  note (per Aaron's halt-1 directive); section header renamed
-  `(v2.9.0 P2A + P2B)` → `(v2.9.0 P2A + P2B + P2C)`. Only 2D PrimitiveOnly,
-  sub-B String, and NoParam-no-op remain in the gaps section.
+  note (per Aaron's halt-1 directive). P2D lifts the PrimitiveOnly bullet
+  from the gap-list to the covered-for section (with the alias-index /
+  package-data / VATS-Int32 / IsLimbGone / GetPlayerControlsDisabled detail);
+  intro count 188 → 199; section header `(v2.9.0 P2A + P2B + P2C)` →
+  `(v2.9.0)` (release feature-complete after P2D). Only Boolean (deferred
+  design-only), sub-B String, and NoParam-no-op remain in the gaps section.
 - **PLAN.md + MATRIX.md plan-amend** at `5a06179` — folded six architectural
   surprises CONDITIONS_AUDIT.md surfaced during Phase 1: GetIsID slot is
   `Object` not `Reference`, dynamic base-prop detection replaces static skip
@@ -286,14 +373,6 @@ the 11 PrimitiveOnly functions on top of the now-landed Int32 + Single branches.
 
 ### Out of scope (v2.9.x candidates within release line)
 
-- **11 PrimitiveOnly Condition functions** (Phase 2D). All use Int32 slots —
-  Int32 branch already in place from P2C, so 2D is pure
-  `KnownParameterizedFunctions` extension + cells (no new dispatcher code).
-  Specifically: GetIsAliasRef, GetInCurrentLocAlias, GetIsEditorLocAlias,
-  GetLocationAliasCleared, GetNumericPackageData, GetPlayerControlsDisabled,
-  GetVATSValueUnknown, GetWithinPackageLocation, IsLimbGone, IsLocAliasLoaded,
-  IsNullPackageData. Single + Boolean primitives have zero in-scope consumers
-  in 2D.
 - **Boolean primitive branch** (deferred to v2.9.x — design-only in v2.9.0).
   PLAN.md § A names Boolean as one of six dispatcher branches, but zero
   v2.9.0 in-scope functions need it (verified across 199 dispatcher-wired

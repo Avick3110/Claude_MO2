@@ -7313,6 +7313,190 @@ else Skip("4.c.01-carry", "no QUST");
     }
 }
 
+// ═════════════════════════════════════════════════════════════════════════
+// v2.9.0 P2D — PrimitiveOnly closer (Layer 1.P.PrimitiveOnly positives ×11).
+//
+// Phase 2D scope: 11 PrimitiveOnly Condition functions per scratch lines
+// 1532-1554, all single- or dual-slot Int32. Closes the max-band Pareto
+// (KnownParameterizedFunctions: 188 → 199). Bridge changes scope: pure
+// HashSet extension — zero new dispatcher code. The Int32 branch in
+// RouteParameterSlot landed in P2C (for MultiSlot consumers like
+// GetStageDone.Stage); P2D's contribution is letting caller's parameters
+// for the 11 PrimitiveOnly functions dispatch through that already-live
+// branch. Other-shape branches (FLI / IFormLink / Enum / Single / footgun-
+// guard / DSL-ambiguity / out-of-scope) byte-identical to P2C baseline.
+//
+// Layer 1.D PrimitiveOnly representative: covered by P2C's Test 369
+// (GetStageDone Stage as string → Int32 type-coercion failure). The Int32
+// branch's ValueKind != Number guard fires uniformly inside the Int32 branch
+// regardless of caller function; PrimitiveOnly functions exercise the same
+// code path. Duplicate cell adds no coverage.
+
+// ─── Test 371 [1.P.GetIsAliasRef.MGEF] — PrimitiveOnly canary cell (1-slot Int32) ───
+// Halt-and-report #1: pick a recognizable real-patcher PrimitiveOnly function.
+// GetIsAliasRef gates on a quest-alias-index — used by dialog/quest patchers
+// who need to ask "is the running reference at this alias index slot?" The
+// 1-slot Int32 signature (ReferenceAliasIndex per scratch line 1535-1536) keeps
+// the canary trace minimal and provable: a non-zero readback proves the Int32
+// branch (P2C) routed P2D's KnownParameterizedFunctions extension correctly.
+// Verbose halt-and-report formatting modeled on P2C's Test 339 GetEventData
+// canary so the trace shows source + target + per-slot readback explicitly.
+{
+    Console.WriteLine($"── Test 371 [1.P.GetIsAliasRef.MGEF]: GetIsAliasRef + parameters: {{ReferenceAliasIndex: 42}} (1-slot Int32 PrimitiveOnly canary) ──");
+    var mgefForAliasRef = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefForAliasRef == null) { Skip("1.P.GetIsAliasRef.MGEF", "no MGEF with Conditions container"); }
+    else
+    {
+        var outPath = Path.Combine(outDir, "test371-1pGetIsAliasRef-canary.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        const int targetIndex = 42;
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke",
+            records = new[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = FormatFormKey(mgefForAliasRef.FormKey),
+                    source_path = SkyrimEsm,
+                    add_conditions = new object[]
+                    {
+                        new
+                        {
+                            function = "GetIsAliasRef",
+                            @operator = "==",
+                            value = 1f,
+                            parameters = new Dictionary<string, object>
+                            {
+                                ["ReferenceAliasIndex"] = targetIndex,
+                            },
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, exit) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        Console.WriteLine($"  source: {FormatFormKey(mgefForAliasRef.FormKey)} ({mgefForAliasRef.EditorID})");
+        Console.WriteLine($"  target: parameters.ReferenceAliasIndex={targetIndex} (PrimitiveOnly Int32 — KnownParameterizedFunctions name added P2D, dispatcher branch landed P2C)");
+        Console.WriteLine($"  exit: {exit}");
+        using var doc = JsonDocument.Parse(stdout);
+        bool success = doc.RootElement.GetProperty("success").GetBoolean();
+        if (!success)
+        { Console.WriteLine($"  FAIL: bridge reported success=false: {stdout}"); failures++; }
+        else
+        {
+            var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+            var rec = outMod.MagicEffects.FirstOrDefault(m => m.FormKey == mgefForAliasRef.FormKey);
+            var addedCond = rec?.Conditions?.LastOrDefault(c => c.Data?.GetType().Name == "GetIsAliasRefConditionData");
+            if (addedCond == null)
+            { Console.WriteLine($"  FAIL: no GetIsAliasRefConditionData entry in readback ({rec?.Conditions?.Count ?? 0} conditions present)"); failures++; }
+            else
+            {
+                var dataType = addedCond.Data!.GetType();
+                var idxProp = dataType.GetProperty("ReferenceAliasIndex", BindingFlags.Public | BindingFlags.Instance);
+                var idxVal = idxProp?.GetValue(addedCond.Data);
+                int idxInt = idxVal is int i ? i : -1;
+                bool idxOk = idxInt == targetIndex;
+
+                Console.WriteLine($"  readback: GetIsAliasRefConditionData.ReferenceAliasIndex={idxInt} {(idxOk ? "✓" : "✗ (expected " + targetIndex + ")")} (Int32 P2C branch)");
+
+                if (!idxOk)
+                { Console.WriteLine($"  FAIL: PrimitiveOnly canary slot did not round-trip"); failures++; }
+                else
+                { Console.WriteLine($"  PrimitiveOnly canary verified — KnownParameterizedFunctions += 'GetIsAliasRef' lets caller's parameters dispatch through the Int32 branch (P2C). Zero new dispatcher code."); Console.WriteLine("  PASS"); }
+            }
+        }
+        Console.WriteLine();
+    }
+}
+
+// ─── Tests 372-381 [1.P.<Function>.MGEF] — bulk Layer 1.P.PrimitiveOnly cells (10 fns) ───
+// 10 PrimitiveOnly functions (11 total - GetIsAliasRef canary at Test 371).
+// Driven by RunMultiSlotDispatcherCell (defined end-of-file). Per-slot canary
+// value: 42 (Int32). All 11 PrimitiveOnly signatures are 1- or 2-slot Int32
+// only per scratch lines 1532-1554 (no FLI, no Enum, no Single, no Boolean),
+// so each cell's helper trace reduces to "{N}-slot: <slot>{1}<Int32>=42
+// [| <slot>{2}<Int32>=42]". GetPlayerControlsDisabled and GetVATSValueUnknown
+// each carry 2 Int32 slots; the other 8 are 1-slot Int32.
+{
+    Console.WriteLine($"── Tests 372-381 [1.P.<Function>.MGEF]: bulk v2.9 P2D PrimitiveOnly dispatcher cells (10 functions) ──");
+    var mgefForBulkPrim = source.MagicEffects.FirstOrDefault(m => m.Conditions != null);
+    if (mgefForBulkPrim == null) { Skip("1.P.PrimitiveOnly.bulk", "no MGEF with Conditions container"); }
+    else
+    {
+        // 9 PrimitiveOnly functions, alphabetical (matches scratch ordering
+        // post-canary-exclusion + post-Mutagen-schema-gap-exclusion). Order
+        // matches KnownParameterizedFunctions P2D block in PatchEngine.cs minus
+        // GetIsAliasRef (Test 371 canary) and GetVATSValueUnknown (SKIP-with-
+        // reason immediately below; Mutagen 0.53.1 schema gap, see comment).
+        var bulkPrimFuncs = new string[]
+        {
+            "GetInCurrentLocAlias",
+            // GetIsAliasRef — Test 371 canary (above)
+            "GetIsEditorLocAlias",
+            "GetLocationAliasCleared",
+            "GetNumericPackageData",
+            "GetPlayerControlsDisabled",
+            // GetVATSValueUnknown — SKIP-with-reason (see Skip call after the
+            // bulk summary; Mutagen 0.53.1 forgot to override the abstract
+            // AGetVATSValueConditionData.GetValueFunction() on the Unknown
+            // subclass, so binary write throws NotImplementedException at the
+            // CTDA serialization step regardless of slot values).
+            "GetWithinPackageLocation",
+            "IsLimbGone",
+            "IsLocAliasLoaded",
+            "IsNullPackageData",
+        };
+        int testNum = 372;
+        int bulkPasses = 0, bulkFailures = 0;
+        foreach (var fn in bulkPrimFuncs)
+        {
+            var (ok, trace) = RunMultiSlotDispatcherCell(
+                bridgeExe, outDir, mgefForBulkPrim, SkyrimEsm,
+                new { game_release = "SkyrimSE", listings = loadOrderListings },
+                fn);
+            string label = $"1.P.{fn}.MGEF";
+            Console.WriteLine($"  [{testNum,3}] [{label,-58}] {(ok ? "PASS" : "FAIL")}  {trace}");
+            if (ok) bulkPasses++; else { bulkFailures++; failures++; }
+            testNum++;
+        }
+        Console.WriteLine($"  Bulk PrimitiveOnly summary: {bulkPasses}/{bulkPrimFuncs.Length} PASS ({bulkFailures} FAIL)");
+        Console.WriteLine();
+
+        // ─── 1.P.GetVATSValueUnknown.MGEF — SKIP-with-reason (Mutagen 0.53.1 schema gap) ───
+        // Bonus-catch surfaced during P2D bulk wiring (halt-2 trigger). Bridge
+        // dispatcher write IS correct: GetVATSValueUnknownConditionData is
+        // constructed via Activator.CreateInstance, the per-slot reflection
+        // writes (Value=42, ValueType=42 both Int32) succeed, prop.SetValue
+        // returns cleanly. The failure is downstream in Mutagen's binary
+        // serializer: GetVATSValueUnknownConditionDataBinaryWriteTranslation
+        // calls AGetVATSValueConditionData.GetValueFunction(obj) — an abstract
+        // method on the parent class that the other six AGetVATSValue*
+        // concrete subclasses (CriticalEffect/Target/Weapon ± OrList — sub-A
+        // IFormLink<T>) override to return their CTDA function code. The
+        // Unknown subclass is missing the override in Mutagen 0.53.1, so
+        // GetValueFunction() falls through to a NotImplementedException stub
+        // and the parallel WriteToBinary path throws. Hard write-time failure
+        // regardless of slot values. Distinct shape from P2C's Unknown CTDA
+        // round-trip artifact (which was read-side reclassification — write
+        // succeeded; harness type-name lookup couldn't anchor on read).
+        // Resolution: keep GetVATSValueUnknown in KnownParameterizedFunctions
+        // (dispatcher IS correct + the bridge writes the slots successfully —
+        // it's Mutagen's serializer that breaks); document as a Mutagen 0.53.1
+        // schema gap in KNOWN_ISSUES.md alongside AMMO enchantment + Outfit/
+        // Spell VMAD; surface as a Mutagen 0.54+ candidate (when upstream lands
+        // the missing override). Real consumers attempting GetVATSValueUnknown
+        // get a clean per-record write-time error today.
+        Skip("1.P.GetVATSValueUnknown.MGEF",
+            "Mutagen 0.53.1 schema gap — GetVATSValueUnknownConditionData is missing its override of AGetVATSValueConditionData.GetValueFunction(). Binary serializer throws NotImplementedException at the CTDA write step regardless of slot values. Bridge dispatcher write IS correct (Value/ValueType slots land via reflection); Mutagen serializer breaks downstream. v2.9.x candidate (waits for Mutagen 0.54+ implementation). See KNOWN_ISSUES.md § Patching write surface.");
+    }
+}
+
 if (skipReasons.Count > 0)
 {
     Console.WriteLine($"=== {skipReasons.Count} SKIP(s) ===");

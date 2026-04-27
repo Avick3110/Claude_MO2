@@ -2164,11 +2164,32 @@ ProbeMultiSlot("GetRelativeAngle",
 
 Console.WriteLine($"=== v2.9 P2C probes: {(p2cFailures == 0 ? "ALL PASS" : $"{p2cFailures} FAILURE(S)")} ===");
 
+// ─── v2.9 P2D — PrimitiveOnly dispatcher functional probe (Mutagen-direct, in-process) ───
+// 1 representative Int32-only PrimitiveOnly probe for archival completeness.
+// P2C's ProbeMultiSlot already covers Int32 (via GetStageDone.Stage), so this
+// is forms-completeness rigor — the dispatcher branch is the same code path
+// regardless of caller function. IsLimbGone picked (recognizable, distinct from
+// Test 371's GetIsAliasRef canary; 1-slot Int32 PrimitiveOnly).
+// Failure attribution: ProbeMultiSlot bumps p2cFailures internally; we delta-
+// track P2D's contribution and unwind p2cFailures so the per-phase scoreboard
+// stays clean across the totalFailures rollup.
+int p2dFailures = 0;
+{
+    int p2cBefore = p2cFailures;
+    Console.WriteLine();
+    Console.WriteLine("=== v2.9 P2D — PrimitiveOnly dispatcher functional probe (in-process Mutagen-direct) ===");
+    ProbeMultiSlot("IsLimbGone",
+        ("Limb", (object)42));                                                // 1-slot Int32 (PrimitiveOnly representative)
+    p2dFailures = p2cFailures - p2cBefore;
+    p2cFailures = p2cBefore;
+}
+Console.WriteLine($"=== v2.9 P2D probes: {(p2dFailures == 0 ? "ALL PASS" : $"{p2dFailures} FAILURE(S)")} ===");
+
 Console.WriteLine();
-int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures;
+int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures + p2dFailures;
 if (totalFailures > 0)
 {
-    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
+    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C + {p2dFailures} v2.9 P2D) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
     Environment.Exit(1);
 }
 Console.WriteLine("=== probe complete ===");

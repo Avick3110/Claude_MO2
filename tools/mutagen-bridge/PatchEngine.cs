@@ -1737,20 +1737,29 @@ public class PatchEngine
     }
 
     /// <summary>
-    /// v2.9.0 P2A/P2B — frozen set of Condition function names whose
-    /// parameter slots the bridge dispatches via <see cref="RouteParameterSlot"/>.
-    /// Sourced from CONDITIONS_AUDIT.md (Mutagen 0.53.1 inventory probe).
-    /// 160 functions total: 113 single-<c>IFormLinkOrIndex&lt;T&gt;</c> (P2A) +
-    /// 6 sub-A single-<c>IFormLink&lt;T&gt;</c> P2A (GetVATSValue* family) +
-    /// 41 single-Enum P2B (ActorValue family + 38 others — Axis / Sex /
-    /// CastSource / FormType / etc.).
-    /// Subsequent phases extend: 2C adds 28 MultiSlot (incl. GetEventData,
-    /// 3-slot mixed Enum + IFormLink), 2D adds 11 PrimitiveOnly. NoParam (219)
-    /// is in-scope-no-op — they accept parameterless invocation as v2.7.1+
-    /// behavior; supplying <c>parameters</c> for a NoParam function fires
+    /// v2.9.0 — frozen set of Condition function names whose parameter slots the
+    /// bridge dispatches via <see cref="RouteParameterSlot"/>. Sourced from
+    /// CONDITIONS_AUDIT.md (Mutagen 0.53.1 inventory probe).
+    /// 199 functions total — closes the max-band Pareto Aaron locked at session
+    /// start:
+    /// <list type="bullet">
+    /// <item>P2A: 113 single-<c>IFormLinkOrIndex&lt;T&gt;</c> + 6 sub-A
+    ///   single-<c>IFormLink&lt;T&gt;</c> (GetVATSValue* FormLink family).</item>
+    /// <item>P2B: 41 single-Enum (ActorValue family + 38 others — Axis / Sex /
+    ///   CastSource / FormType / MiscStatEnum / nested
+    ///   GetVATSValueActionConditionData+Action / etc.).</item>
+    /// <item>P2C: 28 MultiSlot (incl. GetEventData absorbed via sub-A's
+    ///   IFormLink&lt;T&gt; branch — 3-slot mixed Enum + Enum + IFormLink).</item>
+    /// <item>P2D: 11 PrimitiveOnly (single- or dual-slot Int32 — alias indices,
+    ///   package data accessors, VATS Int32 Value, IsLimbGone). Pure HashSet
+    ///   extension: zero new dispatcher code, since the Int32 branch landed in
+    ///   P2C for MultiSlot consumers (GetStageDone.Stage and friends).</item>
+    /// </list>
+    /// NoParam (219) is in-scope-no-op — they accept parameterless invocation as
+    /// v2.7.1+ behavior; supplying <c>parameters</c> for a NoParam function fires
     /// the natural slot-name-not-found path or the out-of-scope check.
-    /// Sub-B (6 String-typed VariableName/GraphVariable functions) deferred
-    /// to v2.9.x — see PLAN.md § Carry-overs entry 7.
+    /// Sub-B (6 String-typed VariableName/GraphVariable functions) deferred to
+    /// v2.9.x — see PLAN.md § Carry-overs entry 7.
     /// </summary>
     private static readonly HashSet<string> KnownParameterizedFunctions = new(StringComparer.Ordinal)
     {
@@ -1973,35 +1982,71 @@ public class PatchEngine
         "LocAliasIsLocation",
         "SpellHasKeyword",
         "Unknown",
+
+        // ── 11 PrimitiveOnly functions (P2D; scratch lines 1532–1554; all Int32
+        // slots — branches landed in P2C) ──
+        // Pure HashSet extension closing the max-band Pareto: zero new dispatcher
+        // code, the Int32 branch in RouteParameterSlot already routes every slot
+        // these functions carry. Alias-index lookups (GetInCurrentLocAlias /
+        // GetIsAliasRef / GetIsEditorLocAlias / GetLocationAliasCleared /
+        // IsLocAliasLoaded — quest-alias-index gating used by dialog/quest
+        // patchers); package data accessors (GetNumericPackageData /
+        // GetWithinPackageLocation / IsNullPackageData — Package-byte-index lookup);
+        // GetVATSValueUnknown is the genuinely-Int32-typed VATS variant (Sub-A's
+        // six GetVATSValue* covered the IFormLink&lt;T&gt; Value-slot variants —
+        // CriticalEffect / Target / Weapon ± OrList — distinct from this Int32
+        // Value+ValueType pair). GetPlayerControlsDisabled uses dual Int32 slots
+        // (PlayerControlsParameterOne + PlayerControlsParameterTwo) which both
+        // route through the existing per-slot foreach.
+        "GetInCurrentLocAlias",
+        "GetIsAliasRef",
+        "GetIsEditorLocAlias",
+        "GetLocationAliasCleared",
+        "GetNumericPackageData",
+        "GetPlayerControlsDisabled",
+        "GetVATSValueUnknown",
+        "GetWithinPackageLocation",
+        "IsLimbGone",
+        "IsLocAliasLoaded",
+        "IsNullPackageData",
     };
 
     /// <summary>
-    /// v2.9.0 P2A/P2B/P2C — generic Condition-function parameter dispatcher. Routes
-    /// one (slotName, jsonValue) entry from <see cref="ConditionEntry.Parameters"/>
+    /// v2.9.0 — generic Condition-function parameter dispatcher. Routes one
+    /// (slotName, jsonValue) entry from <see cref="ConditionEntry.Parameters"/>
     /// to the corresponding reflection property on a <c>{Function}ConditionData</c>
-    /// instance. Branches landed:
+    /// instance. **Phase 2 feature-complete after P2D**: 5 of 6 PLAN.md § A
+    /// branches landed across 199 dispatcher-wired functions (Boolean is the
+    /// single design-vs-implementation gap, deferred to first v2.9.x consumer
+    /// trigger).
     /// <list type="bullet">
-    /// <item>2A: <c>IFormLinkOrIndex&lt;T&gt;</c> (existing Global-handler pattern —
+    /// <item>P2A: <c>IFormLinkOrIndex&lt;T&gt;</c> (existing Global-handler pattern —
     ///   parent + FormKey ctor) and <c>IFormLink&lt;T&gt;</c> (sub-A absorption —
-    ///   single FormKey ctor).</item>
-    /// <item>2B: <c>System.Enum</c> via <c>Enum.Parse(propType, value, ignoreCase: true)</c>
+    ///   single FormKey ctor). 119 functions wired.</item>
+    /// <item>P2B: <c>System.Enum</c> via <c>Enum.Parse(propType, value, ignoreCase: true)</c>
     ///   — generalizes v2.8.0's <c>actor_value</c> handler. Numeric-vs-string
     ///   posture: error if <c>jsonValue.ValueKind != String</c> (strings are the
-    ///   documented form; matches the back-compat <c>actor_value</c> contract).</item>
-    /// <item>2C: <c>Int32</c> and <c>Single</c> primitive branches via
+    ///   documented form; matches the back-compat <c>actor_value</c> contract).
+    ///   41 functions wired.</item>
+    /// <item>P2C: <c>Int32</c> and <c>Single</c> primitive branches via
     ///   <c>JsonElement.GetInt32()</c> / <c>GetSingle()</c>. Required by 10 native
     ///   MultiSlot functions whose secondary slots are Int32 (Stage / *AliasIndex
     ///   / SceneActionIndex / Unknown's ParameterOne+ParameterTwo) and by
     ///   GetWithinDistance's Distance slot (Single — only Single-bearing function
-    ///   in the v2.9.0 in-scope set); pre-positions for 2D's 11 PrimitiveOnly
-    ///   functions which all use Int32. Numeric-vs-string posture: error if
-    ///   <c>jsonValue.ValueKind != Number</c>.</item>
+    ///   in the v2.9.0 in-scope set). Numeric-vs-string posture: error if
+    ///   <c>jsonValue.ValueKind != Number</c>. 28 functions wired.</item>
+    /// <item>P2D: 11 PrimitiveOnly functions wired through the existing P2C Int32
+    ///   branch (alias indices, package data accessors, VATS Int32 Value+ValueType,
+    ///   IsLimbGone). Zero new dispatcher code — pure
+    ///   <see cref="KnownParameterizedFunctions"/> extension closing the max-band
+    ///   Pareto.</item>
     /// </list>
     /// Multi-slot composition is handled by <see cref="BuildCondition"/>'s foreach
     /// over <c>ce.Parameters</c> (lines ~1681-1685) — each slot routes independently
-    /// through whichever branch matches its prop type, so 2C's 28 MultiSlot functions
-    /// wire purely via <see cref="KnownParameterizedFunctions"/> additions. No new
-    /// dispatcher abstraction.
+    /// through whichever branch matches its prop type, so P2C's 28 MultiSlot and
+    /// P2D's 11 PrimitiveOnly functions wire purely via
+    /// <see cref="KnownParameterizedFunctions"/> additions. No new dispatcher
+    /// abstraction across either phase.
     /// Boolean primitive intentionally NOT landed: zero v2.9.0 in-scope functions
     /// need it (verified across 199 dispatcher-wired functions). PLAN.md § A names
     /// Boolean as one of the design's six branches — first v2.9.x consumer trigger

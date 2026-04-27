@@ -4,7 +4,7 @@
 **Status:** Complete
 **Date:** 2026-04-27
 **Session length:** ~3h
-**Commits made:** `<work-hash>` (work) + `<this-commit>` (hash-record)
+**Commits made:** `2d6c717` (work) + this commit (hash-record)
 **Live install synced:** No (Phase 2 doesn't touch live; live remains at v2.9.0 per `mo2_ping`)
 
 ## Working version slug

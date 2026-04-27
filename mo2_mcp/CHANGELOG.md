@@ -19,28 +19,32 @@ Net: ~190 lines cut from docs loaded every session, plus repo-only dev/README.md
 
 ---
 
-## v2.9.0 — TBD
-
-<Phase 5 fills in date.>
+## v2.9.0 — 2026-04-27
 
 Generic Condition-function parameter dispatch — a reusable infrastructure that
 generalizes v2.8.0's single-purpose `actor_value` handler into a reflection-based
 slot router. **Phase 2 feature-complete: 199 dispatcher-wired functions across
 five branches** (5 of 6 PLAN-named branches landed; Boolean is the single
 design-vs-implementation gap, deferred to first v2.9.x consumer trigger).
-Phase 2A wires the FormLink-typed slot space (119 functions: 113
-`IFormLinkOrIndex<T>` + 6 sub-A `IFormLink<T>`). Phase 2B extends to the
+Phase 2A wired the FormLink-typed slot space (119 functions: 113
+`IFormLinkOrIndex<T>` + 6 sub-A `IFormLink<T>`). Phase 2B extended to the
 Enum-typed slot space (41 functions across 18 distinct enum types — ActorValue
-family + Sex/Axis/CastSource/FormType/etc.). Phase 2C extends to the MultiSlot
+family + Sex/Axis/CastSource/FormType/etc.). Phase 2C extended to the MultiSlot
 function space (28 functions, including the 3-slot mixed-shape GetEventData
-canary and the FLI+Int32 GetStageDone canonical) and lands the Int32 + Single
-primitive branches that the multi-slot composition surfaces. Phase 2D closes
+canary and the FLI+Int32 GetStageDone canonical) and landed the Int32 + Single
+primitive branches that the multi-slot composition surfaces. Phase 2D closed
 the max-band Pareto by wiring the 11 PrimitiveOnly functions (alias-index
 lookups, package-data accessors, GetVATSValueUnknown's Int32 Value+ValueType,
 IsLimbGone) through the existing P2C Int32 branch — pure
-`KnownParameterizedFunctions` extension, zero new dispatcher code. 219 NoParam
-functions remain in-scope-no-op (back-compat preserved per v2.7.1+ behavior).
-6 sub-B String-slot functions deferred to v2.9.x.
+`KnownParameterizedFunctions` extension, zero new dispatcher code. Phase 4
+landed a line-180 error-message DX bonus-catch (any record type missing from
+`CopyAsOverride` now surfaces a clean 4-char-style code instead of the
+internal Mutagen overlay class name); the Phase 4-INFO sub-session landed
+INFO override end-to-end via the `parent-topic-resolution + child-DeepCopy`
+pattern, the v2.9.x reference shape for any future "child major nested under
+organizational GRUP parent" gap. 219 NoParam functions remain in-scope-no-op
+(back-compat preserved per v2.7.1+ behavior). 6 sub-B String-slot functions
+deferred to v2.9.x.
 
 ### Added — bridge
 

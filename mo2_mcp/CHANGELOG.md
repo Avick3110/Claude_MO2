@@ -19,9 +19,9 @@ Net: ~190 lines cut from docs loaded every session, plus repo-only dev/README.md
 
 ---
 
-## v2.9.1 — TBD
+## v2.9.1 — 2026-04-28
 
-Quest condition disambiguation — fills the v2.7.1+ carry-over gap that left
+Quest condition disambiguation — filled the v2.7.1+ carry-over gap that left
 QUST records out of `add_conditions`/`remove_conditions` coverage. QUST is the
 sole multi-condition record type in Mutagen.Bethesda.Skyrim 0.53.1 (Phase 1
 schema probe confirmed; the other 15 condition-carrying records are all
@@ -30,10 +30,10 @@ single-`Conditions`). The fix is a single new operator parameter
 `DialogConditions` or `EventConditions` instead of the hardcoded `Conditions`
 slot. v2.9.0's generic Condition-parameter dispatcher composes underneath
 untouched — the per-Condition build pipeline is unchanged; only the carrier
-list lookup changes. All 382 v2.9.0 coverage-smoke cells stay green; the one
+list lookup changes. All 382 v2.9.0 coverage-smoke cells stayed green; the one
 v2.7.1-era cell whose expectation flipped under v2.9.1's contract (`Test 157
 [4.c.01-carry]`: QUST + add_conditions previously asserted Tier D
-`unmatched_operators`; now asserts the new explicit error sentinel) is updated
+`unmatched_operators`; now asserts the new explicit error sentinel) was updated
 in place with a cross-reference to the new canonical Layer 1.D.01 cell.
 
 ### Added — bridge

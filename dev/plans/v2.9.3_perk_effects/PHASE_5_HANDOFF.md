@@ -4,7 +4,7 @@
 **Status:** Complete
 **Date:** 2026-04-29
 **Session length:** ~5h cross-midnight (kicked off 2026-04-28 evening BST, shipped 2026-04-29 BST)
-**Commits made:** `<work-hash>` (work) + this hash-record commit
+**Commits made:** `5cae6a7` (work) + this hash-record commit
 **Live install synced:** Yes — re-synced from `tools/mutagen-bridge/bin/Release/net8.0/publish/` to `<live>/tools/mutagen-bridge/`; SHIP SHA present + verified via `mo2_ping` post-restart
 
 ## Locks (final, inherited from Phase 0/1/2/3)

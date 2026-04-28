@@ -94,3 +94,13 @@ After completing each analysis phase, write a brief summary of findings before s
 ### Editor ID searches
 - `editor_id_filter` on `mo2_query_records` can timeout for common substrings. Use direct FormID lookups when possible.
 - If you need to search by editor ID, use specific prefixes (e.g., `"ST_"` for Sanguine's Trade scripts) rather than broad terms.
+
+### Batch reads (v2.9.2+)
+`mo2_record_detail` accepts three composable optional parameters that collapse read-heavy workflows:
+- **`formids: [list of FormIDs]`** — read N records in one bridge subprocess invocation. Amortizes the ~889 ms subprocess startup across the batch (per-record marginal ~19 ms at N=200). For multi-record reads (>2 records), prefer this over N parallel `mo2_record_detail` calls — each parallel call pays its own startup; one batched call pays once.
+- **`fields: [list of dot-paths]`** — projection. Walker auto-traverses lists and dicts mid-path (e.g. `Voices.Male` reads as the male side of the gendered struct; `Factions.Faction` reads as the Faction sub-property of each Factions entry). Shrinks payload ~80% on big records (RACE full-detail 8.7 kB → ~1.7 kB on a 3–5 path subset).
+- **`expand_links: [list of FormLink-typed paths]`** — inline single-level FormLink expansion at named positions. Wrapper shape `{formid, EditorID, expanded: {...}}`. Eliminates second-tier FormLink-chase round-trips (5.11× speedup on a 3-spell race; scales with link-count).
+
+All three composable on a single call and orthogonal to `resolve_links: true` (which annotates FormID strings recursively, including inside expanded records). Defaults (all three absent) preserve v2.9.1 single-record / full-payload / no-expansion behavior bit-identically.
+
+For "what does this record look like across plugins" (multi-plugin diff), `formids × plugin_names` returns the cross-product (each formid × each plugin = one cell with own per-cell envelope) — useful for building consistency patches across large modlists. Tested cliff-free up to N×M=1000.

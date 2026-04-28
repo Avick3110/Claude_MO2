@@ -4,7 +4,7 @@ All plugin changes are made in the Dev Build copy first. Once tested and stable,
 
 ---
 
-## v2.9.2 — TBD
+## v2.9.2 — 2026-04-28
 
 Read-side efficiency for `mo2_record_detail`. Three composable optional
 parameters cut AI-driven workflow token cost by roughly three orders of
@@ -148,6 +148,23 @@ projection to a 3–5 path subset reduces this by ~80%.
   pre-existing "RecordReader depth limit" entry stays as-is —
   projection narrows the walker so depth-limit hits are less likely
   on projected reads, but the limit itself remains v2.9.x candidate.
+- **Pre-v2.9.2 doc-cleanup pass — ~190 lines cut from Claude-facing
+  docs loaded every session.** Same token-cost-reduction theme as the
+  read-side mechanism, applied to per-session doc load. `CLAUDE.md`
+  trimmed (~184 → ~67 lines, plus v2.9.2 additions): dropped tool/
+  skill enumeration (visible to Claude natively via the MCP tool list
+  and auto-loaded skill descriptions), Skyrim modding reference
+  (training-data covered), and use-case marketing copy; added a
+  `tool_paths.json` pointer so Claude doesn't assume default
+  prerequisite paths when locations vary by install. `KNOWN_ISSUES.md`
+  trimmed (~198 → ~128 lines, plus v2.9.2 additions): dropped the
+  v2.7.1 historical section, the resolved-bugs history table (38
+  entries — CHANGELOG owns this), the v2.8.0 release narrative, and
+  the Phase 4 three-stream verification methodology detail for
+  Outfit/Spell `attach_scripts`. `KNOWLEDGEBASE.md` (12 → 9 lines):
+  removed stale `CLAUDE.md` skill-inventory cross-ref. `dev/README.md`
+  (23 → 19 lines, repo-only — gitignored): reframed as Claude-facing
+  navigational doc.
 
 ### Fixed — bridge (Phase 4)
 
@@ -232,21 +249,6 @@ projection to a 3–5 path subset reduces this by ~80%.
   (3) `MaxDepth` MCP-configurable exposure, (4) cross-call result
   caching. The "missing-master synthetic test fixture" deferral is
   removed (absorbed in Phase 4).
-
----
-
-## Unreleased
-
-Doc cleanup pass — trim per-session token load on Claude-facing docs. No code or behavior changes; will roll into the next installer build.
-
-### Documentation
-
-- **`CLAUDE.md` (184 → 67 lines).** Dropped tool/skill enumeration (already visible to Claude natively via the tool list and auto-loaded skill descriptions), Skyrim modding reference (Claude has this from training), and use-case marketing copy. Added a `tool_paths.json` pointer so Claude doesn't assume default prerequisite paths when locations vary by install.
-- **`KNOWN_ISSUES.md` (198 → 128 lines).** Dropped the v2.7.1 historical section (explicitly self-flagged "preserved for historical context only"; carry-overs already migrated to the v2.8.0 section), the resolved-bugs history table (38 entries — CHANGELOG owns this), the v2.8.0 release narrative ("What's new" subsection + verification trailer), and the Phase 4 three-stream verification methodology detail for Outfit/Spell `attach_scripts` (compressed to one sentence stating the limitation). Inno registry hygiene fix rolled from v2.8 candidate to v2.9 candidate. Section renamed `v2.8.0 patching write surface` → `Patching write surface — current limitations` since the surviving content is current-state, not release notes.
-- **`KNOWLEDGEBASE.md` (12 → 9 lines).** Removed stale `CLAUDE.md` skill-inventory cross-ref (CLAUDE.md no longer carries that inventory after this pass); dropped "Remaining" framing; collapsed single-row table to a bullet.
-- **`dev/README.md` (23 → 19 lines, repo-only — gitignored).** Removed human-contributor onboarding language; reframed as Claude-facing navigational doc with append-only rule promoted to the lead. Disambiguated `archive/` path as sibling-of-repo. Added KNOWN_ISSUES to the "current state" pointer list.
-
-Net: ~190 lines cut from docs loaded every session, plus repo-only dev/README.md tightening.
 
 ---
 

@@ -1036,6 +1036,13 @@ def _handle_record_detail(args: dict, plugin_dir: Path) -> str:
             bridge_request['fields'] = fields
         if expand_links is not None:
             bridge_request['expand_links'] = expand_links
+        # v2.9.2 P4 — Option B cross-master FormLink expansion fix.
+        # Pass the full enabled load-order plugin list so the bridge can
+        # lazy-load on missing-master expansion failures. Only meaningful
+        # when expand_links is supplied; harmless otherwise (the bridge
+        # only consults the list inside ExpandFormLinkValue).
+        if expand_links is not None:
+            bridge_request['available_plugins'] = _build_available_plugins(idx)
         response = _run_bridge_read(bridge, bridge_request)
 
         if not response.get('success'):
@@ -1113,6 +1120,9 @@ def _handle_record_detail(args: dict, plugin_dir: Path) -> str:
         batch_request['fields'] = fields
     if expand_links is not None:
         batch_request['expand_links'] = expand_links
+    # v2.9.2 P4 — see single-formid site above for rationale.
+    if expand_links is not None:
+        batch_request['available_plugins'] = _build_available_plugins(idx)
     response = _run_bridge_read(bridge, batch_request, timeout=max(15, 5 * len(batch_items)))
 
     if not response.get('success'):
@@ -1313,6 +1323,10 @@ def _handle_formids_batch(
         batch_request['fields'] = fields
     if expand_links is not None:
         batch_request['expand_links'] = expand_links
+    # v2.9.2 P4 — Option B cross-master FormLink expansion fix.
+    # See single-formid site in _handle_record_detail for rationale.
+    if expand_links is not None:
+        batch_request['available_plugins'] = _build_available_plugins(idx)
     response = _run_bridge_read(
         bridge, batch_request,
         timeout=max(15, 5 * len(bridge_items)),
@@ -1776,6 +1790,36 @@ def _parse_formid_str(s: str) -> tuple[str | None, int]:
     except ValueError:
         return None, 0
     return parts[0], local_id
+
+
+def _build_available_plugins(idx: LoadOrderIndex) -> list[str]:
+    """v2.9.2 P4 — assemble the load-order plugin disk path list for the
+    bridge's lazy hot-load (Option B fix for cross-master FormLink
+    expansion bug B5).
+
+    The bridge passes filename-match scans against this list when an
+    expansion misses the originating-master in modCache. Mirrors the
+    listing-builder logic of ``build_bridge_load_order_context`` (line
+    ~1733) but flattened to just the path list — the bridge doesn't
+    need master-style metadata for the read-side hot-load (only for
+    write-side master encoding). Plugins listed in the load order but
+    whose disk path the index doesn't know, or whose file is missing,
+    are silently skipped — orphans shouldn't block reads whose
+    FormLinks don't touch them.
+
+    The bridge does the cost gating (lazy load on miss); this just
+    hands over the universe of candidates.
+    """
+    paths: list[str] = []
+    for plugin_name in idx._load_order:
+        pinfo = idx.get_plugin_info(plugin_name)
+        if pinfo is None:
+            continue
+        disk_path = pinfo.path
+        if not disk_path or not os.path.exists(disk_path):
+            continue
+        paths.append(disk_path.replace('\\', '/'))
+    return paths
 
 
 def _find_edid(idx: LoadOrderIndex, origin: str, local_id: int) -> str | None:

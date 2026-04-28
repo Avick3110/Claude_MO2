@@ -170,7 +170,7 @@ public class RecordReader
 
             foreach (var item in request.Records)
             {
-                response.Records.Add(ReadOne(item, request.MaxDepth, modCache, request.Fields, request.ExpandLinks));
+                response.Records.Add(ReadOne(item, request.MaxDepth, modCache, request.Fields, request.ExpandLinks, request.AvailablePlugins));
             }
         }
         finally
@@ -189,7 +189,8 @@ public class RecordReader
         int maxDepth,
         Dictionary<string, ISkyrimModGetter> modCache,
         List<string>? fields = null,
-        List<string>? expandLinks = null)
+        List<string>? expandLinks = null,
+        List<string>? availablePlugins = null)
     {
         try
         {
@@ -232,7 +233,8 @@ public class RecordReader
                     currentPath: "",
                     depth: 0,
                     maxDepth: maxDepth,
-                    modCache: modCache);
+                    modCache: modCache,
+                    availablePlugins: availablePlugins);
             }
             else
             {
@@ -352,7 +354,8 @@ public class RecordReader
                         currentPath: "",
                         depth: 0,
                         maxDepth: request.MaxDepth,
-                        modCache: modCache);
+                        modCache: modCache,
+                        availablePlugins: request.AvailablePlugins);
                 }
                 else
                 {
@@ -786,7 +789,8 @@ public class RecordReader
         string currentPath,
         int depth,
         int maxDepth,
-        Dictionary<string, ISkyrimModGetter> modCache)
+        Dictionary<string, ISkyrimModGetter> modCache,
+        List<string>? availablePlugins = null)
     {
         // Bit-identical fall-through when no projection or expansion
         // requested. Preserves v2.9.1 behavior end-to-end.
@@ -813,7 +817,7 @@ public class RecordReader
         {
             if (hasExpansion && PathMatchesAny(currentPath, expandLinks!))
             {
-                return ExpandFormLinkValue(link, fields, expandLinks, currentPath, depth, maxDepth, modCache);
+                return ExpandFormLinkValue(link, fields, expandLinks, currentPath, depth, maxDepth, modCache, availablePlugins);
             }
             if (link.FormKeyNullable.HasValue && !link.FormKeyNullable.Value.IsNull)
                 return FormIdHelper.Format(link.FormKeyNullable.Value);
@@ -852,7 +856,7 @@ public class RecordReader
             var items = new List<object?>();
             foreach (var item in enumerable)
             {
-                items.Add(RenderValueProjected(item, fields, expandLinks, currentPath, depth + 1, maxDepth, modCache));
+                items.Add(RenderValueProjected(item, fields, expandLinks, currentPath, depth + 1, maxDepth, modCache, availablePlugins));
             }
             return items;
         }
@@ -902,7 +906,7 @@ public class RecordReader
                 {
                     if (pval is IFormLinkGetter scalarLink)
                     {
-                        nested[prop.Name] = ExpandFormLinkValue(scalarLink, fields, expandLinks, childPath, depth + 1, maxDepth, modCache);
+                        nested[prop.Name] = ExpandFormLinkValue(scalarLink, fields, expandLinks, childPath, depth + 1, maxDepth, modCache, availablePlugins);
                         continue;
                     }
                     if (pval is IEnumerable listLink && !(pval is string))
@@ -912,7 +916,7 @@ public class RecordReader
                         {
                             if (elem is IFormLinkGetter el)
                             {
-                                expanded.Add(ExpandFormLinkValue(el, fields, expandLinks, childPath, depth + 2, maxDepth, modCache));
+                                expanded.Add(ExpandFormLinkValue(el, fields, expandLinks, childPath, depth + 2, maxDepth, modCache, availablePlugins));
                             }
                             else
                             {
@@ -922,7 +926,7 @@ public class RecordReader
                                 // into the element with the same expand_links
                                 // so nested FormLink sub-properties get
                                 // expanded at the named sub-path.
-                                expanded.Add(RenderValueProjected(elem, fields, expandLinks, childPath, depth + 2, maxDepth, modCache));
+                                expanded.Add(RenderValueProjected(elem, fields, expandLinks, childPath, depth + 2, maxDepth, modCache, availablePlugins));
                             }
                         }
                         nested[prop.Name] = expanded;
@@ -930,7 +934,7 @@ public class RecordReader
                     }
                 }
 
-                var rendered = RenderValueProjected(pval, fields, expandLinks, childPath, depth + 1, maxDepth, modCache);
+                var rendered = RenderValueProjected(pval, fields, expandLinks, childPath, depth + 1, maxDepth, modCache, availablePlugins);
                 if (rendered != null)
                 {
                     nested[prop.Name] = rendered;
@@ -1000,7 +1004,8 @@ public class RecordReader
         string currentPath,
         int depth,
         int maxDepth,
-        Dictionary<string, ISkyrimModGetter> modCache)
+        Dictionary<string, ISkyrimModGetter> modCache,
+        List<string>? availablePlugins = null)
     {
         // Null-link case: render uniform-shape wrapper with formid=null.
         if (!link.FormKeyNullable.HasValue || link.FormKeyNullable.Value.IsNull)
@@ -1017,11 +1022,14 @@ public class RecordReader
         var formIdStr = FormIdHelper.Format(formKey);
 
         // Search modCache for the linked record. The cache is the set of
-        // plugins loaded for the current bridge invocation; cross-master
-        // resolution requires those masters to be loaded in the cache.
-        // Single-plugin reads typically only carry one cache entry —
-        // resolution will fail for cross-master FormLinks unless the
-        // wrapper happens to be using the multi-plugin batch path.
+        // plugins loaded for the current bridge invocation. Cross-master
+        // resolution requires the originating master to be loaded; if it
+        // isn't, v2.9.2 P4 (Option B fix) falls through to scan
+        // availablePlugins for a path whose ModKey.FileName matches the
+        // linked FormID's originating master, hot-loads it on demand,
+        // and retries the lookup. Lazy: pays no cost when the FormLink
+        // resolves in-master, pays one Mutagen plugin load when the
+        // miss path fires (then cached for the rest of the batch).
         IMajorRecordGetter? linkedRecord = null;
         foreach (var mod in modCache.Values)
         {
@@ -1036,6 +1044,51 @@ public class RecordReader
                 if (r.FormKey == formKey) { linkedRecord = r; break; }
             }
             if (linkedRecord != null) break;
+        }
+
+        // v2.9.2 P4 — Option B lazy hot-load. If the in-cache scan
+        // missed AND the wrapper supplied availablePlugins, try to find
+        // the originating master's path in the list and load it.
+        if (linkedRecord == null && availablePlugins != null && availablePlugins.Count > 0)
+        {
+            var targetFileName = formKey.ModKey.FileName.String;
+            foreach (var pluginPath in availablePlugins)
+            {
+                if (string.IsNullOrEmpty(pluginPath))
+                    continue;
+                // Match on the leaf filename — case-insensitive — so the
+                // wrapper can pass full disk paths and we match the
+                // originating master's filename component without
+                // needing to know each plugin's ModKey ahead of time.
+                var leaf = Path.GetFileName(pluginPath);
+                if (!string.Equals(leaf, targetFileName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (modCache.ContainsKey(pluginPath))
+                    continue; // already loaded under this exact path key
+                if (!File.Exists(pluginPath))
+                    continue;
+                ISkyrimModGetter? hotMod;
+                try
+                {
+                    hotMod = SkyrimMod.CreateFromBinaryOverlay(pluginPath, SkyrimRelease.SkyrimSE);
+                }
+                catch
+                {
+                    // Plugin failed to load (corrupt header, etc.) —
+                    // skip and let the missing-master error surface.
+                    continue;
+                }
+                modCache[pluginPath] = hotMod;
+                foreach (var r in hotMod.EnumerateMajorRecords())
+                {
+                    if (r.FormKey == formKey) { linkedRecord = r; break; }
+                }
+                // Don't break the outer loop on load — multiple
+                // available_plugins entries could share a leaf name
+                // (rare but possible in stripped/duplicate installs);
+                // first match wins per the in-cache scan ordering.
+                if (linkedRecord != null) break;
+            }
         }
 
         if (linkedRecord == null)

@@ -9283,18 +9283,133 @@ else Skip("4.c.01-carry", "no QUST");
         });
 
     // Test 424 (4.dsl.06) — missing-master expansion. Phase 1 noted vanilla
-    // Skyrim has no naturally-occurring missing-master FormLinks; building
-    // a synthetic in-memory plugin via Mutagen is heavyweight. Phase 2 cell:
-    // probe the same path against a record whose FormLink targets a master
-    // not loaded into the bridge (single-plugin read of a RACE whose
-    // ActorEffect points at a SPEL in a non-loaded master would surface the
-    // missing-master shape). Vanilla Skyrim.esm RACE.ActorEffect SPEL targets
-    // are all in Skyrim.esm itself (single-plugin probe loads only Skyrim.esm
-    // so the SPEL targets resolve cleanly — wrapper-form populated).
-    // Layer 4.dsl.06's contract is "uniform shape per Q2": when the target
-    // is missing, the wrapper carries error: "...". Phase 1's record-shape
-    // sweep confirmed no vanilla-only missing-master case. SKIP-with-reason.
-    Skip("4.dsl.06", "no naturally-occurring missing-master FormLink in vanilla Skyrim.esm; synthetic fixture deferred to v2.9.x — wrapper-form null-safety covered by NPC_.DeathItem shape-preserving probe (4.dsl.05)");
+    // Skyrim has no naturally-occurring missing-master FormLinks; Phase 2
+    // registered SKIP-with-reason. Phase 4 (v2.9.2) absorbs the synthetic
+    // fixture: build an override plugin whose RACE.ActorEffect references
+    // a SPEL whose originating master is a name we never write to disk
+    // ("GhostMaster.esm"). Pass available_plugins WITHOUT GhostMaster.esm
+    // so the bridge's lazy hot-load can't resolve it. Verifies the Q2
+    // uniform null-safety wrapper-form contract: {formid, EditorID:null,
+    // expanded:null, error: "..."}.
+    {
+        var p4MissDir = Path.Combine(Path.GetTempPath(), "coverage-smoke-p4-missing-master");
+        if (Directory.Exists(p4MissDir)) Directory.Delete(p4MissDir, recursive: true);
+        Directory.CreateDirectory(p4MissDir);
+        var orphanModKey = ModKey.FromNameAndExtension("CSP4Orphan.esp");
+        var ghostKey = ModKey.FromNameAndExtension("GhostMaster.esm");
+        var ghostSpellKey = new FormKey(ghostKey, 0x900);
+        var orphanMod = new SkyrimMod(orphanModKey, SkyrimRelease.SkyrimSE);
+        var orphanRace = new Race(new FormKey(orphanModKey, 0x802), SkyrimRelease.SkyrimSE)
+        {
+            EditorID = "CSP4OrphanRace",
+        };
+        orphanRace.ActorEffect = new Noggog.ExtendedList<IFormLinkGetter<ISpellRecordGetter>>
+        {
+            new FormLink<ISpellRecordGetter>(ghostSpellKey),
+        };
+        orphanMod.Races.Add(orphanRace);
+        var orphanPath = Path.Combine(p4MissDir, "CSP4Orphan.esp").Replace('\\', '/');
+        orphanMod.WriteToBinary(orphanPath);
+        var orphanFid = $"CSP4Orphan.esp:{orphanRace.FormKey.ID:X6}";
+
+        RunCell(424, "4.dsl.06", "missing-master FormLink → uniform null-safety wrapper",
+            new
+            {
+                command = "read_record",
+                plugin_path = orphanPath,
+                formid = orphanFid,
+                fields = new[] { "ActorEffect" },
+                expand_links = new[] { "ActorEffect" },
+                // available_plugins supplied but does NOT include GhostMaster.esm.
+                available_plugins = new[] { orphanPath },
+            },
+            root =>
+            {
+                if (!root.GetProperty("success").GetBoolean()) throw new Exception("success false");
+                var ae = root.GetProperty("fields").GetProperty("ActorEffect");
+                if (ae.GetArrayLength() != 1) throw new Exception("ActorEffect length != 1");
+                var entry = ae[0];
+                if (!entry.TryGetProperty("error", out _)) throw new Exception("missing error key");
+                if (!entry.TryGetProperty("EditorID", out var edid) || edid.ValueKind != JsonValueKind.Null)
+                    throw new Exception("EditorID not null");
+                if (!entry.TryGetProperty("expanded", out var exp) || exp.ValueKind != JsonValueKind.Null)
+                    throw new Exception("expanded not null");
+                if (!entry.TryGetProperty("formid", out var fid) || fid.ValueKind != JsonValueKind.String)
+                    throw new Exception("formid not string");
+                if (!fid.GetString()!.Contains("GhostMaster.esm", StringComparison.OrdinalIgnoreCase))
+                    throw new Exception("formid does not mention GhostMaster.esm");
+            });
+
+        try { Directory.Delete(p4MissDir, recursive: true); } catch { /* best-effort */ }
+    }
+
+    // === Layer 1.P (continued) — Cross-master positive cell (v2.9.2 P4) ===
+    //
+    // Test 425 (1.P.expand.crossmaster) — synthetic two-plugin fixture for
+    // the v2.9.2 P4 Option B fix. Master plugin carries a SPEL; override
+    // plugin's RACE.ActorEffect references it. read_record against the
+    // override with available_plugins=[master, override] → cross-master
+    // expansion resolves (the bridge lazy-hot-loads the master via
+    // available_plugins on the in-cache miss).
+    {
+        var p4PosDir = Path.Combine(Path.GetTempPath(), "coverage-smoke-p4-crossmaster-positive");
+        if (Directory.Exists(p4PosDir)) Directory.Delete(p4PosDir, recursive: true);
+        Directory.CreateDirectory(p4PosDir);
+
+        var posMasterKey = ModKey.FromNameAndExtension("CSP4Master.esp");
+        var posOverrideKey = ModKey.FromNameAndExtension("CSP4Override.esp");
+
+        var posMasterMod = new SkyrimMod(posMasterKey, SkyrimRelease.SkyrimSE);
+        var posMasterSpell = new Spell(new FormKey(posMasterKey, 0x800), SkyrimRelease.SkyrimSE)
+        {
+            EditorID = "CSP4MasterSpell",
+        };
+        posMasterMod.Spells.Add(posMasterSpell);
+
+        var posOverrideMod = new SkyrimMod(posOverrideKey, SkyrimRelease.SkyrimSE);
+        var posOverrideRace = new Race(new FormKey(posOverrideKey, 0x801), SkyrimRelease.SkyrimSE)
+        {
+            EditorID = "CSP4OverrideRace",
+        };
+        posOverrideRace.ActorEffect = new Noggog.ExtendedList<IFormLinkGetter<ISpellRecordGetter>>
+        {
+            new FormLink<ISpellRecordGetter>(posMasterSpell.FormKey),
+        };
+        posOverrideMod.Races.Add(posOverrideRace);
+
+        var posMasterPath = Path.Combine(p4PosDir, "CSP4Master.esp").Replace('\\', '/');
+        var posOverridePath = Path.Combine(p4PosDir, "CSP4Override.esp").Replace('\\', '/');
+        posMasterMod.WriteToBinary(posMasterPath);
+        posOverrideMod.WriteToBinary(posOverridePath);
+        var posRaceFid = $"CSP4Override.esp:{posOverrideRace.FormKey.ID:X6}";
+
+        RunCell(425, "1.P.expand.crossmaster", "cross-master FormLink expansion via available_plugins (Option B)",
+            new
+            {
+                command = "read_record",
+                plugin_path = posOverridePath,
+                formid = posRaceFid,
+                fields = new[] { "ActorEffect" },
+                expand_links = new[] { "ActorEffect" },
+                available_plugins = new[] { posMasterPath, posOverridePath },
+            },
+            root =>
+            {
+                if (!root.GetProperty("success").GetBoolean()) throw new Exception("success false");
+                var ae = root.GetProperty("fields").GetProperty("ActorEffect");
+                if (ae.GetArrayLength() != 1) throw new Exception("ActorEffect length != 1");
+                var entry = ae[0];
+                if (entry.TryGetProperty("error", out _)) throw new Exception("unexpected error key");
+                if (!entry.TryGetProperty("EditorID", out var edid) || edid.GetString() != "CSP4MasterSpell")
+                    throw new Exception("wrapper EditorID != CSP4MasterSpell");
+                if (!entry.TryGetProperty("expanded", out var exp) || exp.ValueKind != JsonValueKind.Object)
+                    throw new Exception("expanded not object");
+                if (!exp.TryGetProperty("EditorID", out var innerEdid) || innerEdid.GetString() != "CSP4MasterSpell")
+                    throw new Exception("expanded.EditorID != CSP4MasterSpell");
+            });
+
+        try { Directory.Delete(p4PosDir, recursive: true); } catch { /* best-effort */ }
+    }
 }
 // ── /v2.9.2 P2 cells ──
 

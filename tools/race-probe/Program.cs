@@ -4828,11 +4828,312 @@ int p2ReadSideFailures = 0;
 }
 Console.WriteLine($"=== v2.9.2 P2 read-side functional probes: {(p2ReadSideFailures == 0 ? "ALL PASS" : $"{p2ReadSideFailures} FAILURE(S)")} ===");
 
+// ─── v2.9.2 P4 — Cross-master FormLink expansion fix (Option B) ───
+//
+// Phase 3 surfaced bug B5: ExpandFormLinkValue's filename-match scan
+// only sees plugins explicitly loaded into modCache, so a FormLink
+// whose originating master is not in the cache returns
+// "FormID target not in load order". Phase 4 (Option B fix): the
+// wrapper passes the full enabled load-order plugin path list as
+// `available_plugins`; the bridge lazy-loads the matching plugin on
+// the first miss for that originating-master filename.
+//
+// Synthetic two-plugin fixture exercises the fix end-to-end via
+// bridge subprocess: build a master with a SPEL, build an override
+// plugin with a RACE whose ActorEffect points at the master's SPEL,
+// write both to disk, then probe the bridge two ways:
+//
+//   pre-fix:  request without available_plugins -> missing-master
+//             error preserved (regression test for absent-list case).
+//   post-fix: request with available_plugins=[master path] ->
+//             cross-master expansion resolves.
+//
+// Phase 4 also absorbs the deferred 4.dsl.06 missing-master synthetic
+// fixture: when the FormLink targets a master that isn't in the
+// available_plugins list (or the file is missing), the wrapper-form
+// uniform-shape error envelope per Q2 lock surfaces (formid populated,
+// EditorID null, expanded null, error string set).
+
+Section("v2.9.2 P4 — Cross-master FormLink expansion (Option B fix)");
+
+int p4ReadSideFailures = 0;
+{
+    var thisDirP4 = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location)!;
+    var bridgeExeP4 = Path.GetFullPath(Path.Combine(thisDirP4,
+        "..", "..", "..", "..", "mutagen-bridge", "bin", "Release", "net8.0", "mutagen-bridge.exe"));
+    bool haveBridgeP4 = File.Exists(bridgeExeP4);
+    if (!haveBridgeP4)
+    {
+        Console.WriteLine($"  SKIP P4: mutagen-bridge.exe not found at {bridgeExeP4}");
+    }
+
+    if (haveBridgeP4)
+    {
+        // Subprocess invocation helper (same shape as P2's RunBridgeFn).
+        (string Stdout, int ExitCode) RunBridgeP4(object req)
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(bridgeExeP4)
+            {
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            var proc = System.Diagnostics.Process.Start(psi)!;
+            proc.StandardInput.Write(System.Text.Json.JsonSerializer.Serialize(req));
+            proc.StandardInput.Close();
+            var stdout = proc.StandardOutput.ReadToEnd();
+            var _stderr = proc.StandardError.ReadToEnd();
+            proc.WaitForExit();
+            return (stdout, proc.ExitCode);
+        }
+
+        void AssertP4(string label, Func<bool> check)
+        {
+            try
+            {
+                if (check())
+                    Console.WriteLine($"  [PASS] {label}");
+                else
+                {
+                    Console.WriteLine($"  [FAIL] {label}");
+                    p4ReadSideFailures++;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  [FAIL] {label}: {ex.GetType().Name}: {ex.Message}");
+                p4ReadSideFailures++;
+            }
+        }
+
+        // ── Build the synthetic two-plugin fixture ─────────────────
+        //
+        // Master: single SPEL with EditorID = "P4MasterSpell".
+        // Override: single RACE with EditorID = "P4OverrideRace" and
+        //           ActorEffect = [<FormLink to the master's SPEL>].
+        // Both written to %TEMP% via Mutagen's WriteToBinary.
+
+        var p4Dir = Path.Combine(Path.GetTempPath(), "race-probe-p4-crossmaster");
+        if (Directory.Exists(p4Dir)) Directory.Delete(p4Dir, recursive: true);
+        Directory.CreateDirectory(p4Dir);
+
+        var masterModKey = ModKey.FromNameAndExtension("P4Master.esp");
+        var overrideModKey = ModKey.FromNameAndExtension("P4Override.esp");
+
+        // Master plugin with a SPEL the override will reference.
+        var masterMod = new SkyrimMod(masterModKey, SkyrimRelease.SkyrimSE);
+        var masterSpell = new Spell(new FormKey(masterModKey, 0x800), SkyrimRelease.SkyrimSE)
+        {
+            EditorID = "P4MasterSpell",
+        };
+        masterMod.Spells.Add(masterSpell);
+
+        // Override plugin with a RACE whose ActorEffect references the master's SPEL.
+        var overrideMod = new SkyrimMod(overrideModKey, SkyrimRelease.SkyrimSE);
+        var overrideRace = new Race(new FormKey(overrideModKey, 0x801), SkyrimRelease.SkyrimSE)
+        {
+            EditorID = "P4OverrideRace",
+        };
+        overrideRace.ActorEffect = new Noggog.ExtendedList<IFormLinkGetter<ISpellRecordGetter>>
+        {
+            new FormLink<ISpellRecordGetter>(masterSpell.FormKey),
+        };
+        overrideMod.Races.Add(overrideRace);
+
+        var masterPath = Path.Combine(p4Dir, "P4Master.esp").Replace('\\', '/');
+        var overridePath = Path.Combine(p4Dir, "P4Override.esp").Replace('\\', '/');
+        masterMod.WriteToBinary(masterPath);
+        overrideMod.WriteToBinary(overridePath);
+
+        Console.WriteLine($"  fixture: master={masterPath}");
+        Console.WriteLine($"  fixture: override={overridePath}");
+
+        var raceFidStr = $"P4Override.esp:{overrideRace.FormKey.ID:X6}";
+
+        // ── Probe 1 (pre-fix posture): request WITHOUT available_plugins ──
+        //
+        // Expected: cross-master expansion fails with the original missing-
+        // master error envelope (this preserves the v2.9.2 P2 default-null
+        // behavior bit-identically — opt-in via available_plugins).
+        Console.WriteLine();
+        Console.WriteLine("  ── Probe 1 [pre-fix posture]: read_record without available_plugins ──");
+        {
+            var req = new
+            {
+                command = "read_record",
+                plugin_path = overridePath,
+                formid = raceFidStr,
+                fields = new[] { "ActorEffect" },
+                expand_links = new[] { "ActorEffect" },
+            };
+            var r = RunBridgeP4(req);
+            using var doc = System.Text.Json.JsonDocument.Parse(r.Stdout);
+            var root = doc.RootElement;
+            AssertP4("top-level success: true", () => root.GetProperty("success").GetBoolean());
+            AssertP4("ActorEffect array length 1", () =>
+                root.GetProperty("fields").GetProperty("ActorEffect").GetArrayLength() == 1);
+            AssertP4("[pre-fix] cross-master FormLink wrapper has error string", () =>
+            {
+                var entry = root.GetProperty("fields").GetProperty("ActorEffect")[0];
+                if (!entry.TryGetProperty("error", out var errEl)) return false;
+                var s = errEl.GetString() ?? "";
+                return s.Contains("not in load order", StringComparison.OrdinalIgnoreCase);
+            });
+            AssertP4("[pre-fix] expanded is null when missing-master", () =>
+            {
+                var entry = root.GetProperty("fields").GetProperty("ActorEffect")[0];
+                if (!entry.TryGetProperty("expanded", out var expEl)) return false;
+                return expEl.ValueKind == System.Text.Json.JsonValueKind.Null;
+            });
+            AssertP4("[pre-fix] formid still populated when missing-master (Q2 uniform shape)", () =>
+            {
+                var entry = root.GetProperty("fields").GetProperty("ActorEffect")[0];
+                if (!entry.TryGetProperty("formid", out var fidEl)) return false;
+                if (fidEl.ValueKind != System.Text.Json.JsonValueKind.String) return false;
+                var s = fidEl.GetString() ?? "";
+                return s.Contains("P4Master.esp", StringComparison.OrdinalIgnoreCase);
+            });
+        }
+
+        // ── Probe 2 (post-fix): request WITH available_plugins → resolves ──
+        //
+        // Expected: cross-master expansion now resolves; the wrapper carries
+        // the master SPEL's EditorID + an expanded inline detail dict.
+        Console.WriteLine();
+        Console.WriteLine("  ── Probe 2 [post-fix]: read_record with available_plugins → resolves ──");
+        {
+            var req = new
+            {
+                command = "read_record",
+                plugin_path = overridePath,
+                formid = raceFidStr,
+                fields = new[] { "ActorEffect" },
+                expand_links = new[] { "ActorEffect" },
+                available_plugins = new[] { masterPath, overridePath },
+            };
+            var r = RunBridgeP4(req);
+            using var doc = System.Text.Json.JsonDocument.Parse(r.Stdout);
+            var root = doc.RootElement;
+            AssertP4("top-level success: true", () => root.GetProperty("success").GetBoolean());
+            AssertP4("ActorEffect array length 1", () =>
+                root.GetProperty("fields").GetProperty("ActorEffect").GetArrayLength() == 1);
+            AssertP4("[post-fix] no error key on the wrapper", () =>
+            {
+                var entry = root.GetProperty("fields").GetProperty("ActorEffect")[0];
+                return !entry.TryGetProperty("error", out _);
+            });
+            AssertP4("[post-fix] EditorID == P4MasterSpell", () =>
+            {
+                var entry = root.GetProperty("fields").GetProperty("ActorEffect")[0];
+                if (!entry.TryGetProperty("EditorID", out var edidEl)) return false;
+                return edidEl.GetString() == "P4MasterSpell";
+            });
+            AssertP4("[post-fix] expanded is non-null and an object dict", () =>
+            {
+                var entry = root.GetProperty("fields").GetProperty("ActorEffect")[0];
+                if (!entry.TryGetProperty("expanded", out var expEl)) return false;
+                return expEl.ValueKind == System.Text.Json.JsonValueKind.Object;
+            });
+            AssertP4("[post-fix] expanded.EditorID == P4MasterSpell (matches the master record)", () =>
+            {
+                var entry = root.GetProperty("fields").GetProperty("ActorEffect")[0];
+                var expanded = entry.GetProperty("expanded");
+                if (!expanded.TryGetProperty("EditorID", out var edidEl)) return false;
+                return edidEl.GetString() == "P4MasterSpell";
+            });
+        }
+
+        // ── Probe 3 [4.dsl.06 absorption]: missing-master synthetic ──
+        //
+        // The 4.dsl.06 cell was SKIP-with-reason in Phase 2 because vanilla
+        // Skyrim has no naturally-occurring missing-master FormLinks. Phase
+        // 4 absorbs that gap: build a fresh override pointing at a master
+        // that ISN'T included in available_plugins (so the lazy hot-load
+        // can't find a matching path). Verifies the uniform null-safety
+        // wrapper-form contract per Q2: {formid, EditorID:null,
+        // expanded:null, error: ...}. Distinct from probe 1's "no
+        // available_plugins at all" — here the parameter IS supplied but
+        // the target master simply isn't in the list.
+        Console.WriteLine();
+        Console.WriteLine("  ── Probe 3 [4.dsl.06 absorption]: target master absent from available_plugins ──");
+        {
+            // Build a NEW override plugin whose RACE.ActorEffect points
+            // at a SPEL whose originating master is named "GhostMaster.esm"
+            // — a name we never write to disk.
+            var ghostKey = ModKey.FromNameAndExtension("GhostMaster.esm");
+            var ghostSpellKey = new FormKey(ghostKey, 0x900);
+
+            var orphanModKey = ModKey.FromNameAndExtension("P4Orphan.esp");
+            var orphanMod = new SkyrimMod(orphanModKey, SkyrimRelease.SkyrimSE);
+            var orphanRace = new Race(new FormKey(orphanModKey, 0x802), SkyrimRelease.SkyrimSE)
+            {
+                EditorID = "P4OrphanRace",
+            };
+            orphanRace.ActorEffect = new Noggog.ExtendedList<IFormLinkGetter<ISpellRecordGetter>>
+            {
+                new FormLink<ISpellRecordGetter>(ghostSpellKey),
+            };
+            orphanMod.Races.Add(orphanRace);
+            var orphanPath = Path.Combine(p4Dir, "P4Orphan.esp").Replace('\\', '/');
+            orphanMod.WriteToBinary(orphanPath);
+
+            var orphanFidStr = $"P4Orphan.esp:{orphanRace.FormKey.ID:X6}";
+
+            var req = new
+            {
+                command = "read_record",
+                plugin_path = orphanPath,
+                formid = orphanFidStr,
+                fields = new[] { "ActorEffect" },
+                expand_links = new[] { "ActorEffect" },
+                // available_plugins supplied but does NOT include GhostMaster.esm.
+                available_plugins = new[] { orphanPath, masterPath },
+            };
+            var r = RunBridgeP4(req);
+            using var doc = System.Text.Json.JsonDocument.Parse(r.Stdout);
+            var root = doc.RootElement;
+            AssertP4("top-level success: true (per-record envelope handles miss)", () =>
+                root.GetProperty("success").GetBoolean());
+            AssertP4("[4.dsl.06] ActorEffect entry has error key", () =>
+            {
+                var entry = root.GetProperty("fields").GetProperty("ActorEffect")[0];
+                return entry.TryGetProperty("error", out _);
+            });
+            AssertP4("[4.dsl.06] EditorID is null on missing-master wrapper", () =>
+            {
+                var entry = root.GetProperty("fields").GetProperty("ActorEffect")[0];
+                if (!entry.TryGetProperty("EditorID", out var edidEl)) return false;
+                return edidEl.ValueKind == System.Text.Json.JsonValueKind.Null;
+            });
+            AssertP4("[4.dsl.06] expanded is null on missing-master wrapper", () =>
+            {
+                var entry = root.GetProperty("fields").GetProperty("ActorEffect")[0];
+                if (!entry.TryGetProperty("expanded", out var expEl)) return false;
+                return expEl.ValueKind == System.Text.Json.JsonValueKind.Null;
+            });
+            AssertP4("[4.dsl.06] formid string mentions GhostMaster.esm (Q2 uniform shape: formid present)", () =>
+            {
+                var entry = root.GetProperty("fields").GetProperty("ActorEffect")[0];
+                if (!entry.TryGetProperty("formid", out var fidEl)) return false;
+                if (fidEl.ValueKind != System.Text.Json.JsonValueKind.String) return false;
+                var s = fidEl.GetString() ?? "";
+                return s.Contains("GhostMaster.esm", StringComparison.OrdinalIgnoreCase);
+            });
+        }
+
+        // Cleanup the synthetic fixture directory — best-effort.
+        try { Directory.Delete(p4Dir, recursive: true); } catch { /* best-effort */ }
+    }
+}
+Console.WriteLine($"=== v2.9.2 P4 cross-master FormLink expansion fix: {(p4ReadSideFailures == 0 ? "ALL PASS" : $"{p4ReadSideFailures} FAILURE(S)")} ===");
+
 Console.WriteLine();
-int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures + p2dFailures + p4InfoFailures + p1MultiCondFailures + p2QustFailures + p1ReadSideFailures + p2ReadSideFailures;
+int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures + p2dFailures + p4InfoFailures + p1MultiCondFailures + p2QustFailures + p1ReadSideFailures + p2ReadSideFailures + p4ReadSideFailures;
 if (totalFailures > 0)
 {
-    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C + {p2dFailures} v2.9 P2D + {p4InfoFailures} v2.9 P4-INFO + {p1MultiCondFailures} v2.9.1 P1 multi-cond sweep + {p2QustFailures} v2.9.1 P2 quest-cond + {p1ReadSideFailures} v2.9.2 P1 read-side perf-and-shape + {p2ReadSideFailures} v2.9.2 P2 read-side functional) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
+    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C + {p2dFailures} v2.9 P2D + {p4InfoFailures} v2.9 P4-INFO + {p1MultiCondFailures} v2.9.1 P1 multi-cond sweep + {p2QustFailures} v2.9.1 P2 quest-cond + {p1ReadSideFailures} v2.9.2 P1 read-side perf-and-shape + {p2ReadSideFailures} v2.9.2 P2 read-side functional + {p4ReadSideFailures} v2.9.2 P4 cross-master) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
     Environment.Exit(1);
 }
 Console.WriteLine("=== probe complete ===");

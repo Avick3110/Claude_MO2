@@ -149,6 +149,90 @@ projection to a 3–5 path subset reduces this by ~80%.
   projection narrows the walker so depth-limit hits are less likely
   on projected reads, but the limit itself remains v2.9.x candidate.
 
+### Fixed — bridge (Phase 4)
+
+- **Cross-master FormLink expansion (Option B fix; bug B5).** Phase 3
+  surfaced live on Authoria: `mo2_record_detail` with `expand_links`
+  on a record whose winning plugin is a mod ESP whose FormLinks point
+  back into vanilla Skyrim.esm-originated records returned the missing-
+  master error envelope (`{formid, EditorID:null, expanded:null,
+  error: "FormID target not in load order"}`) for cross-master targets.
+  The bridge's `RecordReader.cs:ExpandFormLinkValue` walker only saw
+  plugins explicitly loaded into `modCache` for the current invocation
+  (typically just the parent record's winning plugin), so the
+  originating-master filename match always failed.
+  - **Fix shape:** new optional `available_plugins: [...]` parameter
+    on `ReadRequest` + `ReadBatchRequest`. The Python wrapper passes
+    the full enabled load-order plugin disk path list (built from
+    `idx._load_order` via the new `_build_available_plugins` helper)
+    when `expand_links` is supplied. Bridge's `ExpandFormLinkValue`
+    falls through to `availablePlugins` on the in-cache miss: scans
+    the list for a path whose leaf filename matches the linked
+    FormID's originating master, hot-loads the plugin via
+    `SkyrimMod.CreateFromBinaryOverlay`, caches in `modCache`, retries
+    the lookup. **Lazy** — pays zero cost when a FormLink resolves
+    in-master; pays one Mutagen plugin load when the miss path fires
+    (then cached for the rest of the batch). Backward-compatible: when
+    `available_plugins` is null the original missing-master error
+    surfaces unchanged (and when `expand_links` itself is absent, the
+    wrapper doesn't forward `available_plugins` at all — zero payload
+    overhead on non-expansion calls).
+  - **Architecturally-correct foundation for future override-aware
+    expansion** (the v2.9.x candidate where `ExpandFormLinkValue`
+    returns the load-order winner via Mutagen's `LinkCache.TryResolve`
+    instead of the originating-master version): under Option B, the
+    future change is purely a lookup-logic swap — the modCache loading
+    foundation is already here.
+  - **Wrapper sites updated** (3): `_handle_record_detail` single-formid
+    path, `_handle_record_detail` `plugin_names` batch path,
+    `_handle_formids_batch` cross-product path. Each forwards
+    `available_plugins` only when `expand_links` is present (avoids
+    paying ~180 KB JSON payload overhead on non-expansion calls in the
+    full-modlist case of ~3000 plugins).
+- **4.dsl.06 missing-master synthetic test fixture absorbed.** Phase 1
+  registered the cell as SKIP-with-reason ("vanilla Skyrim has no
+  naturally-occurring missing-master FormLinks; synthetic fixture
+  deferred to v2.9.x"). Phase 4 absorbed: builds an in-memory override
+  plugin via Mutagen with `RACE.ActorEffect` referencing a SPEL whose
+  originating master is `GhostMaster.esm` (a name never written to
+  disk). Verifies the Q2 uniform null-safety wrapper-form contract
+  end-to-end (`{formid, EditorID:null, expanded:null, error: ...}`).
+  Cell flips from SKIP to PASS within the existing 424-cell count;
+  total coverage-smoke = 425 cells (424 + new positive cross-master
+  cell `1.P.expand.crossmaster`).
+- **race-probe** — new `=== v2.9.2 P4 — Cross-master FormLink expansion
+  (Option B fix) ===` section with synthetic two-plugin fixture: 3
+  probes total. Probe 1 (pre-fix posture) confirms the missing-master
+  error envelope still surfaces when `available_plugins` is absent
+  (regression test for backward compatibility). Probe 2 (post-fix)
+  confirms cross-master expansion resolves when `available_plugins`
+  carries the originating-master path. Probe 3 (4.dsl.06 absorption)
+  confirms the uniform null-safety shape when the target master isn't
+  in `available_plugins` at all. All 3 PASS.
+- **End-to-end MCP→bridge smoke harness extended** at
+  `<workspace>/scratch/v2.9.2-phase-4-smoke.py` (extends Phase 2's six
+  paths). Each path now also asserts `available_plugins` is forwarded
+  iff `expand_links` is present — verifies the wrapper-side parsimony
+  (no payload overhead on non-expansion calls) plus the three forwarding
+  sites (single-formid, plugin_names batch, cross-product). All 6
+  paths PASS.
+
+### Documentation (Phase 4)
+
+- **`KNOWN_ISSUES.md`** — moved cross-master FormLink expansion from
+  the v2.9.2 covered-section's "deferred to v2.9.x" tail line to its
+  own "Covered as of v2.9.2 (Phase 4)" entry. Added a new
+  "Read-surface candidates (v2.9.x)" subsection under the v2.9.2
+  carry-over block with four candidates surfaced during Phase 3 + 4
+  conductor discussion: (1) reverse-link search (FORMID → records-
+  that-reference-it; new mechanism, highest viewing-assistant impact),
+  (2) override-aware expansion (lookup-logic swap on the v2.9.2 P4
+  modCache foundation; returns load-order winner via Mutagen
+  `LinkCache.TryResolve` instead of originating-master version),
+  (3) `MaxDepth` MCP-configurable exposure, (4) cross-call result
+  caching. The "missing-master synthetic test fixture" deferral is
+  removed (absorbed in Phase 4).
+
 ---
 
 ## Unreleased

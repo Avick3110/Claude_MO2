@@ -211,6 +211,26 @@ public class ReadRequest
     /// </summary>
     [JsonPropertyName("expand_links")]
     public List<string>? ExpandLinks { get; set; }
+
+    /// <summary>
+    /// v2.9.2 P4 — optional load-order plugin paths the bridge may
+    /// hot-load on demand to resolve cross-master FormLink expansions.
+    /// Phase 3 surfaced bug B5: <c>ExpandFormLinkValue</c>'s filename-
+    /// match scan only sees plugins explicitly loaded for the current
+    /// invocation (typically just the parent record's winning plugin),
+    /// so a FormLink whose originating master isn't in <c>modCache</c>
+    /// returned <c>error: "FormID target not in load order"</c>. Option
+    /// B fix (locked 2026-04-28): the wrapper passes the full enabled
+    /// load-order plugin file path list; the bridge lazily loads the
+    /// matching plugin on the first miss for a given originating-master
+    /// filename, caches it in <c>modCache</c>, and retries the lookup.
+    /// Lazy: zero cost when a FormLink resolves in-master; pays the
+    /// load cost only when the cross-master miss path fires. Absence
+    /// (null) preserves v2.9.2 P2 behavior bit-identically (cross-
+    /// master expansion fails with the original missing-master error).
+    /// </summary>
+    [JsonPropertyName("available_plugins")]
+    public List<string>? AvailablePlugins { get; set; }
 }
 
 public class ReadResponse
@@ -319,6 +339,17 @@ public class ReadBatchRequest
     /// </summary>
     [JsonPropertyName("expand_links")]
     public List<string>? ExpandLinks { get; set; }
+
+    /// <summary>
+    /// v2.9.2 P4 — optional load-order plugin paths for cross-master
+    /// FormLink expansion. Same semantics as
+    /// <see cref="ReadRequest.AvailablePlugins"/>: the bridge hot-loads
+    /// a matching plugin on demand when <c>ExpandFormLinkValue</c>
+    /// misses the originating-master filename in <c>modCache</c>. Lazy
+    /// — only paid when the miss path fires.
+    /// </summary>
+    [JsonPropertyName("available_plugins")]
+    public List<string>? AvailablePlugins { get; set; }
 }
 
 public class ReadBatchResponse

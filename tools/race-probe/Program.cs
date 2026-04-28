@@ -1,5 +1,6 @@
 using System.Reflection;
 using Mutagen.Bethesda.Plugins;
+using Mutagen.Bethesda.Plugins.Records;
 using Mutagen.Bethesda.Skyrim;
 // Disambiguate Mutagen.Bethesda.Skyrim.Activator from System.Activator
 // (the latter is in scope via implicit usings).
@@ -3393,11 +3394,853 @@ int p2QustFailures = 0;
 }
 Console.WriteLine($"=== v2.9.1 P2 quest-condition probes: {(p2QustFailures == 0 ? "ALL PASS" : $"{p2QustFailures} FAILURE(S)")} ===");
 
+// ─── v2.9.2 P1 — Read-side perf baseline + record-shape sweep ─────────
+//
+// Phase 1 of v2.9.2 (read-side efficiency for mo2_record_detail). Quantifies
+// the three composable axes' projected gains and reflects over Mutagen 0.53.1
+// to enumerate every FormLink-typed property surface across IMajorRecordGetter
+// implementations. Six measurement axes:
+//
+//   1. Subprocess startup cost — wall-clock the bridge invocation for one
+//      trivial vanilla GMST read. Repeat 5×; take median + range.
+//   2. Per-record marginal cost — read_records batches of N ∈ {1, 5, 20, 50,
+//      100, 200} of the same RACE record. Per-record delta over batch-1.
+//   3. Per-record full-detail payload baselines — RACE / NPC_ / QUST / MGEF /
+//      PERK / ARMO / WEAP / SPEL byte sizes via bridge read_record.
+//   4. Projection payload-size impact (PROJECTED — bridge doesn't yet carry
+//      `fields` projection; Phase 1 measures full-detail baselines + Phase 2
+//      measures actual projected sizes).
+//   5. Expansion round-trip elimination (PROJECTED — single-level FormLink
+//      expansion not yet wired; Phase 1 measures the without-expansion
+//      baseline (RACE + N second-tier SPEL reads) + projects the with-
+//      expansion cost at `1 × startup + N × marginal`).
+//   6. Cross-product timing per Q6 amendment (allow combination — `formids:
+//      [N records of same type] + plugin_names: [M plugins]` returns the N×M
+//      cells). Phase 1 simulates by issuing `read_records` with N×M items
+//      (each plugin × each formid pairing) and times the wall-clock + total
+//      response payload size for N ∈ {10, 50, 100} × M ∈ {2, 5, 10}. Halts +
+//      writes CONDUCTOR ASK if cross-product wall-clock exceeds Python's
+//      `mo2_record_detail` timeout = max(15s, 5*N×M).
+//
+// Plus a record-shape sweep — every concrete IMajorRecordGetter-implementing
+// interface in Mutagen.Bethesda.Skyrim 0.53.1 × every FormLink-typed property
+// (single + list of). Resolves the ActorEffect-vs-ActorEffects naming
+// ambiguity flagged in PLAN.md § Phase 1 step 3. FormLink predicates mirror
+// PatchEngine.cs:1182 IsFormLinkType (IFormLinkGetter<>, IFormLink<>,
+// IFormLinkNullable<>, FormLink<>, FormLinkNullable<>) plus list-of variants.
+Section("v2.9.2 P1 — Read-side perf baseline + record-shape sweep");
+
+int p1ReadSideFailures = 0;
+{
+    var thisDirP1r = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location)!;
+    var bridgeExeP1r = Path.GetFullPath(Path.Combine(thisDirP1r,
+        "..", "..", "..", "..", "mutagen-bridge", "bin", "Release", "net8.0", "mutagen-bridge.exe"));
+    bool haveBridge = File.Exists(bridgeExeP1r);
+    bool haveSkyrimEsm = File.Exists(SkyrimEsmForBatch7);
+
+    if (!haveBridge)
+    {
+        Console.WriteLine($"  SKIP perf section: mutagen-bridge.exe not found at {bridgeExeP1r}");
+    }
+    if (!haveSkyrimEsm)
+    {
+        Console.WriteLine($"  SKIP perf section: Skyrim.esm not found at {SkyrimEsmForBatch7}");
+    }
+
+    // ── Bridge invocation helper — returns (stdout, ms_wallclock, exitCode).
+    // Mirrors v2.9.1 P2's RunBridge but exposes wall-clock + raw stdout for
+    // payload-size measurement.
+    (string Stdout, long Ms, int ExitCode) RunBridgePerf(object req)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo(bridgeExeP1r)
+        {
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var proc = System.Diagnostics.Process.Start(psi)!;
+        proc.StandardInput.Write(System.Text.Json.JsonSerializer.Serialize(req));
+        proc.StandardInput.Close();
+        var stdout = proc.StandardOutput.ReadToEnd();
+        var _stderr = proc.StandardError.ReadToEnd();
+        proc.WaitForExit();
+        sw.Stop();
+        return (stdout, sw.ElapsedMilliseconds, proc.ExitCode);
+    }
+
+    // ── Helper: parse `success` + count `records` array entries from bridge JSON.
+    (bool Success, int RecordCount) ParseReadResponse(string stdout)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            bool succ = root.TryGetProperty("success", out var sv) && sv.GetBoolean();
+            int recCount = 0;
+            if (root.TryGetProperty("records", out var recs) &&
+                recs.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                recCount = recs.GetArrayLength();
+            }
+            return (succ, recCount);
+        }
+        catch { return (false, 0); }
+    }
+
+    // === Axis 1 — Subprocess startup cost (5x median + range) ============
+    long startupMedian = -1;
+    long startupMin = -1;
+    long startupMax = -1;
+    if (haveBridge && haveSkyrimEsm)
+    {
+        Console.WriteLine();
+        Console.WriteLine("  ── Axis 1: Subprocess startup cost (read_record on a trivial vanilla record × 5) ──");
+
+        // GMST is the lightest record type; pick the first one in Skyrim.esm.
+        // Falls through to the first-enumerated MajorRecord if Skyrim has no
+        // GMST somehow.
+        FormKey trivialKey = default;
+        string trivialFkStr = "";
+        try
+        {
+            using var srcMod = SkyrimMod.CreateFromBinaryOverlay(SkyrimEsmForBatch7, SkyrimRelease.SkyrimSE);
+            var firstGmst = srcMod.GameSettings.FirstOrDefault();
+            if (firstGmst != null)
+            {
+                trivialKey = firstGmst.FormKey;
+                trivialFkStr = $"{trivialKey.ModKey.FileName}:{trivialKey.ID:X6}";
+            }
+            else
+            {
+                var firstAny = srcMod.EnumerateMajorRecords().FirstOrDefault();
+                if (firstAny != null)
+                {
+                    trivialKey = firstAny.FormKey;
+                    trivialFkStr = $"{trivialKey.ModKey.FileName}:{trivialKey.ID:X6}";
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"    *** WARN: couldn't enumerate Skyrim.esm for trivial record: {ex.Message}");
+        }
+
+        if (string.IsNullOrEmpty(trivialFkStr))
+        {
+            Console.WriteLine($"    SKIP: no trivial record found");
+        }
+        else
+        {
+            Console.WriteLine($"    trivial record: {trivialFkStr}");
+            var samples = new List<long>();
+            for (int i = 0; i < 5; i++)
+            {
+                var req = new
+                {
+                    command = "read_record",
+                    plugin_path = SkyrimEsmForBatch7,
+                    formid = trivialFkStr,
+                    max_depth = 6,
+                };
+                var r = RunBridgePerf(req);
+                var (succ, _) = ParseReadResponse(r.Stdout);
+                Console.WriteLine($"    [{i + 1}/5] wall-clock = {r.Ms,5} ms  success={succ}  exit={r.ExitCode}");
+                if (succ) samples.Add(r.Ms);
+            }
+            if (samples.Count >= 3)
+            {
+                samples.Sort();
+                startupMedian = samples[samples.Count / 2];
+                startupMin = samples[0];
+                startupMax = samples[^1];
+                Console.WriteLine($"    summary: median = {startupMedian} ms  min = {startupMin} ms  max = {startupMax} ms");
+                Console.WriteLine($"    expected band per PLAN § G #1: 1200–1400 ms typical hardware. {(startupMedian < 800 || startupMedian > 4000 ? "*** BAND ALERT — perf-shape may be off ***" : "(within band)")}");
+            }
+            else
+            {
+                Console.WriteLine($"    *** FAIL: <3/5 samples succeeded; cannot compute median");
+                p1ReadSideFailures++;
+            }
+        }
+    }
+
+    // === Axis 2 — Per-record marginal cost via read_records batch ==========
+    var marginalTable = new List<(int N, long Ms, double PerRecMs, int RecCount)>();
+    if (haveBridge && haveSkyrimEsm)
+    {
+        Console.WriteLine();
+        Console.WriteLine("  ── Axis 2: Per-record marginal cost (read_records batch of N RACE records) ──");
+
+        // Collect up to 200 RACE FormIDs from Skyrim.esm. Will pad by repeating
+        // if Skyrim has fewer than 200 RACE records (vanilla has ~36 plus
+        // animal/creature races; sufficient for batch-50 organically, larger
+        // batches sample-with-replacement which still amortizes startup).
+        var raceFkStrs = new List<string>();
+        try
+        {
+            using var srcMod = SkyrimMod.CreateFromBinaryOverlay(SkyrimEsmForBatch7, SkyrimRelease.SkyrimSE);
+            foreach (var rec in srcMod.Races)
+            {
+                raceFkStrs.Add($"{rec.FormKey.ModKey.FileName}:{rec.FormKey.ID:X6}");
+                if (raceFkStrs.Count >= 200) break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"    *** WARN: couldn't enumerate RACE records: {ex.Message}");
+        }
+
+        if (raceFkStrs.Count == 0)
+        {
+            Console.WriteLine($"    SKIP: no RACE records available");
+        }
+        else
+        {
+            int organicCount = raceFkStrs.Count;
+            Console.WriteLine($"    organic RACE pool size: {organicCount}");
+            var batchSizes = new[] { 1, 5, 20, 50, 100, 200 };
+            foreach (int n in batchSizes)
+            {
+                var items = new List<object>();
+                for (int i = 0; i < n; i++)
+                {
+                    items.Add(new
+                    {
+                        plugin_path = SkyrimEsmForBatch7,
+                        formid = raceFkStrs[i % organicCount],
+                    });
+                }
+                var req = new
+                {
+                    command = "read_records",
+                    records = items,
+                    max_depth = 6,
+                };
+                var r = RunBridgePerf(req);
+                var (succ, recCount) = ParseReadResponse(r.Stdout);
+                double perRec = n > 0 ? (double)r.Ms / n : 0;
+                Console.WriteLine($"    [N={n,3}] wall-clock = {r.Ms,6} ms  per-record = {perRec,7:F2} ms  success={succ}  records={recCount}");
+                if (succ) marginalTable.Add((n, r.Ms, perRec, recCount));
+            }
+
+            // Compute per-record delta over batch-1 as marginal cost.
+            if (marginalTable.Count >= 2)
+            {
+                var batch1 = marginalTable.FirstOrDefault(x => x.N == 1);
+                if (batch1.N == 1)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine($"    Per-record marginal cost over batch-1 baseline ({batch1.Ms} ms):");
+                    Console.WriteLine($"    {"N",4}  {"wall-clock",10}  {"marginal",12}  {"per-rec marginal",18}");
+                    foreach (var (n, ms, perRec, _) in marginalTable)
+                    {
+                        if (n == 1) continue;
+                        long marginalMs = ms - batch1.Ms;
+                        double perRecMarginal = (double)marginalMs / (n - 1);
+                        Console.WriteLine($"    {n,4}  {ms,10} ms {marginalMs,9} ms     {perRecMarginal,7:F2} ms");
+                    }
+                    var max = marginalTable.Where(x => x.N >= 50).Select(x => (double)(x.Ms - batch1.Ms) / (x.N - 1)).DefaultIfEmpty(0).Max();
+                    Console.WriteLine($"    expected band per PLAN § G #2: 5–20 ms per-record marginal once subprocess is hot.");
+                    Console.WriteLine($"    measured max marginal at N≥50: {max:F2} ms  {(max > 50 ? "*** BAND ALERT — marginal cost > 50 ms; perf-shape may be off ***" : "(within band)")}");
+                }
+            }
+        }
+    }
+
+    // === Axis 3 — Per-record full-detail payload baselines per record type =
+    var payloadTable = new List<(string Type, string FkStr, int Bytes, int FieldCount)>();
+    if (haveBridge && haveSkyrimEsm)
+    {
+        Console.WriteLine();
+        Console.WriteLine("  ── Axis 3: Per-record full-detail payload baselines (bytes + top-level field count) ──");
+
+        // Pick one representative FormID per type. Falls back to the first
+        // enumerated record of that type from Skyrim.esm. RACE / NPC_ / QUST /
+        // MGEF / PERK / ARMO / WEAP / SPEL per PLAN § G #3.
+        var repFkStrs = new Dictionary<string, string>();
+        try
+        {
+            using var srcMod = SkyrimMod.CreateFromBinaryOverlay(SkyrimEsmForBatch7, SkyrimRelease.SkyrimSE);
+            void Pick<T>(string code) where T : class, IMajorRecordGetter
+            {
+                var first = srcMod.EnumerateMajorRecords<T>().FirstOrDefault();
+                if (first != null) repFkStrs[code] = $"{first.FormKey.ModKey.FileName}:{first.FormKey.ID:X6}";
+            }
+            Pick<IRaceGetter>("RACE");
+            Pick<INpcGetter>("NPC_");
+            Pick<IQuestGetter>("QUST");
+            Pick<IMagicEffectGetter>("MGEF");
+            Pick<IPerkGetter>("PERK");
+            Pick<IArmorGetter>("ARMO");
+            Pick<IWeaponGetter>("WEAP");
+            Pick<ISpellGetter>("SPEL");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"    *** WARN: couldn't enumerate representative records: {ex.Message}");
+        }
+
+        Console.WriteLine($"    {"type",-5}  {"formid",-25}  {"bytes",10}  {"top-fields",10}");
+        foreach (var (code, fkStr) in repFkStrs.OrderBy(kv => kv.Key))
+        {
+            var req = new
+            {
+                command = "read_record",
+                plugin_path = SkyrimEsmForBatch7,
+                formid = fkStr,
+                max_depth = 6,
+            };
+            var r = RunBridgePerf(req);
+            int bytes = r.Stdout.Length;
+            int fieldCount = -1;
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(r.Stdout);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("fields", out var f) && f.ValueKind == System.Text.Json.JsonValueKind.Object)
+                {
+                    fieldCount = 0;
+                    foreach (var _p in f.EnumerateObject()) fieldCount++;
+                }
+            }
+            catch { /* keep -1 */ }
+            Console.WriteLine($"    {code,-5}  {fkStr,-25}  {bytes,10}  {fieldCount,10}");
+            payloadTable.Add((code, fkStr, bytes, fieldCount));
+        }
+    }
+
+    // === Axis 4 — Projection payload-size impact (PROJECTED) ==============
+    // Bridge doesn't yet carry `fields` projection (Phase 2 lands it).
+    // Phase 1 baseline: full-detail RACE byte size (from Axis 3).
+    // Phase 1 projection: caller asking for 3–5 paths typically reduces
+    // payload to ~20% of full per PLAN § Background ("~80% token-cost
+    // reduction"). Phase 2 measures actual; Phase 1 surfaces the floor.
+    long raceFullBytes = -1;
+    if (payloadTable.Count > 0)
+    {
+        Console.WriteLine();
+        Console.WriteLine("  ── Axis 4: Projection payload-size impact (PROJECTED — bridge gains `fields` in Phase 2) ──");
+        var raceEntry = payloadTable.FirstOrDefault(p => p.Type == "RACE");
+        if (raceEntry.Type == "RACE")
+        {
+            raceFullBytes = raceEntry.Bytes;
+            // Estimate projected size — heuristic floor: each retained path
+            // contributes O(50–500 bytes) wrapper + one rendered value tree.
+            // PLAN § Background headline: ~80% reduction on RACE.
+            long projected3to5paths = (long)(raceFullBytes * 0.20);
+            Console.WriteLine($"    RACE full-detail baseline:                {raceFullBytes,10} bytes");
+            Console.WriteLine($"    projected `fields: [3–5 paths]` (Phase 2): {projected3to5paths,10} bytes (~20% of full)");
+            Console.WriteLine($"    projected reduction:                       ~80% (PLAN § Background headline)");
+            Console.WriteLine($"    [Phase 2 measures actual; Phase 1 surfaces the baseline floor for comparison]");
+        }
+        else
+        {
+            Console.WriteLine($"    SKIP: no RACE entry in payload table");
+        }
+    }
+
+    // === Axis 5 — Expansion round-trip elimination (PROJECTED) ============
+    long withoutExpansionMs = -1;
+    int actorEffectCount = -1;
+    if (haveBridge && haveSkyrimEsm)
+    {
+        Console.WriteLine();
+        Console.WriteLine("  ── Axis 5: Expansion round-trip elimination (PROJECTED) ──");
+
+        // Pick a vanilla RACE with populated ActorEffect; time
+        //   1× read_record(RACE) + N× read_record(each linked SPEL).
+        // Project the with-expansion cost as 1× startup + N× marginal.
+        try
+        {
+            using var srcMod = SkyrimMod.CreateFromBinaryOverlay(SkyrimEsmForBatch7, SkyrimRelease.SkyrimSE);
+            var raceWithSpells = srcMod.Races
+                .FirstOrDefault(r => r.ActorEffect != null && r.ActorEffect.Count > 0);
+            if (raceWithSpells == null)
+            {
+                Console.WriteLine($"    SKIP: no vanilla RACE has populated ActorEffect");
+            }
+            else
+            {
+                var raceFkStr = $"{raceWithSpells.FormKey.ModKey.FileName}:{raceWithSpells.FormKey.ID:X6}";
+                actorEffectCount = raceWithSpells.ActorEffect!.Count;
+                Console.WriteLine($"    anchor RACE: {raceFkStr} ({raceWithSpells.EditorID})  ActorEffect.Count = {actorEffectCount}");
+
+                // Time without-expansion baseline: read RACE + each linked SPEL.
+                var totalSw = System.Diagnostics.Stopwatch.StartNew();
+                var raceReq = new
+                {
+                    command = "read_record",
+                    plugin_path = SkyrimEsmForBatch7,
+                    formid = raceFkStr,
+                    max_depth = 6,
+                };
+                var raceResp = RunBridgePerf(raceReq);
+                int spellsRead = 0;
+                foreach (var spellLink in raceWithSpells.ActorEffect!)
+                {
+                    if (!spellLink.FormKeyNullable.HasValue || spellLink.FormKeyNullable.Value.IsNull) continue;
+                    var spellFk = spellLink.FormKeyNullable.Value;
+                    if (spellFk.ModKey.FileName != "Skyrim.esm") continue;
+                    var spellFkStr = $"{spellFk.ModKey.FileName}:{spellFk.ID:X6}";
+                    var spellReq = new
+                    {
+                        command = "read_record",
+                        plugin_path = SkyrimEsmForBatch7,
+                        formid = spellFkStr,
+                        max_depth = 6,
+                    };
+                    RunBridgePerf(spellReq);
+                    spellsRead++;
+                }
+                totalSw.Stop();
+                withoutExpansionMs = totalSw.ElapsedMilliseconds;
+
+                // Project with-expansion: one bridge call returns RACE + inlined SPELs.
+                long projectedExpansionMs = (startupMedian > 0 ? startupMedian : 1300)
+                                          + (long)(spellsRead * 10);  // ~10ms per inlined SPEL is the with-expansion floor
+
+                Console.WriteLine($"    without-expansion (RACE + {spellsRead} SPELs serial):  {withoutExpansionMs,7} ms ({1 + spellsRead} subprocess invocations)");
+                Console.WriteLine($"    projected with-expansion (one bridge call):           {projectedExpansionMs,7} ms (1 invocation)");
+                if (withoutExpansionMs > 0 && projectedExpansionMs > 0)
+                {
+                    double speedup = (double)withoutExpansionMs / projectedExpansionMs;
+                    Console.WriteLine($"    projected speedup ratio:                              {speedup,7:F2}×");
+                    Console.WriteLine($"    [Phase 2 measures actual; Phase 1 surfaces the baseline + projection]");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"    *** WARN: expansion-elimination probe threw: {ex.Message}");
+        }
+    }
+
+    // === Axis 6 — Cross-product timing (Q6 amendment: allow combination) ==
+    // formids: [N records] × plugin_names: [M plugins] returns N×M cells.
+    // Phase 1 simulates with read_records issuing N×M items (each plugin path
+    // × each formid pairing), since the cross-product wrapper layer doesn't
+    // exist yet (Phase 2 lands it). Captures wall-clock + payload bytes for
+    // N ∈ {10, 50, 100} × M ∈ {2, 5, 10}.
+    //
+    // Halt threshold: Python's mo2_record_detail uses
+    // timeout=max(15s, 5*N×M) per kick-off prompt. If wall-clock exceeds
+    // that, increment failure counter so handoff escalates via CONDUCTOR ASK.
+    var crossTable = new List<(int N, int M, int Items, long Ms, int Bytes, double TimeoutS, bool TimedOut)>();
+    bool crossProductCliff = false;
+    if (haveBridge && haveSkyrimEsm)
+    {
+        Console.WriteLine();
+        Console.WriteLine("  ── Axis 6: Cross-product timing (formids × plugin_names per Q6 amendment) ──");
+        Console.WriteLine($"    Simulation: read_records with N×M items (one plugin × one formid per item).");
+        Console.WriteLine($"    Phase 1 uses Skyrim.esm only as the M=1 case and synthesizes the M>1 case by repeating");
+        Console.WriteLine($"    the same plugin path M times — measures the bridge's per-item processing cost without");
+        Console.WriteLine($"    exercising plugin-load amortization across distinct plugins (Phase 2's wrapper layer");
+        Console.WriteLine($"    does the actual M>1 fan-out across distinct plugin_names).");
+        Console.WriteLine();
+
+        // Reuse RACE FormID pool from Axis 2 if available.
+        var pool = new List<string>();
+        try
+        {
+            using var srcMod = SkyrimMod.CreateFromBinaryOverlay(SkyrimEsmForBatch7, SkyrimRelease.SkyrimSE);
+            foreach (var r in srcMod.Races) pool.Add($"{r.FormKey.ModKey.FileName}:{r.FormKey.ID:X6}");
+        }
+        catch { }
+
+        if (pool.Count == 0)
+        {
+            Console.WriteLine($"    SKIP: no RACE records for cross-product simulation");
+        }
+        else
+        {
+            var nValues = new[] { 10, 50, 100 };
+            var mValues = new[] { 2, 5, 10 };
+            Console.WriteLine($"    {"N",4}  {"M",4}  {"N×M",6}  {"wall-clock",10}  {"bytes",10}  {"timeout",10}  {"status",-12}");
+            foreach (int n in nValues)
+            {
+                foreach (int m in mValues)
+                {
+                    int items = n * m;
+                    var batch = new List<object>();
+                    for (int i = 0; i < items; i++)
+                    {
+                        // Each cell: (formid_index = i / m), (plugin_repeat = i % m).
+                        // Same plugin path M times since Phase 1 has only Skyrim.esm.
+                        batch.Add(new
+                        {
+                            plugin_path = SkyrimEsmForBatch7,
+                            formid = pool[(i / m) % pool.Count],
+                        });
+                    }
+                    var req = new
+                    {
+                        command = "read_records",
+                        records = batch,
+                        max_depth = 6,
+                    };
+                    var r = RunBridgePerf(req);
+                    int bytes = r.Stdout.Length;
+                    double timeoutS = Math.Max(15, 5.0 * items);
+                    bool timedOut = r.Ms > timeoutS * 1000;
+                    string status = timedOut ? "*** TIMEOUT" : "ok";
+                    Console.WriteLine($"    {n,4}  {m,4}  {items,6}  {r.Ms,7} ms  {bytes,10}  {timeoutS,7:F0} s   {status,-12}");
+                    crossTable.Add((n, m, items, r.Ms, bytes, timeoutS, timedOut));
+                    if (timedOut) crossProductCliff = true;
+                }
+            }
+            Console.WriteLine();
+            Console.WriteLine($"    Halt threshold per Q6 amendment: wall-clock > Python timeout = max(15s, 5×N×M).");
+            Console.WriteLine($"    Cross-product cliff detected: {crossProductCliff}");
+            if (crossProductCliff) p1ReadSideFailures++;
+        }
+    }
+
+    // ── Record-shape sweep — every IMajorRecordGetter × every FormLink-typed prop.
+    Console.WriteLine();
+    Console.WriteLine("  ── Record-shape sweep: FormLink-typed properties on IMajorRecordGetter implementations ──");
+
+    // FormLink predicate matches PatchEngine.cs:1182 IsFormLinkType — single-FormLink
+    // shape (IFormLinkGetter<>, IFormLink<>, IFormLinkNullable<>, FormLink<>,
+    // FormLinkNullable<>) plus list-of variants (IReadOnlyList<IFormLinkGetter<>>,
+    // ExtendedList<IFormLinkGetter<>>, etc.).
+    static bool IsSingleFormLinkType(Type t)
+    {
+        if (!t.IsGenericType) return false;
+        var def = t.GetGenericTypeDefinition();
+        return def == typeof(IFormLinkGetter<>)
+            || def == typeof(IFormLink<>)
+            || def == typeof(IFormLinkNullable<>)
+            || def == typeof(FormLink<>)
+            || def == typeof(FormLinkNullable<>);
+    }
+
+    static (bool IsListOfFormLink, Type? Element) ClassifyListOfFormLink(Type t)
+    {
+        // Recognize generic single-arg list-shapes that wrap a FormLink type.
+        // Mutagen: IReadOnlyList<T>, ExtendedList<T>, plus any IEnumerable<T>
+        // where T is a single-FormLink type. Excludes byte arrays / strings.
+        if (t == typeof(string)) return (false, null);
+        if (t.IsArray)
+        {
+            var elt = t.GetElementType();
+            if (elt != null && IsSingleFormLinkType(elt)) return (true, elt);
+            return (false, null);
+        }
+        if (!t.IsGenericType) return (false, null);
+        // Walk generic type itself + all generic interface implementations.
+        var candidates = new List<Type> { t };
+        candidates.AddRange(t.GetInterfaces().Where(i => i.IsGenericType));
+        foreach (var c in candidates)
+        {
+            var args = c.GetGenericArguments();
+            if (args.Length != 1) continue;
+            if (IsSingleFormLinkType(args[0])) return (true, args[0]);
+        }
+        return (false, null);
+    }
+
+    static string FriendlyTypeStatic(Type t)
+    {
+        if (!t.IsGenericType) return t.Name;
+        var name = t.Name.Substring(0, t.Name.IndexOf('`'));
+        var args = string.Join(", ", t.GetGenericArguments().Select(FriendlyTypeStatic));
+        return $"{name}<{args}>";
+    }
+
+    // Discover concrete record getter interfaces. The bridge's runtime surface
+    // is IMajorRecordGetter — every concrete getter interface
+    // (IRaceGetter, INpcGetter, IQuestGetter, etc.) extends from it. Sweep
+    // every interface in Mutagen.Bethesda.Skyrim that derives from
+    // IMajorRecordGetter and ends in "Getter" (excluding common-base layers).
+    {
+        var skyrimAssembly = typeof(IQuestGetter).Assembly;
+        var getterInterfaces = skyrimAssembly.GetTypes()
+            .Where(t => t.IsInterface)
+            .Where(t => t.Namespace == "Mutagen.Bethesda.Skyrim")
+            .Where(t => t.Name.EndsWith("Getter", StringComparison.Ordinal))
+            .Where(t => typeof(IMajorRecordGetter).IsAssignableFrom(t))
+            .Where(t => t != typeof(IMajorRecordGetter)
+                     && t != typeof(ISkyrimMajorRecordGetter))
+            .OrderBy(t => t.Name)
+            .ToList();
+
+        Console.WriteLine($"    Concrete getter interfaces sweep: {getterInterfaces.Count}");
+        Console.WriteLine();
+
+        var sweepRows = new List<(string IfaceName, string PropName, string PropTypeShort, string Classification, string LinkedTargetShort)>();
+
+        foreach (var iface in getterInterfaces)
+        {
+            // Aggregate properties from interface + parents (IMajorRecordGetter etc).
+            // Use full BindingFlags. GetProperties on an interface returns DECLARED only;
+            // walk parent interfaces to pick up inherited props (e.g. EditorID).
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            void CollectProps(Type t, List<PropertyInfo> acc)
+            {
+                foreach (var p in t.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+                {
+                    if (!seen.Add(p.Name)) continue;
+                    acc.Add(p);
+                }
+                foreach (var pi in t.GetInterfaces()) CollectProps(pi, acc);
+            }
+            var props = new List<PropertyInfo>();
+            CollectProps(iface, props);
+
+            foreach (var prop in props.OrderBy(p => p.Name))
+            {
+                if (prop.GetIndexParameters().Length > 0) continue;
+                var pt = prop.PropertyType;
+
+                // Single-FormLink-typed property?
+                if (IsSingleFormLinkType(pt))
+                {
+                    var argShort = FriendlyTypeStatic(pt.GetGenericArguments()[0]);
+                    sweepRows.Add((iface.Name, prop.Name, FriendlyTypeStatic(pt), "single", argShort));
+                    continue;
+                }
+
+                // List-of-FormLink-typed property?
+                var (isList, elt) = ClassifyListOfFormLink(pt);
+                if (isList && elt != null)
+                {
+                    var argShort = FriendlyTypeStatic(elt.GetGenericArguments()[0]);
+                    sweepRows.Add((iface.Name, prop.Name, FriendlyTypeStatic(pt), "list", argShort));
+                    continue;
+                }
+            }
+        }
+
+        // Group by interface for compact output.
+        var byIface = sweepRows.GroupBy(r => r.IfaceName).OrderBy(g => g.Key).ToList();
+        int withFormLinks = byIface.Count;
+        int totalRows = sweepRows.Count;
+        Console.WriteLine($"    Interfaces with at least one FormLink-typed property: {withFormLinks} / {getterInterfaces.Count}");
+        Console.WriteLine($"    Total FormLink-typed properties across all getters:    {totalRows}");
+        Console.WriteLine();
+        Console.WriteLine($"    {"interface",-32}  {"property",-25}  {"shape",-7}  {"target",-30}  type");
+        Console.WriteLine($"    {new string('-', 32)}  {new string('-', 25)}  {new string('-', 7)}  {new string('-', 30)}  {new string('-', 50)}");
+        foreach (var grp in byIface)
+        {
+            foreach (var (ifaceName, propName, propTypeShort, classification, linkedTargetShort) in grp.OrderBy(r => r.PropName))
+            {
+                Console.WriteLine($"    {ifaceName,-32}  {propName,-25}  {classification,-7}  {linkedTargetShort,-30}  {propTypeShort}");
+            }
+        }
+
+        // Specifically resolve the ActorEffect-vs-ActorEffects ambiguity
+        // (PLAN.md § Phase 1 step 3 + § Q6 acceptance).
+        Console.WriteLine();
+        Console.WriteLine("  ── ActorEffect vs ActorEffects resolution (Mutagen 0.53.1 ground truth) ──");
+        var raceGetter = typeof(IRaceGetter);
+        var raceProps = raceGetter.GetProperties(BindingFlags.Public | BindingFlags.Instance);
+        var hasActorEffect = raceProps.Any(p => p.Name == "ActorEffect");
+        var hasActorEffects = raceProps.Any(p => p.Name == "ActorEffects");
+        Console.WriteLine($"    IRaceGetter.ActorEffect  exists: {hasActorEffect}");
+        Console.WriteLine($"    IRaceGetter.ActorEffects exists: {hasActorEffects}");
+        if (!hasActorEffect && !hasActorEffects)
+        {
+            Console.WriteLine($"    *** UNEXPECTED: NEITHER ActorEffect nor ActorEffects exists on IRaceGetter — schema drift?");
+            p1ReadSideFailures++;
+        }
+        else if (hasActorEffect && hasActorEffects)
+        {
+            Console.WriteLine($"    *** UNEXPECTED: BOTH ActorEffect and ActorEffects exist on IRaceGetter — schema drift?");
+            p1ReadSideFailures++;
+        }
+        else
+        {
+            string canonical = hasActorEffect ? "ActorEffect" : "ActorEffects";
+            Console.WriteLine($"    canonical name: {canonical} (Mutagen 0.53.1 ground truth)");
+        }
+
+        // Surface canonical RACE FormLink-typed property list — these are the
+        // anchors Phase 2's MATRIX rows substitute into the placeholder
+        // <Skeleton-or-confirmed-scalar> / <ActorEffect-or-confirmed-list> /
+        // <expanded-list-property> / <projected-list-property> slots.
+        Console.WriteLine();
+        Console.WriteLine("  ── Canonical RACE FormLink-typed properties (matrix placeholder substitutions) ──");
+        var raceLinkRows = sweepRows.Where(r => r.IfaceName == "IRaceGetter").OrderBy(r => r.PropName).ToList();
+        if (raceLinkRows.Count == 0)
+        {
+            Console.WriteLine($"    (no FormLink-typed properties on IRaceGetter)");
+        }
+        else
+        {
+            Console.WriteLine($"    {"property",-25}  {"shape",-7}  {"target",-30}");
+            foreach (var (_, propName, _, classification, linkedTargetShort) in raceLinkRows)
+            {
+                Console.WriteLine($"    {propName,-25}  {classification,-7}  {linkedTargetShort,-30}");
+            }
+        }
+
+        // RACE anchor selection for Layer 1.P — pick 3 vanilla RACE records
+        // with populated ActorEffect (the canonical list-of-FormLinks property
+        // per PLAN § Phase 1 step 5). Phase 2's matrix substitutes these.
+        if (haveSkyrimEsm)
+        {
+            Console.WriteLine();
+            Console.WriteLine("  ── RACE anchor selection: vanilla Skyrim.esm RACE records with populated ActorEffect ──");
+            try
+            {
+                using var srcMod = SkyrimMod.CreateFromBinaryOverlay(SkyrimEsmForBatch7, SkyrimRelease.SkyrimSE);
+                var withSpells = srcMod.Races
+                    .Where(r => r.ActorEffect != null && r.ActorEffect.Count > 0)
+                    .OrderBy(r => r.FormKey.ID)
+                    .Take(10)
+                    .ToList();
+                Console.WriteLine($"    found {withSpells.Count} qualifying RACE record(s) (showing first 10):");
+                foreach (var r in withSpells)
+                {
+                    Console.WriteLine($"      Skyrim.esm:{r.FormKey.ID:X6}  {r.EditorID,-30}  ActorEffect.Count = {r.ActorEffect!.Count}");
+                }
+                if (withSpells.Count >= 3)
+                {
+                    Console.WriteLine($"    Phase 1 anchor candidates (first 3 with populated ActorEffect):");
+                    foreach (var r in withSpells.Take(3))
+                    {
+                        Console.WriteLine($"      Skyrim.esm:{r.FormKey.ID:X6}  ({r.EditorID})");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"    *** WARN: <3 vanilla RACE records have populated ActorEffect; Phase 2 anchor pool may need a synthetic fixture");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"    *** WARN: RACE anchor selection threw: {ex.Message}");
+            }
+        }
+
+        // QUST anchor surfacing (Layer 1.P.batch.QUST cell — Phase 1 hand-back
+        // checklist item). v2.9.1's anchor was Skyrim.esm:04C49D
+        // (FollowerCommentary01); for v2.9.2's batch axis exercise we just
+        // need 3+ QUST FormIDs; v2.9.1's anchors qualify.
+        if (haveSkyrimEsm)
+        {
+            Console.WriteLine();
+            Console.WriteLine("  ── QUST anchor selection (Layer 1.P.batch.QUST — 3+ vanilla QUST FormIDs) ──");
+            try
+            {
+                using var srcMod = SkyrimMod.CreateFromBinaryOverlay(SkyrimEsmForBatch7, SkyrimRelease.SkyrimSE);
+                var firstThree = srcMod.Quests
+                    .OrderBy(q => q.FormKey.ID)
+                    .Take(10)
+                    .ToList();
+                Console.WriteLine($"    first 10 QUST records in Skyrim.esm (FormID order):");
+                foreach (var q in firstThree)
+                {
+                    Console.WriteLine($"      Skyrim.esm:{q.FormKey.ID:X6}  {q.EditorID ?? "(null)"}");
+                }
+                Console.WriteLine($"    v2.9.1's anchor Skyrim.esm:04C49D (FollowerCommentary01) + 0E3145 (CR12) qualify;");
+                Console.WriteLine($"    Phase 2 picks 3 from above OR re-uses v2.9.1's pair + first qualifying third.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"    *** WARN: QUST anchor selection threw: {ex.Message}");
+            }
+        }
+
+        // NPC_ Factions structure check (Scenario 3.2 precondition per Phase 1
+        // hand-back checklist item). NPC_'s `Factions` list-of-RankPlacement
+        // sub-structs each carry a `Faction` FormLink to FCTN. Scenario 3.2
+        // uses `expand_links: ["Factions.Faction"]` (auto-traversal per Q1).
+        Console.WriteLine();
+        Console.WriteLine("  ── NPC_ Factions structure check (Scenario 3.2 precondition) ──");
+        var npcGetter = typeof(INpcGetter);
+        var factionsProp = npcGetter.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .FirstOrDefault(p => p.Name.Equals("Factions", StringComparison.OrdinalIgnoreCase));
+        if (factionsProp == null)
+        {
+            Console.WriteLine($"    *** UNEXPECTED: INpcGetter has no `Factions` property — Scenario 3.2 precondition fails");
+            Console.WriteLine($"        Phase 3 falls back to Scenario 3.1 only (per MATRIX § Layer 3.2 conditional clause)");
+            p1ReadSideFailures++;
+        }
+        else
+        {
+            Console.WriteLine($"    INpcGetter.Factions  declared type: {FriendlyTypeStatic(factionsProp.PropertyType)}");
+            // Walk: Factions is IReadOnlyList<IRankPlacementGetter>; check the sub-struct's
+            // FormLink-to-FCTN slot.
+            Type? rankElt = null;
+            foreach (var iface in factionsProp.PropertyType.GetInterfaces().Concat(new[] { factionsProp.PropertyType }))
+            {
+                if (!iface.IsGenericType) continue;
+                var ifArgs = iface.GetGenericArguments();
+                if (ifArgs.Length == 1 && ifArgs[0].Namespace?.StartsWith("Mutagen.Bethesda") == true)
+                {
+                    rankElt = ifArgs[0];
+                    break;
+                }
+            }
+            if (rankElt == null)
+            {
+                Console.WriteLine($"    *** WARN: couldn't extract Factions element type");
+            }
+            else
+            {
+                Console.WriteLine($"    Factions element type: {FriendlyTypeStatic(rankElt)}");
+                // Find the FormLink sub-prop on the rank-placement struct.
+                var rankProps = rankElt.GetProperties(BindingFlags.Public | BindingFlags.Instance);
+                var formLinkSubProps = rankProps.Where(p => IsSingleFormLinkType(p.PropertyType)).ToList();
+                if (formLinkSubProps.Count == 0)
+                {
+                    Console.WriteLine($"    *** UNEXPECTED: rank-placement element has no FormLink-typed sub-property");
+                    Console.WriteLine($"        Scenario 3.2 (`Factions.Faction` expansion) precondition fails; Phase 3 skips Scenario 3.2");
+                    p1ReadSideFailures++;
+                }
+                else
+                {
+                    foreach (var sp in formLinkSubProps)
+                        Console.WriteLine($"      sub-property: {sp.Name,-15}  type: {FriendlyTypeStatic(sp.PropertyType)}");
+                    var faction = formLinkSubProps.FirstOrDefault(p => p.Name.Equals("Faction", StringComparison.OrdinalIgnoreCase));
+                    if (faction != null)
+                    {
+                        Console.WriteLine($"    canonical Scenario 3.2 expand_links path: \"Factions.Faction\" (auto-traversal per Q1)");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"    *** WARN: no `Faction` sub-property — Scenario 3.2 path needs alternative slot name");
+                    }
+                }
+            }
+        }
+
+        // Sweep summary table — counts.
+        Console.WriteLine();
+        Console.WriteLine("  ── Sweep summary ──");
+        Console.WriteLine($"    Concrete getter interfaces scanned:                 {getterInterfaces.Count}");
+        Console.WriteLine($"    Interfaces with FormLink-typed property(s):         {withFormLinks}");
+        Console.WriteLine($"    Total FormLink-typed properties across all getters: {totalRows}");
+        Console.WriteLine($"    RACE FormLink-typed properties:                     {raceLinkRows.Count}");
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("  ── Phase 1 perf-and-shape summary ──");
+    Console.WriteLine($"    Subprocess startup median:                  {(startupMedian > 0 ? $"{startupMedian} ms (band 1200–1400 ms)" : "n/a")}");
+    if (marginalTable.Count > 0)
+    {
+        var b1 = marginalTable.FirstOrDefault(x => x.N == 1);
+        var bMax = marginalTable.OrderByDescending(x => x.N).FirstOrDefault();
+        if (b1.N == 1 && bMax.N > 1)
+        {
+            double mm = (double)(bMax.Ms - b1.Ms) / (bMax.N - 1);
+            Console.WriteLine($"    Per-record marginal at N={bMax.N}:                {mm:F2} ms (band 5–20 ms)");
+        }
+    }
+    Console.WriteLine($"    Per-record full-detail payloads measured:   {payloadTable.Count} types");
+    Console.WriteLine($"    Cross-product cliff (Q6 amendment timeout): {(crossProductCliff ? "*** CLIFF — escalate" : "no cliff")}");
+}
+Console.WriteLine($"=== v2.9.2 P1 read-side perf + shape sweep: {(p1ReadSideFailures == 0 ? "ALL PASS" : $"{p1ReadSideFailures} FAILURE(S)")} ===");
+
 Console.WriteLine();
-int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures + p2dFailures + p4InfoFailures + p1MultiCondFailures + p2QustFailures;
+int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures + p2dFailures + p4InfoFailures + p1MultiCondFailures + p2QustFailures + p1ReadSideFailures;
 if (totalFailures > 0)
 {
-    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C + {p2dFailures} v2.9 P2D + {p4InfoFailures} v2.9 P4-INFO + {p1MultiCondFailures} v2.9.1 P1 multi-cond sweep + {p2QustFailures} v2.9.1 P2 quest-cond) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
+    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C + {p2dFailures} v2.9 P2D + {p4InfoFailures} v2.9 P4-INFO + {p1MultiCondFailures} v2.9.1 P1 multi-cond sweep + {p2QustFailures} v2.9.1 P2 quest-cond + {p1ReadSideFailures} v2.9.2 P1 read-side perf-and-shape) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
     Environment.Exit(1);
 }
 Console.WriteLine("=== probe complete ===");

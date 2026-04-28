@@ -1,5 +1,5 @@
 ---
-description: Create ESP patch plugins via mo2_create_patch — overrides (set_fields, set/clear_flags, add/remove_keywords/spells/perks/factions/inventory/packages/outfit_items/form_list_entries, add/remove_conditions, attach_scripts, set/clear_enchantment, add/remove_leveled_list_entries) and leveled list merging (LVLI/LVLN/LVSP). Use when the user wants to create a patch, override a record, add keywords to armor, modify NPC stats, attach Papyrus scripts to a record, or merge leveled lists across plugins.
+description: Create ESP patch plugins via mo2_create_patch — overrides (set_fields, set/clear_flags, add/remove_keywords/spells/perks/factions/inventory/packages/outfit_items/form_list_entries, add/remove_conditions, attach_scripts, set/clear_enchantment, add/remove_leveled_list_entries) and leveled list merging (LVLI/LVLN/LVSP). Use when the user wants to create a patch, override a record, add keywords to armor, modify NPC stats, attach Papyrus scripts to a record, rebalance PERK effects (magnitude tweaks / spell-grant swaps via the Effects-list write surface), or merge leveled lists across plugins.
 ---
 
 # ESP Patching
@@ -9,7 +9,7 @@ description: Create ESP patch plugins via mo2_create_patch — overrides (set_fi
 - Params: `output_name` (required), `operations` (array)
 - Each operation is either an `override` (on an existing record) or a `merge_leveled_list` (LVLI/LVLN/LVSP).
 - Override modifications supported (use as many as needed per operation):
-  - `set_fields` — named field aliases (e.g., `Health`, `Stamina`, `Value`, `Weight`, `ArmorRating`) resolve to Mutagen paths via reflection.
+  - `set_fields` — named field aliases (e.g., `Health`, `Stamina`, `Value`, `Weight`, `ArmorRating`) resolve to Mutagen paths via reflection. Also accepts `Effects: [...]` array replace-semantics on SPEL/ALCH/ENCH/SCRL/INGR (v2.8.0) and PERK (v2.9.3 — each entry carries an explicit `type:` discriminator naming the concrete `APerkEffect` leaf; 12 valid types listed in `KNOWN_ISSUES.md` § Covered as of v2.9.3, with two-level `Conditions` wrapper-object nesting for per-effect condition lists).
   - `set_flags` / `clear_flags` — general flags or NPC-specific (Essential, Protected, Female, etc.)
   - `add_keywords` / `remove_keywords`
   - `add_spells` / `remove_spells` / `add_perks` / `remove_perks` / `add_packages` / `remove_packages` / `add_factions` / `remove_factions` (faction accepts `{faction, rank}`) / `add_inventory` / `remove_inventory` / `add_outfit_items` / `remove_outfit_items` / `add_form_list_entries` / `remove_form_list_entries`

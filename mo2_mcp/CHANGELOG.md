@@ -4,9 +4,7 @@ All plugin changes are made in the Dev Build copy first. Once tested and stable,
 
 ---
 
-## v2.9.3 — TBD
-
-<Phase 5 fills in date.>
+## v2.9.3 — 2026-04-29
 
 PERK.Effects writability — closes the heavier half of the v2.8.0
 carry-over "QUST.Aliases / Stages / Objectives, PERK.Effects."

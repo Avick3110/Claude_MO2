@@ -4,7 +4,7 @@
 **Status:** Complete
 **Date:** 2026-04-28
 **Session length:** ~1h
-**Commits made:** `<work-hash>` (work) + `<hash-record>` (hash-record commit) — recorded post-commit
+**Commits made:** `25cef3a` (work) + this hash-record commit
 **Live install synced:** No (Phase 0 is docs-only; live remains at v2.9.2 per CLAUDE.md exemption — Phase 0 doesn't touch the live install or invoke MCP tools)
 
 ## Locks

@@ -339,11 +339,11 @@ Phase 2 closed with these MATRIX edits landed:
 
 ---
 
-## Phase fill-in checklist (Phase 3 hand-back)
+## Phase fill-in checklist (Phase 3 hand-back) — COMPLETE
 
-Phase 3 closes with:
+Phase 3 closed with these MATRIX live-FormID substitutions + scenario outcomes recorded:
 
-- [ ] **Live FormIDs** — replace placeholder FormIDs in Layer 3 scenarios with the FormIDs picked from the live Authoria modlist at execution time.
-- [ ] **Per-scenario PASS/FAIL** — annotate each scenario row with the readback evidence + result + measured behavior vs Phase 0/1 expectation.
-- [ ] **Scenario 3.2 in-scope-or-skip** — confirm Scenario 3.2's precondition (PlayerWerewolfFeed or analog has multi-leaf Effects array on Authoria) and either land the assertions or document the skip with reason.
-- [ ] **Test ESP cleanup verification** — confirm post-verification `<modlist>/mods/Claude Output/v2.9.3-test-*.esp` cleanup; live install state restored to v2.9.2 baseline + v2.9.3 bridge artifact.
+- [x] **Live FormIDs** — Scenario 3.1 anchor confirmed live as `Skyrim.esm:10FCFA` overridden by **Requiem - Magic Redone.esp** (load_order 1187) to `REQ_Destruction_Electromancy_050_Electromancy2` ("Electromancy") — the PLAN-named AugmentedShock60 vanilla anchor IS overridden in the Authoria load order to a renamed Requiem-derived perk; chain_length 3 (Skyrim.esm → Requiem.esp → Requiem - Magic Redone.esp). Scenario 3.2 anchor confirmed live as `Skyrim.esm:02BA1D` (PlayerWerewolfFeed) winning natively in Dawnguard.esm — NOT overridden in Authoria; chain_length 2.
+- [x] **Per-scenario PASS/FAIL** — Scenario 3.1 magnitude rebalance Value 1.5×(vanilla)→1.2×(Authoria-Requiem winner)→1.1×(v2.9.3 patch) PASS with 21/21 assertions clean (Effects-array shape + concrete leaf + property writes + 12 sibling-preservation axes including Requiem-specific Description string + Requiem's lowered Destruction>=50 condition threshold preserved). Scenario 3.2 heterogeneous 3-leaf write (PEPM + PEPAddActivateChoice + PerkAbilityEffect spanning PEPE-family + non-PEPE-family in one Effects array) PASS with 16/16 assertions clean (per-element concrete type preservation + FormLink resolution + VirtualMachineAdapter sibling passthrough).
+- [x] **Scenario 3.2 in-scope-or-skip** — IN SCOPE; precondition met (Dawnguard.esm's PlayerWerewolfFeed has 8-effect heterogeneous Effects array; the 3-leaf REPLACEMENT exercises factory dispatch on 3 distinct concrete leaf classes including a non-PEPE-family leaf). Cross-family coverage stronger than the original PLAN-text expectation.
+- [x] **Test ESP cleanup verification** — `rm` against `<modlist>/mods/Claude Output/v293-preflight.esp` + `v293-test-perk-rebalance.esp` + `v293-test-perk-multileaf.esp`; Aaron F5'd MO2; post-F5 `mo2_query_records(plugin_name=...)` for each test ESP returns `total: 0`. Live install state restored to v2.9.3 baseline.

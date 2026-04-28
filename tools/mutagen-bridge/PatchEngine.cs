@@ -1341,6 +1341,24 @@ public class PatchEngine
         if (underlying == typeof(bool)) return value.GetBoolean();
         if (underlying == typeof(string)) return value.GetString();
 
+        // v2.9.3 — JSON String → TranslatedString convenience path. Used by
+        // PerkEntryPointSetText.Text (Mutagen.Bethesda.Strings.TranslatedString
+        // Sub-Loqui slot) under set_fields:{Effects:[{type:"PerkEntryPointSetText",
+        // Text:"..."}]}. Without this branch the JSON-string flows through to
+        // Branch B's sub-LoquiObject merge (line ~1097) which expects a JSON
+        // Object, surfacing a confusing "Cannot convert JSON String to
+        // TranslatedString" error from this method's tail throw. TranslatedString
+        // has an implicit conversion from System.String — match that contract.
+        // Targeted: only fires when targetType is exactly TranslatedString
+        // (single-language Sub-Loqui — covers PEPSetText.Text + ButtonLabel on
+        // APerkEffect base + the same shape on other rec-type slots).
+        if (value.ValueKind == JsonValueKind.String
+            && underlying == typeof(Mutagen.Bethesda.Strings.TranslatedString))
+        {
+            return new Mutagen.Bethesda.Strings.TranslatedString(
+                Mutagen.Bethesda.Strings.Language.English, value.GetString());
+        }
+
         // Enum support — try parsing the string as enum name
         if (underlying.IsEnum && value.ValueKind == JsonValueKind.String)
             return Enum.Parse(underlying, value.GetString()!, ignoreCase: true);
@@ -1471,10 +1489,23 @@ public class PatchEngine
         // construct an abstract class — see EFFECTS_AUDIT.md § Constructibility.
         // BuildConditionFromJson uses the {function, operator, value, global, ...}
         // DSL the existing ApplyAddConditions handler has used since v2.4.1.
+        //
+        // v2.9.3 — APerkEffect is also abstract (12 concrete leaves: PerkAbilityEffect,
+        // PerkQuestEffect, and 10 PerkEntryPoint* leaves under abstract intermediate
+        // APerkEntryPointEffect — see APERK_EFFECTS_AUDIT.md § Inventory totals).
+        // Mirrors the typeof(Condition) special case; routes to BuildPerkEffectFromJson
+        // which dispatches via an explicit "type" discriminator naming the concrete
+        // Mutagen leaf class. Carrier dispatch is property-type-driven via reflection
+        // (Perk.Effects exposes ExtendedList<APerkEffect>), so adding the type-special-case
+        // here automatically opens set_fields:{Effects:[...]} on PERK with no carrier-list
+        // edit needed.
         if (element.ValueKind == JsonValueKind.Object && elementType.IsClass && elementType != typeof(string))
         {
             if (elementType == typeof(Condition))
                 return BuildConditionFromJson(element);
+
+            if (elementType == typeof(APerkEffect))
+                return BuildPerkEffectFromJson(element);
 
             object? entry;
             try
@@ -2338,6 +2369,94 @@ public class PatchEngine
         if (string.IsNullOrEmpty(ce.Function))
             throw new ArgumentException("Condition entry requires a 'function' field.");
         return BuildCondition(ce);
+    }
+
+    /// <summary>
+    /// v2.9.3 — JsonElement entry-point for constructing concrete APerkEffect
+    /// subclasses. Used by Branch A in <see cref="ConvertJsonElementToListItem"/>
+    /// when the array element type is <c>typeof(APerkEffect)</c>.
+    ///
+    /// Discriminator: explicit "type" field naming the concrete Mutagen leaf class
+    /// per Phase 0 Q1+Q5 lock (e.g. "PerkEntryPointModifyValue", "PerkAbilityEffect",
+    /// "PerkQuestEffect"). Reflection-resolves Mutagen.Bethesda.Skyrim.{TypeName},
+    /// rejects abstract types + non-APerkEffect-assignable types, Activator-creates
+    /// the concrete leaf, then walks each non-discriminator JSON member through
+    /// <see cref="SetPropertyByPath"/> — which recurses into v2.8.0's Branch A
+    /// (for nested Conditions: ExtendedList&lt;PerkCondition&gt; and the inner
+    /// PerkCondition.Conditions: ExtendedList&lt;Condition&gt;) and v2.9.0's
+    /// per-function parameter dispatcher untouched.
+    ///
+    /// Mirrors v2.8.0's BuildConditionFromJson extracted-from-ApplyAddConditions
+    /// pattern. See APERK_EFFECTS_AUDIT.md § Per-subclass property surface for
+    /// the 12 concrete leaves and their property types.
+    /// </summary>
+    private static APerkEffect BuildPerkEffectFromJson(JsonElement entryJson)
+    {
+        if (entryJson.ValueKind != JsonValueKind.Object)
+            throw new ArgumentException(
+                $"PerkEffect entry must be a JSON object, got {entryJson.ValueKind}.");
+
+        if (!entryJson.TryGetProperty("type", out var typeElem) || typeElem.ValueKind != JsonValueKind.String)
+            throw new ArgumentException(
+                "PerkEffect entry requires a 'type' field naming the concrete subclass " +
+                "(e.g. \"PerkEntryPointModifyValue\", \"PerkAbilityEffect\", \"PerkQuestEffect\"). " +
+                "Valid values: PerkAbilityEffect, PerkEntryPointAbsoluteValue, " +
+                "PerkEntryPointAddActivateChoice, PerkEntryPointAddLeveledItem, " +
+                "PerkEntryPointAddRangeToValue, PerkEntryPointModifyActorValue, " +
+                "PerkEntryPointModifyValue, PerkEntryPointModifyValues, " +
+                "PerkEntryPointSelectSpell, PerkEntryPointSelectText, " +
+                "PerkEntryPointSetText, PerkQuestEffect.");
+
+        var typeName = typeElem.GetString()!;
+        var fullTypeName = $"Mutagen.Bethesda.Skyrim.{typeName}";
+        var resolved = typeof(ISkyrimMod).Assembly.GetType(fullTypeName);
+        if (resolved == null)
+            throw new ArgumentException(
+                $"PerkEffect type '{typeName}' not found in Mutagen.Bethesda.Skyrim namespace. " +
+                "Valid values: PerkAbilityEffect, PerkEntryPointAbsoluteValue, " +
+                "PerkEntryPointAddActivateChoice, PerkEntryPointAddLeveledItem, " +
+                "PerkEntryPointAddRangeToValue, PerkEntryPointModifyActorValue, " +
+                "PerkEntryPointModifyValue, PerkEntryPointModifyValues, " +
+                "PerkEntryPointSelectSpell, PerkEntryPointSelectText, " +
+                "PerkEntryPointSetText, PerkQuestEffect.");
+        if (resolved.IsAbstract)
+            throw new ArgumentException(
+                $"PerkEffect type '{typeName}' is abstract — must specify a concrete leaf subclass. " +
+                "Valid values: PerkAbilityEffect, PerkEntryPointAbsoluteValue, " +
+                "PerkEntryPointAddActivateChoice, PerkEntryPointAddLeveledItem, " +
+                "PerkEntryPointAddRangeToValue, PerkEntryPointModifyActorValue, " +
+                "PerkEntryPointModifyValue, PerkEntryPointModifyValues, " +
+                "PerkEntryPointSelectSpell, PerkEntryPointSelectText, " +
+                "PerkEntryPointSetText, PerkQuestEffect.");
+        if (!typeof(APerkEffect).IsAssignableFrom(resolved))
+            throw new ArgumentException(
+                $"PerkEffect type '{typeName}' is not a subclass of APerkEffect. " +
+                "Valid values: PerkAbilityEffect, PerkEntryPointAbsoluteValue, " +
+                "PerkEntryPointAddActivateChoice, PerkEntryPointAddLeveledItem, " +
+                "PerkEntryPointAddRangeToValue, PerkEntryPointModifyActorValue, " +
+                "PerkEntryPointModifyValue, PerkEntryPointModifyValues, " +
+                "PerkEntryPointSelectSpell, PerkEntryPointSelectText, " +
+                "PerkEntryPointSetText, PerkQuestEffect.");
+
+        var entry = (APerkEffect)System.Activator.CreateInstance(resolved)!;
+
+        foreach (var member in entryJson.EnumerateObject())
+        {
+            if (member.Name == "type") continue;  // discriminator consumed above
+
+            // Reject opaque MemorySlice<Byte> blob slot on PerkQuestEffect.Unknown
+            // up-front with a clean error — it's not a write-target (per APERK_EFFECTS
+            // _AUDIT.md § Per-subclass property surface). Falling through to
+            // SetPropertyByPath would surface a confusing ConvertJsonValue error.
+            if (resolved == typeof(PerkQuestEffect) && member.Name == "Unknown")
+                throw new ArgumentException(
+                    "PerkQuestEffect.Unknown is an opaque binary blob (MemorySlice<Byte>) " +
+                    "and is not a writable field. Omit it from the Effects entry; " +
+                    "the source record's value carries through unchanged.");
+
+            SetPropertyByPath(entry, member.Name, member.Value);
+        }
+        return entry;
     }
 
     /// <summary>

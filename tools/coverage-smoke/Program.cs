@@ -9413,6 +9413,944 @@ else Skip("4.c.01-carry", "no QUST");
 }
 // ── /v2.9.2 P2 cells ──
 
+// ═══════════════════════════════════════════════════════════════════════════
+// v2.9.3 P2 — PERK.Effects writability cells (Tests 426–453)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 28 new cells per MATRIX.md § Layer 1.P (12 leaves) + § 1.D (7 negatives,
+// merged 1.D.02 base + intermediate; explicit 1.D.unknown_blob added) +
+// § Layer 2 (4 combinatorial) + § Layer 4 (5 edges).
+//
+// Carrier strategy: reuse `firstPerk` discovered at line 2871 (vanilla
+// Skyrim.esm Perk.FirstOrDefault()) for Layer 1.P / 1.D / 2 / 4 cells.
+// Replace-semantics on Effects array — any vanilla PERK works as carrier
+// since the source's own Effects gets replaced by the test payload. For
+// 1.D.06 use `firstNpcAnyForOp` (NPC_, no Effects property).
+//
+// Universal FormLink anchor: Skyrim.esm:0001A6E8 (Lydia per coverage-smoke
+// § 5228) — bridge doesn't validate FormLink target record types at
+// write-time, so any vanilla FormID round-trips for FormKey persistence.
+//
+// Builds on race-probe Halt 1+2 functional probes (which exercise the same
+// 12 leaves + DSL errors via bridge subprocess; coverage-smoke adds
+// per-cell PASS/FAIL accounting that contributes to the 425 → 453 baseline.)
+
+if (firstPerk == null)
+{
+    skipReasons.Add("v2.9.3 P2 (Tests 426–453): firstPerk null — no PERK records discoverable");
+}
+else
+{
+    var v293p2OutDir = Path.Combine(Path.GetTempPath(), "coverage-smoke-v293-p2");
+    if (Directory.Exists(v293p2OutDir)) Directory.Delete(v293p2OutDir, recursive: true);
+    Directory.CreateDirectory(v293p2OutDir);
+
+    string perkFidStr = FormatFormKey(firstPerk.FormKey);
+    const string anchorFL = "Skyrim.esm:0001A6E8";
+
+    // PEPMA Modification enum reflection — pick a valid member at probe-time
+    // (per-class enum, distinct from PEPM/PEPMs's enum). race-probe Halt 2
+    // confirmed PEPMA's enum is NOT {Set, Add, Multiply}; pick first member.
+    var pepmaType = typeof(Mutagen.Bethesda.Skyrim.PerkEntryPointModifyActorValue);
+    var pepmaModEnum = pepmaType.GetProperty("Modification")!.PropertyType;
+    var pepmaModNames = Enum.GetNames(pepmaModEnum);
+    var pepmaPick = new[] { "Multiply", "MultiplyValue", "Mult" }.FirstOrDefault(n => pepmaModNames.Contains(n))
+                    ?? pepmaModNames.FirstOrDefault() ?? "Set";
+
+    // Helper: invoke bridge for a PERK Effects-array write cell.
+    bool RunPerkEffectsCell(int testNum, string cellId, string label,
+        string carrierFid, object[] effectsArray, Action<JsonElement, IPerkGetter?> assertReadback,
+        bool expectSuccess = true)
+    {
+        Console.WriteLine($"// ── Test {testNum} ({cellId}) — {label} ──");
+        var outPath = Path.Combine(v293p2OutDir, $"test{testNum}-{cellId.Replace('.', '-')}.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+
+        var req = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke-v293",
+            records = new object[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = carrierFid,
+                    source_path = SkyrimEsm,
+                    set_fields = new Dictionary<string, object>
+                    {
+                        ["Effects"] = effectsArray,
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (stdout, _, _) = RunBridge(bridgeExe, JsonSerializer.Serialize(req));
+        bool ok = false;
+        string failNote = "";
+        try
+        {
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            bool succ = root.GetProperty("success").GetBoolean();
+            if (expectSuccess && !succ)
+            {
+                failNote = $"bridge success=false; details: {(root.TryGetProperty("details", out var dets) && dets.GetArrayLength() > 0 ? dets[0].ToString() : "<none>")}";
+            }
+            else if (!expectSuccess && succ)
+            {
+                failNote = "bridge success=true but expected failure";
+            }
+            else if (expectSuccess)
+            {
+                if (!File.Exists(outPath)) failNote = "output ESP missing";
+                else
+                {
+                    using var outMod = SkyrimMod.CreateFromBinaryOverlay(outPath, SkyrimRelease.SkyrimSE);
+                    var rb = outMod.Perks.FirstOrDefault(p => p.FormKey.ToString() == FormatFormKey(firstPerk.FormKey).Substring("Skyrim.esm:".Length).TrimStart('0').PadLeft(6, '0') + ":Skyrim.esm")
+                             ?? outMod.Perks.FirstOrDefault();
+                    assertReadback(root, rb);
+                    ok = true;
+                }
+            }
+            else
+            {
+                // Negative case: success=false as expected; let asserter inspect error.
+                assertReadback(root, null);
+                ok = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            failNote = $"{ex.GetType().Name}: {ex.Message}";
+        }
+        Console.WriteLine(ok ? $"  [{cellId}] PASS" : $"  [{cellId}] FAIL: {failNote}");
+        if (!ok)
+        {
+            failures++;
+            if (stdout.Length < 1500) Console.WriteLine($"  raw: {stdout}");
+            else Console.WriteLine($"  raw[:1500]: {stdout.Substring(0, 1500)}");
+        }
+        Console.WriteLine();
+        return ok;
+    }
+
+    // Helper: standard leaf-shape assertion (Effects.Count==1 + runtime type matches).
+    void AssertLeaf(IPerkGetter? rb, string expectedTypeName, Action<object>? extra = null)
+    {
+        if (rb == null) throw new Exception("readback PERK null");
+        if (rb.Effects.Count != 1) throw new Exception($"Effects.Count={rb.Effects.Count} (expected 1)");
+        var eff = rb.Effects[0];
+        if (eff.GetType().Name != expectedTypeName)
+            throw new Exception($"runtime type {eff.GetType().Name} (expected {expectedTypeName})");
+        extra?.Invoke(eff);
+    }
+
+    // FormKey readback helper (FormLink → .FormKey direct OR .Link.FormKey for IFormLinkOrIndex).
+    static string ReadFlFormKey(object container, string slotName)
+    {
+        var slotProp = container.GetType().GetProperty(slotName);
+        var slotVal = slotProp?.GetValue(container);
+        if (slotVal == null) return "<null-slot>";
+        var fkProp = slotVal.GetType().GetProperty("FormKey");
+        var fk = fkProp?.GetValue(slotVal);
+        if (fk != null) return fk.ToString() ?? "<null>";
+        var linkProp = slotVal.GetType().GetProperty("Link");
+        var linkVal = linkProp?.GetValue(slotVal);
+        if (linkVal == null) return "<null-link>";
+        var fkProp2 = linkVal.GetType().GetProperty("FormKey");
+        return fkProp2?.GetValue(linkVal)?.ToString() ?? "<null>";
+    }
+
+    // ═══ Layer 1.P — 12 leaf positives (Tests 426–437) ═══
+
+    // Test 426 (1.P.PerkEntryPointModifyValue.minimal)
+    RunPerkEffectsCell(426, "1.P.PerkEntryPointModifyValue.minimal",
+        "PEPM minimal (no Conditions)", perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkEntryPointModifyValue",
+                ["EntryPoint"] = "ModSpellMagnitude",
+                ["Modification"] = "Multiply",
+                ["Value"] = 1.4f,
+            }
+        },
+        (root, rb) => AssertLeaf(rb, "PerkEntryPointModifyValue", eff => {
+            var t = eff.GetType();
+            var ep = t.GetProperty("EntryPoint")?.GetValue(eff)?.ToString();
+            var mod = t.GetProperty("Modification")?.GetValue(eff)?.ToString();
+            var val = t.GetProperty("Value")?.GetValue(eff);
+            if (ep != "ModSpellMagnitude") throw new Exception($"EntryPoint={ep}");
+            if (mod != "Multiply") throw new Exception($"Modification={mod}");
+            if (val == null || Math.Abs(Convert.ToSingle(val) - 1.4f) > 0.0001f) throw new Exception($"Value={val}");
+        }));
+
+    // Test 427 (1.P.PerkEntryPointModifyValue.with_perk_conditions)
+    RunPerkEffectsCell(427, "1.P.PerkEntryPointModifyValue.with_perk_conditions",
+        "PEPM with nested PerkCondition wrapper + GetActorValue (Q7 wrapper-DSL)",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkEntryPointModifyValue",
+                ["EntryPoint"] = "ModSpellMagnitude",
+                ["Modification"] = "Multiply",
+                ["Value"] = 1.4f,
+                ["PerkConditionTabCount"] = (byte)1,
+                ["Conditions"] = new object[] {
+                    new Dictionary<string, object> {
+                        ["RunOnTabIndex"] = 1,
+                        ["Conditions"] = new object[] {
+                            new Dictionary<string, object> {
+                                ["function"] = "GetActorValue",
+                                ["operator"] = ">=",
+                                ["value"] = 60f,
+                                ["parameters"] = new Dictionary<string, object> { ["ActorValue"] = "Destruction" },
+                            }
+                        },
+                    }
+                },
+            }
+        },
+        (root, rb) => AssertLeaf(rb, "PerkEntryPointModifyValue", eff => {
+            var conds = eff.GetType().GetProperty("Conditions")?.GetValue(eff) as System.Collections.IEnumerable;
+            var outer = conds?.Cast<object>().ToList() ?? new List<object>();
+            if (outer.Count != 1) throw new Exception($"outer Conditions.Count={outer.Count}");
+            var inner = outer[0].GetType().GetProperty("Conditions")?.GetValue(outer[0]) as System.Collections.IEnumerable;
+            var innerList = inner?.Cast<object>().ToList() ?? new List<object>();
+            if (innerList.Count != 1) throw new Exception($"inner Conditions.Count={innerList.Count}");
+            var data = innerList[0].GetType().GetProperty("Data")?.GetValue(innerList[0]);
+            if (data?.GetType().Name != "GetActorValueConditionData") throw new Exception($"inner Data type={data?.GetType().Name}");
+            var av = data.GetType().GetProperty("ActorValue")?.GetValue(data)?.ToString();
+            if (av != "Destruction") throw new Exception($"ActorValue={av}");
+        }));
+
+    // Test 428 (1.P.PerkEntryPointModifyValue.with_v290_params) — composition probe
+    RunPerkEffectsCell(428, "1.P.PerkEntryPointModifyValue.with_v290_params",
+        "PEPM with HasPerk parameters (v2.9.0 dispatcher composition probe)",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkEntryPointModifyValue",
+                ["EntryPoint"] = "ModSpellMagnitude",
+                ["Modification"] = "Multiply",
+                ["Value"] = 1.4f,
+                ["PerkConditionTabCount"] = (byte)1,
+                ["Conditions"] = new object[] {
+                    new Dictionary<string, object> {
+                        ["RunOnTabIndex"] = 1,
+                        ["Conditions"] = new object[] {
+                            new Dictionary<string, object> {
+                                ["function"] = "HasPerk",
+                                ["operator"] = "==",
+                                ["value"] = 1f,
+                                ["parameters"] = new Dictionary<string, object> { ["Perk"] = anchorFL },
+                            }
+                        },
+                    }
+                },
+            }
+        },
+        (root, rb) => AssertLeaf(rb, "PerkEntryPointModifyValue", eff => {
+            var conds = (eff.GetType().GetProperty("Conditions")?.GetValue(eff) as System.Collections.IEnumerable)?.Cast<object>().ToList() ?? new List<object>();
+            if (conds.Count != 1) throw new Exception($"outer={conds.Count}");
+            var inner = (conds[0].GetType().GetProperty("Conditions")?.GetValue(conds[0]) as System.Collections.IEnumerable)?.Cast<object>().ToList() ?? new List<object>();
+            if (inner.Count != 1) throw new Exception($"inner={inner.Count}");
+            var data = inner[0].GetType().GetProperty("Data")?.GetValue(inner[0]);
+            if (data?.GetType().Name != "HasPerkConditionData") throw new Exception($"data={data?.GetType().Name}");
+            var fkStr = ReadFlFormKey(data, "Perk");
+            if (!fkStr.Contains("1A6E8", StringComparison.OrdinalIgnoreCase)) throw new Exception($"Perk fk={fkStr}");
+        }));
+
+    // Test 429 (1.P.PerkEntryPointSelectSpell.basic)
+    RunPerkEffectsCell(429, "1.P.PerkEntryPointSelectSpell.basic",
+        "PerkEntryPointSelectSpell with Spell IFormLink<ISpellGetter>",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkEntryPointSelectSpell",
+                ["EntryPoint"] = "Activate",
+                ["Spell"] = anchorFL,
+            }
+        },
+        (root, rb) => AssertLeaf(rb, "PerkEntryPointSelectSpell", eff => {
+            var fk = ReadFlFormKey(eff, "Spell");
+            if (!fk.Contains("1A6E8", StringComparison.OrdinalIgnoreCase)) throw new Exception($"Spell fk={fk}");
+        }));
+
+    // Test 430 (1.P.PerkEntryPointModifyActorValue.basic)
+    RunPerkEffectsCell(430, "1.P.PerkEntryPointModifyActorValue.basic",
+        "PEPMA with ActorValue + per-class Modification + Single Value",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkEntryPointModifyActorValue",
+                ["EntryPoint"] = "ModSpellMagnitude",
+                ["ActorValue"] = "Destruction",
+                ["Modification"] = pepmaPick,
+                ["Value"] = 1.5f,
+            }
+        },
+        (root, rb) => AssertLeaf(rb, "PerkEntryPointModifyActorValue", eff => {
+            var t = eff.GetType();
+            if (t.GetProperty("ActorValue")?.GetValue(eff)?.ToString() != "Destruction") throw new Exception("ActorValue");
+            if (t.GetProperty("Modification")?.GetValue(eff)?.ToString() != pepmaPick) throw new Exception("Modification");
+            var v = t.GetProperty("Value")?.GetValue(eff);
+            if (v == null || Math.Abs(Convert.ToSingle(v) - 1.5f) > 0.0001f) throw new Exception($"Value={v}");
+        }));
+
+    // Test 431 (1.P.PerkAbilityEffect.basic)
+    RunPerkEffectsCell(431, "1.P.PerkAbilityEffect.basic",
+        "PerkAbilityEffect with Ability FormLink",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkAbilityEffect",
+                ["Ability"] = anchorFL,
+            }
+        },
+        (root, rb) => AssertLeaf(rb, "PerkAbilityEffect", eff => {
+            var fk = ReadFlFormKey(eff, "Ability");
+            if (!fk.Contains("1A6E8", StringComparison.OrdinalIgnoreCase)) throw new Exception($"Ability fk={fk}");
+        }));
+
+    // Test 432 (1.P.PerkQuestEffect.basic)
+    RunPerkEffectsCell(432, "1.P.PerkQuestEffect.basic",
+        "PerkQuestEffect with Quest FormLink + Stage Byte",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkQuestEffect",
+                ["Quest"] = anchorFL,
+                ["Stage"] = 100,
+            }
+        },
+        (root, rb) => AssertLeaf(rb, "PerkQuestEffect", eff => {
+            var fk = ReadFlFormKey(eff, "Quest");
+            if (!fk.Contains("1A6E8", StringComparison.OrdinalIgnoreCase)) throw new Exception($"Quest fk={fk}");
+            var stage = eff.GetType().GetProperty("Stage")?.GetValue(eff);
+            if (stage == null || Convert.ToInt32(stage) != 100) throw new Exception($"Stage={stage}");
+        }));
+
+    // Test 433 (1.P.PerkEntryPointAddActivateChoice.basic)
+    RunPerkEffectsCell(433, "1.P.PerkEntryPointAddActivateChoice.basic",
+        "AddActivateChoice with IFormLinkNullable<ISpellGetter>",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkEntryPointAddActivateChoice",
+                ["EntryPoint"] = "Activate",
+                ["Spell"] = anchorFL,
+            }
+        },
+        (root, rb) => AssertLeaf(rb, "PerkEntryPointAddActivateChoice", eff => {
+            var fk = ReadFlFormKey(eff, "Spell");
+            if (!fk.Contains("1A6E8", StringComparison.OrdinalIgnoreCase)) throw new Exception($"Spell fk={fk}");
+        }));
+
+    // Test 434 (1.P.PerkEntryPointSetText.basic) — TranslatedString convenience path (v2.9.3)
+    RunPerkEffectsCell(434, "1.P.PerkEntryPointSetText.basic",
+        "PEPSetText with TranslatedString (plain-string convenience)",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkEntryPointSetText",
+                ["EntryPoint"] = "Activate",
+                ["Text"] = "v2.9.3 set text",
+            }
+        },
+        (root, rb) => AssertLeaf(rb, "PerkEntryPointSetText", eff => {
+            var text = eff.GetType().GetProperty("Text")?.GetValue(eff)?.ToString();
+            if (text == null || !text.Contains("v2.9.3 set text")) throw new Exception($"Text={text}");
+        }));
+
+    // Test 435 (1.P.PerkEntryPointSelectText.basic) — plain System.String
+    RunPerkEffectsCell(435, "1.P.PerkEntryPointSelectText.basic",
+        "PEPSelectText with plain System.String",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkEntryPointSelectText",
+                ["EntryPoint"] = "Activate",
+                ["Text"] = "v2.9.3 select text",
+            }
+        },
+        (root, rb) => AssertLeaf(rb, "PerkEntryPointSelectText", eff => {
+            var text = eff.GetType().GetProperty("Text")?.GetValue(eff) as string;
+            if (text != "v2.9.3 select text") throw new Exception($"Text={text ?? "<null>"}");
+        }));
+
+    // Test 436 (1.P.PerkEntryPointAbsoluteValue.basic) — Boolean Negative slot
+    RunPerkEffectsCell(436, "1.P.PerkEntryPointAbsoluteValue.basic",
+        "PEPAbsoluteValue with Boolean Negative",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkEntryPointAbsoluteValue",
+                ["EntryPoint"] = "Activate",
+                ["Negative"] = false,
+            }
+        },
+        (root, rb) => AssertLeaf(rb, "PerkEntryPointAbsoluteValue", eff => {
+            var n = eff.GetType().GetProperty("Negative")?.GetValue(eff);
+            if (n == null || (bool)n != false) throw new Exception($"Negative={n}");
+        }));
+
+    // Test 437 (1.P.PerkEntryPointAddLeveledItem.basic)
+    RunPerkEffectsCell(437, "1.P.PerkEntryPointAddLeveledItem.basic",
+        "PEPAddLeveledItem with Item IFormLink<ILeveledItemGetter>",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkEntryPointAddLeveledItem",
+                ["EntryPoint"] = "Activate",
+                ["Item"] = anchorFL,
+            }
+        },
+        (root, rb) => AssertLeaf(rb, "PerkEntryPointAddLeveledItem", eff => {
+            var fk = ReadFlFormKey(eff, "Item");
+            if (!fk.Contains("1A6E8", StringComparison.OrdinalIgnoreCase)) throw new Exception($"Item fk={fk}");
+        }));
+
+    // Test 438 (1.P.PerkEntryPointAddRangeToValue.basic)
+    RunPerkEffectsCell(438, "1.P.PerkEntryPointAddRangeToValue.basic",
+        "PEPAddRangeToValue with From + To Single range",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkEntryPointAddRangeToValue",
+                ["EntryPoint"] = "Activate",
+                ["From"] = 0.5f,
+                ["To"] = 1.5f,
+            }
+        },
+        (root, rb) => AssertLeaf(rb, "PerkEntryPointAddRangeToValue", eff => {
+            var f = eff.GetType().GetProperty("From")?.GetValue(eff);
+            var t = eff.GetType().GetProperty("To")?.GetValue(eff);
+            if (f == null || Math.Abs(Convert.ToSingle(f) - 0.5f) > 0.0001f) throw new Exception($"From={f}");
+            if (t == null || Math.Abs(Convert.ToSingle(t) - 1.5f) > 0.0001f) throw new Exception($"To={t}");
+        }));
+
+    // Test 439 (1.P.PerkEntryPointModifyValues.basic) — dual Nullable<Single>
+    RunPerkEffectsCell(439, "1.P.PerkEntryPointModifyValues.basic",
+        "PEPModifyValues with dual Nullable<Single> Value + Value2",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkEntryPointModifyValues",
+                ["EntryPoint"] = "Activate",
+                ["Modification"] = "Multiply",
+                ["Value"] = 1.5f,
+                ["Value2"] = 0.8f,
+            }
+        },
+        (root, rb) => AssertLeaf(rb, "PerkEntryPointModifyValues", eff => {
+            var v1 = eff.GetType().GetProperty("Value")?.GetValue(eff);
+            var v2 = eff.GetType().GetProperty("Value2")?.GetValue(eff);
+            if (v1 == null || Math.Abs(Convert.ToSingle(v1) - 1.5f) > 0.0001f) throw new Exception($"Value={v1}");
+            if (v2 == null || Math.Abs(Convert.ToSingle(v2) - 0.8f) > 0.0001f) throw new Exception($"Value2={v2}");
+        }));
+
+    // ═══ Layer 1.D — 7 negatives (Tests 440–446) ═══
+
+    // Test 440 (1.D.01) — discriminator unknown
+    RunPerkEffectsCell(440, "1.D.01", "type='BogusType' → discriminator-not-found error",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> { ["type"] = "BogusType", ["EntryPoint"] = "Activate" }
+        },
+        (root, _) => {
+            var err = root.GetProperty("details")[0].GetProperty("error").GetString() ?? "";
+            if (!err.Contains("BogusType") || !err.Contains("not found")) throw new Exception($"err={err}");
+        }, expectSuccess: false);
+
+    // Test 441 (1.D.02a) — abstract base APerkEffect
+    RunPerkEffectsCell(441, "1.D.02a", "type='APerkEffect' (abstract base) → reject",
+        perkFidStr,
+        new object[] { new Dictionary<string, object> { ["type"] = "APerkEffect" } },
+        (root, _) => {
+            var err = root.GetProperty("details")[0].GetProperty("error").GetString() ?? "";
+            if (!err.Contains("APerkEffect") || !err.Contains("abstract")) throw new Exception($"err={err}");
+        }, expectSuccess: false);
+
+    // Test 442 (1.D.02b) — abstract intermediate APerkEntryPointEffect
+    RunPerkEffectsCell(442, "1.D.02b", "type='APerkEntryPointEffect' (abstract intermediate) → reject",
+        perkFidStr,
+        new object[] { new Dictionary<string, object> { ["type"] = "APerkEntryPointEffect" } },
+        (root, _) => {
+            var err = root.GetProperty("details")[0].GetProperty("error").GetString() ?? "";
+            if (!err.Contains("APerkEntryPointEffect") || !err.Contains("abstract")) throw new Exception($"err={err}");
+        }, expectSuccess: false);
+
+    // Test 443 (1.D.03) — missing 'type' discriminator
+    RunPerkEffectsCell(443, "1.D.03", "missing 'type' key → reject",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> { ["EntryPoint"] = "Activate", ["Modification"] = "Multiply" }
+        },
+        (root, _) => {
+            var err = root.GetProperty("details")[0].GetProperty("error").GetString() ?? "";
+            if (!err.Contains("type", StringComparison.OrdinalIgnoreCase) ||
+                !(err.Contains("requires", StringComparison.OrdinalIgnoreCase) || err.Contains("missing", StringComparison.OrdinalIgnoreCase)))
+                throw new Exception($"err={err}");
+        }, expectSuccess: false);
+
+    // Test 444 (1.D.05) — unknown property on PerkEntryPointModifyValue (existing Branch B path)
+    RunPerkEffectsCell(444, "1.D.05", "unknown property 'BogusField' on leaf → reject",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> { ["type"] = "PerkEntryPointModifyValue", ["BogusField"] = "x" }
+        },
+        (root, _) => {
+            var err = root.GetProperty("details")[0].GetProperty("error").GetString() ?? "";
+            if (!err.Contains("BogusField", StringComparison.Ordinal)) throw new Exception($"err={err}");
+        }, expectSuccess: false);
+
+    // Test 445 (1.D.06) — Effects-list on non-carrier NPC_
+    if (firstNpcAnyForOp != null)
+    {
+        RunPerkEffectsCell(445, "1.D.06", "Effects-list on NPC_ (non-carrier) → reject",
+            FormatFormKey(firstNpcAnyForOp.FormKey),
+            new object[] {
+                new Dictionary<string, object> { ["type"] = "PerkEntryPointModifyValue" }
+            },
+            (root, _) => {
+                var err = root.GetProperty("details")[0].GetProperty("error").GetString() ?? "";
+                if (!(err.Contains("Effects", StringComparison.Ordinal) || err.Contains("property", StringComparison.OrdinalIgnoreCase)))
+                    throw new Exception($"err={err}");
+            }, expectSuccess: false);
+    }
+    else
+    {
+        skipReasons.Add("Test 445 (1.D.06): firstNpcAnyForOp null — no NPC_ records discoverable");
+    }
+
+    // Test 446 (1.D.unknown_blob) — PerkQuestEffect.Unknown MemorySlice reject
+    RunPerkEffectsCell(446, "1.D.unknown_blob",
+        "PerkQuestEffect.Unknown MemorySlice<Byte> opaque blob → reject",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkQuestEffect",
+                ["Quest"] = anchorFL,
+                ["Stage"] = 100,
+                ["Unknown"] = "ignored-blob-bytes",
+            }
+        },
+        (root, _) => {
+            var err = root.GetProperty("details")[0].GetProperty("error").GetString() ?? "";
+            if (!err.Contains("Unknown", StringComparison.Ordinal) ||
+                !(err.Contains("opaque", StringComparison.OrdinalIgnoreCase) || err.Contains("MemorySlice", StringComparison.OrdinalIgnoreCase)))
+                throw new Exception($"err={err}");
+        }, expectSuccess: false);
+
+    // ═══ Layer 2 — 4 combinatorial (Tests 447–450) ═══
+
+    // Test 447 (2.01) — heterogeneous leaves in one Effects array
+    RunPerkEffectsCell(447, "2.01",
+        "heterogeneous leaves: PEPM + PerkAbilityEffect + PerkQuestEffect in one array",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkEntryPointModifyValue",
+                ["EntryPoint"] = "ModSpellMagnitude",
+                ["Modification"] = "Multiply",
+                ["Value"] = 1.4f,
+            },
+            new Dictionary<string, object> {
+                ["type"] = "PerkAbilityEffect",
+                ["Ability"] = anchorFL,
+            },
+            new Dictionary<string, object> {
+                ["type"] = "PerkQuestEffect",
+                ["Quest"] = anchorFL,
+                ["Stage"] = 100,
+            },
+        },
+        (root, rb) => {
+            if (rb == null) throw new Exception("rb null");
+            if (rb.Effects.Count != 3) throw new Exception($"Effects.Count={rb.Effects.Count}");
+            if (rb.Effects[0].GetType().Name != "PerkEntryPointModifyValue") throw new Exception($"[0]={rb.Effects[0].GetType().Name}");
+            if (rb.Effects[1].GetType().Name != "PerkAbilityEffect") throw new Exception($"[1]={rb.Effects[1].GetType().Name}");
+            if (rb.Effects[2].GetType().Name != "PerkQuestEffect") throw new Exception($"[2]={rb.Effects[2].GetType().Name}");
+        });
+
+    // Test 448 (2.02) — replace-semantics + Tier C scalar coexistence
+    {
+        // Special case: also passes top-level scalars Level/NumRanks/Trait via set_fields.
+        var outPath = Path.Combine(v293p2OutDir, "test448-2-02.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        Console.WriteLine($"// ── Test 448 (2.02) — Effects replace + top-level scalar coexistence ──");
+        var req448 = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke-v293",
+            records = new object[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = perkFidStr,
+                    source_path = SkyrimEsm,
+                    set_fields = new Dictionary<string, object>
+                    {
+                        ["Effects"] = new object[] {
+                            new Dictionary<string, object> {
+                                ["type"] = "PerkEntryPointModifyValue",
+                                ["EntryPoint"] = "ModSpellMagnitude",
+                                ["Modification"] = "Multiply",
+                                ["Value"] = 1.4f,
+                            }
+                        },
+                        ["Level"] = (byte)25,
+                        ["NumRanks"] = (byte)3,
+                        ["Trait"] = true,
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (so448, _, _) = RunBridge(bridgeExe, JsonSerializer.Serialize(req448));
+        bool ok448 = false; string note = "";
+        try
+        {
+            using var doc = JsonDocument.Parse(so448);
+            var root = doc.RootElement;
+            if (!root.GetProperty("success").GetBoolean()) note = "success=false";
+            else if (!File.Exists(outPath)) note = "ESP missing";
+            else
+            {
+                using var outMod = SkyrimMod.CreateFromBinaryOverlay(outPath, SkyrimRelease.SkyrimSE);
+                var rb = outMod.Perks.FirstOrDefault();
+                if (rb == null) note = "rb null";
+                else if (rb.Effects.Count != 1) note = $"Effects.Count={rb.Effects.Count}";
+                else if (rb.Level != 25) note = $"Level={rb.Level}";
+                else if (rb.NumRanks != 3) note = $"NumRanks={rb.NumRanks}";
+                else if (rb.Trait != true) note = $"Trait={rb.Trait}";
+                else ok448 = true;
+            }
+        }
+        catch (Exception ex) { note = $"{ex.GetType().Name}: {ex.Message}"; }
+        Console.WriteLine(ok448 ? "  [2.02] PASS" : $"  [2.02] FAIL: {note}");
+        if (!ok448) failures++;
+        Console.WriteLine();
+    }
+
+    // Test 449 (2.03) — full-stack composition (Branch A → factory → wrapper → Condition factory → v2.9.0 dispatcher)
+    RunPerkEffectsCell(449, "2.03",
+        "full-stack composition with 2-level Conditions nesting + HasPerk parameters",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkEntryPointModifyValue",
+                ["EntryPoint"] = "ModSpellMagnitude",
+                ["Modification"] = "Multiply",
+                ["Value"] = 1.4f,
+                ["PerkConditionTabCount"] = (byte)1,
+                ["Conditions"] = new object[] {
+                    new Dictionary<string, object> {
+                        ["RunOnTabIndex"] = 1,
+                        ["Conditions"] = new object[] {
+                            new Dictionary<string, object> {
+                                ["function"] = "HasPerk",
+                                ["operator"] = "==",
+                                ["value"] = 1f,
+                                ["parameters"] = new Dictionary<string, object> { ["Perk"] = anchorFL },
+                            }
+                        },
+                    }
+                },
+            }
+        },
+        (root, rb) => AssertLeaf(rb, "PerkEntryPointModifyValue", eff => {
+            var conds = (eff.GetType().GetProperty("Conditions")?.GetValue(eff) as System.Collections.IEnumerable)?.Cast<object>().ToList() ?? new List<object>();
+            if (conds.Count != 1) throw new Exception("outer != 1");
+            var inner = (conds[0].GetType().GetProperty("Conditions")?.GetValue(conds[0]) as System.Collections.IEnumerable)?.Cast<object>().ToList() ?? new List<object>();
+            if (inner.Count != 1) throw new Exception("inner != 1");
+            var data = inner[0].GetType().GetProperty("Data")?.GetValue(inner[0]);
+            if (data?.GetType().Name != "HasPerkConditionData") throw new Exception($"data={data?.GetType().Name}");
+            if (!ReadFlFormKey(data, "Perk").Contains("1A6E8", StringComparison.OrdinalIgnoreCase)) throw new Exception("Perk fk");
+        }));
+
+    // Test 450 (2.04) — empty-array clear
+    RunPerkEffectsCell(450, "2.04", "Effects: [] empty-clear → Effects.Count=0",
+        perkFidStr,
+        new object[] { /* empty */ },
+        (root, rb) => {
+            if (rb == null) throw new Exception("rb null");
+            if (rb.Effects.Count != 0) throw new Exception($"Effects.Count={rb.Effects.Count}");
+        });
+
+    // ═══ Layer 4 — 5 edges (Tests 451–455 = 5 cells but 451–455 is 5; matches 28-cell target) ═══
+
+    // Test 451 (4.dsl.01) — write/read symmetry round-trip
+    // Same as 426 + post-write readback shape verification (Effects[0] keys match
+    // what mo2_record_detail would render). For the v2.9.3 P2 layer this is
+    // structurally redundant with 426 — but the cell semantic is "render shape
+    // matches vanilla on Mutagen-direct readback" rather than just round-trip.
+    RunPerkEffectsCell(451, "4.dsl.01",
+        "write/read symmetry — Effects[0] keys match vanilla render shape",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkEntryPointModifyValue",
+                ["EntryPoint"] = "ModSpellMagnitude",
+                ["Modification"] = "Multiply",
+                ["Value"] = 1.4f,
+            }
+        },
+        (root, rb) => AssertLeaf(rb, "PerkEntryPointModifyValue", eff => {
+            // Verify the leaf exposes the property surface a v2.9.2 read-side render would emit.
+            var t = eff.GetType();
+            var props = new[] { "EntryPoint", "Modification", "Value", "Conditions", "PerkConditionTabCount", "Rank", "Priority", "Flags" };
+            foreach (var p in props)
+            {
+                if (t.GetProperty(p) == null) throw new Exception($"missing render prop {p}");
+            }
+        }));
+
+    // Test 452 (4.dsl.03) — enum parse error on EntryPoint
+    RunPerkEffectsCell(452, "4.dsl.03",
+        "EntryPoint='BogusEntryPoint' → enum parse error",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkEntryPointModifyValue",
+                ["EntryPoint"] = "BogusEntryPoint",
+                ["Modification"] = "Multiply",
+                ["Value"] = 1.4f,
+            }
+        },
+        (root, _) => {
+            var err = root.GetProperty("details")[0].GetProperty("error").GetString() ?? "";
+            if (!err.Contains("BogusEntryPoint", StringComparison.OrdinalIgnoreCase)) throw new Exception($"err={err}");
+        }, expectSuccess: false);
+
+    // Test 453 (4.dsl.04) — empty outer Conditions list
+    RunPerkEffectsCell(453, "4.dsl.04",
+        "Effects[0].Conditions=[] (empty outer wrapper-list)",
+        perkFidStr,
+        new object[] {
+            new Dictionary<string, object> {
+                ["type"] = "PerkEntryPointModifyValue",
+                ["EntryPoint"] = "Activate",
+                ["Conditions"] = new object[0],
+            }
+        },
+        (root, rb) => AssertLeaf(rb, "PerkEntryPointModifyValue", eff => {
+            var conds = (eff.GetType().GetProperty("Conditions")?.GetValue(eff) as System.Collections.IEnumerable)?.Cast<object>().ToList() ?? new List<object>();
+            if (conds.Count != 0) throw new Exception($"outer Conditions.Count={conds.Count}");
+        }));
+
+    // Test 454 (4.dsl.05) — sibling preservation: write Effects only; PERK top-level
+    // Description / NumRanks / Trait / Level / PerkSection untouched (carry through
+    // from source). Exercises the v2.7.x Tier B/C/D in-place merge invariant when
+    // composed with v2.9.3's Effects-array replace-semantics.
+    {
+        var outPath = Path.Combine(v293p2OutDir, "test454-4-dsl-05.esp");
+        if (File.Exists(outPath)) File.Delete(outPath);
+        Console.WriteLine($"// ── Test 454 (4.dsl.05) — sibling preservation: Effects write doesn't bleed into top-level scalars ──");
+        // Capture source values for delta-comparison.
+        var srcLevel = firstPerk.Level;
+        var srcNumRanks = firstPerk.NumRanks;
+        var srcTrait = firstPerk.Trait;
+
+        var req454 = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke-v293",
+            records = new object[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = perkFidStr,
+                    source_path = SkyrimEsm,
+                    set_fields = new Dictionary<string, object>
+                    {
+                        ["Effects"] = new object[] {
+                            new Dictionary<string, object> {
+                                ["type"] = "PerkEntryPointModifyValue",
+                                ["EntryPoint"] = "ModSpellMagnitude",
+                                ["Modification"] = "Multiply",
+                                ["Value"] = 1.4f,
+                            }
+                        },
+                    },
+                },
+            },
+            load_order = new { game_release = "SkyrimSE", listings = loadOrderListings },
+        };
+        var (so454, _, _) = RunBridge(bridgeExe, JsonSerializer.Serialize(req454));
+        bool ok454 = false; string note454 = "";
+        try
+        {
+            using var doc = JsonDocument.Parse(so454);
+            if (!doc.RootElement.GetProperty("success").GetBoolean()) note454 = "success=false";
+            else
+            {
+                using var outMod = SkyrimMod.CreateFromBinaryOverlay(outPath, SkyrimRelease.SkyrimSE);
+                var rb = outMod.Perks.FirstOrDefault();
+                if (rb == null) note454 = "rb null";
+                else if (rb.Effects.Count != 1) note454 = $"Effects.Count={rb.Effects.Count}";
+                else if (rb.Level != srcLevel) note454 = $"Level changed: {srcLevel} → {rb.Level}";
+                else if (rb.NumRanks != srcNumRanks) note454 = $"NumRanks changed: {srcNumRanks} → {rb.NumRanks}";
+                else if (rb.Trait != srcTrait) note454 = $"Trait changed: {srcTrait} → {rb.Trait}";
+                else ok454 = true;
+            }
+        }
+        catch (Exception ex) { note454 = $"{ex.GetType().Name}: {ex.Message}"; }
+        Console.WriteLine(ok454 ? "  [4.dsl.05] PASS" : $"  [4.dsl.05] FAIL: {note454}");
+        if (!ok454) failures++;
+        Console.WriteLine();
+    }
+
+    // Test 455 (4.dsl.02) — cross-master FormLink in nested condition.
+    // Synthetic two-plugin fixture: master plugin defines a Perk, override
+    // plugin's PERK has a v2.9.3 PerkEntryPointModifyValue with nested HasPerk
+    // condition referencing the master's perk FormLink. Verifies v2.6.0's
+    // load-order-aware compacted FormID write composes with v2.9.3's nested
+    // PerkConditions write path. Mirrors test 425's synthetic two-plugin fixture
+    // pattern (P4 cross-master expansion) on the write side.
+    {
+        var crossDir = Path.Combine(Path.GetTempPath(), "coverage-smoke-v293-crossmaster");
+        if (Directory.Exists(crossDir)) Directory.Delete(crossDir, recursive: true);
+        Directory.CreateDirectory(crossDir);
+
+        var masterKey = ModKey.FromNameAndExtension("CSV293Master.esp");
+        var overrideKey = ModKey.FromNameAndExtension("CSV293Override.esp");
+
+        var masterMod = new SkyrimMod(masterKey, SkyrimRelease.SkyrimSE);
+        var masterPerk = new Perk(new FormKey(masterKey, 0x800), SkyrimRelease.SkyrimSE)
+        {
+            EditorID = "CSV293MasterPerk",
+        };
+        masterMod.Perks.Add(masterPerk);
+
+        var overrideMod = new SkyrimMod(overrideKey, SkyrimRelease.SkyrimSE);
+        var overridePerk = new Perk(new FormKey(overrideKey, 0x801), SkyrimRelease.SkyrimSE)
+        {
+            EditorID = "CSV293OverridePerk",
+        };
+        overrideMod.Perks.Add(overridePerk);
+
+        var masterPath = Path.Combine(crossDir, "CSV293Master.esp").Replace('\\', '/');
+        var overridePath = Path.Combine(crossDir, "CSV293Override.esp").Replace('\\', '/');
+        masterMod.WriteToBinary(masterPath);
+        overrideMod.WriteToBinary(overridePath);
+
+        var overridePerkFid = $"CSV293Override.esp:{overridePerk.FormKey.ID:X6}";
+        var masterPerkFid = $"CSV293Master.esp:{masterPerk.FormKey.ID:X6}";
+        var outPath = Path.Combine(crossDir, "v293-test455-out.esp");
+
+        Console.WriteLine($"// ── Test 455 (4.dsl.02) — cross-master FormLink in nested HasPerk condition ──");
+        var req455 = new
+        {
+            command = "patch",
+            output_path = outPath,
+            esl_flag = false,
+            author = "coverage-smoke-v293",
+            records = new object[]
+            {
+                new
+                {
+                    op = "override",
+                    formid = overridePerkFid,
+                    source_path = overridePath,
+                    set_fields = new Dictionary<string, object>
+                    {
+                        ["Effects"] = new object[] {
+                            new Dictionary<string, object> {
+                                ["type"] = "PerkEntryPointModifyValue",
+                                ["EntryPoint"] = "ModSpellMagnitude",
+                                ["Modification"] = "Multiply",
+                                ["Value"] = 1.4f,
+                                ["PerkConditionTabCount"] = (byte)1,
+                                ["Conditions"] = new object[] {
+                                    new Dictionary<string, object> {
+                                        ["RunOnTabIndex"] = 1,
+                                        ["Conditions"] = new object[] {
+                                            new Dictionary<string, object> {
+                                                ["function"] = "HasPerk",
+                                                ["operator"] = "==",
+                                                ["value"] = 1f,
+                                                ["parameters"] = new Dictionary<string, object> { ["Perk"] = masterPerkFid },
+                                            }
+                                        },
+                                    }
+                                },
+                            }
+                        },
+                    },
+                },
+            },
+            load_order = new
+            {
+                game_release = "SkyrimSE",
+                listings = new[]
+                {
+                    new { mod_key = "CSV293Master.esp", path = masterPath, enabled = true },
+                    new { mod_key = "CSV293Override.esp", path = overridePath, enabled = true },
+                },
+            },
+        };
+        var (so455, _, _) = RunBridge(bridgeExe, JsonSerializer.Serialize(req455));
+        bool ok455 = false; string note455 = "";
+        try
+        {
+            using var doc = JsonDocument.Parse(so455);
+            if (!doc.RootElement.GetProperty("success").GetBoolean())
+                note455 = $"success=false; details: {(doc.RootElement.TryGetProperty("details", out var dets) && dets.GetArrayLength() > 0 ? dets[0].ToString() : "<none>")}";
+            else if (!File.Exists(outPath)) note455 = "ESP missing";
+            else
+            {
+                using var outMod = SkyrimMod.CreateFromBinaryOverlay(outPath, SkyrimRelease.SkyrimSE);
+                var rb = outMod.Perks.FirstOrDefault();
+                if (rb == null) note455 = "rb null";
+                else if (rb.Effects.Count != 1) note455 = $"Effects.Count={rb.Effects.Count}";
+                else
+                {
+                    var eff = rb.Effects[0];
+                    var conds = (eff.GetType().GetProperty("Conditions")?.GetValue(eff) as System.Collections.IEnumerable)?.Cast<object>().ToList() ?? new List<object>();
+                    if (conds.Count != 1) note455 = $"outer={conds.Count}";
+                    else
+                    {
+                        var inner = (conds[0].GetType().GetProperty("Conditions")?.GetValue(conds[0]) as System.Collections.IEnumerable)?.Cast<object>().ToList() ?? new List<object>();
+                        if (inner.Count != 1) note455 = $"inner={inner.Count}";
+                        else
+                        {
+                            var data = inner[0].GetType().GetProperty("Data")?.GetValue(inner[0]);
+                            if (data?.GetType().Name != "HasPerkConditionData") note455 = $"data={data?.GetType().Name}";
+                            else
+                            {
+                                var fkStr = ReadFlFormKey(data, "Perk");
+                                if (!fkStr.Contains("CSV293Master", StringComparison.OrdinalIgnoreCase))
+                                    note455 = $"cross-master Perk fk={fkStr} (expected to contain CSV293Master)";
+                                else ok455 = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex) { note455 = $"{ex.GetType().Name}: {ex.Message}"; }
+        Console.WriteLine(ok455 ? "  [4.dsl.02] PASS" : $"  [4.dsl.02] FAIL: {note455}");
+        if (!ok455) failures++;
+        Console.WriteLine();
+
+        try { Directory.Delete(crossDir, recursive: true); } catch { /* best-effort */ }
+    }
+
+    // ═══ Cleanup ═══
+    try { Directory.Delete(v293p2OutDir, recursive: true); } catch { /* best-effort */ }
+}
+// ── /v2.9.3 P2 cells ──
+
 if (skipReasons.Count > 0)
 {
     Console.WriteLine($"=== {skipReasons.Count} SKIP(s) ===");

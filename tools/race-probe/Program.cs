@@ -6179,11 +6179,1041 @@ int v293p15Failures = 0;
 Console.WriteLine();
 Console.WriteLine($"=== v2.9.3 P1.5 PerkEntryPointModifyValue anchor: {(v293p15Failures == 0 ? "ALL PASS" : $"{v293p15Failures} FAILURE(S)")} ===");
 
+// ═══════════════════════════════════════════════════════════════════════════
+// v2.9.3 P2 — Bridge functional probes (Halt 1: PEPM + composition)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Goal: exercise Branch A's typeof(APerkEffect) special case + the new
+// BuildPerkEffectFromJson factory end-to-end via mutagen-bridge.exe subprocess.
+// This is the v2.9.3 equivalent of v2.8 P2 Batch 7 — Mutagen-direct synthetic
+// round-trips (P1.5) prove the schema; bridge subprocess round-trips prove
+// the wire path. Halt 1 lands the first PEPM probe + the v2.9.0 dispatcher
+// composition probe; Halt 2 fans out to the remaining 11 leaves + DSL errors.
+//
+// Carrier: Skyrim.esm:10FCFA (AugmentedShock60) — the canonical Layer 1.P
+// anchor per MATRIX.md (60.3% dominant on-disk shape; PerkEntryPointModifyValue
+// + ModSpellMagnitude + Multiply + Value=1.5 + 1 PerkCondition tab on index 1
+// with one GetActorValue ConditionFloat).
+//
+// Halt-and-report triggers (any one increments v293p2Failures + logs the
+// specific failure mode):
+//   - Bridge stdout not parseable as JSON.
+//   - Bridge reports success=false (factory threw or carrier dispatch broke).
+//   - Output ESP missing post-bridge.
+//   - Readback Effects.Count != 1 or runtime type wrong.
+//   - PEPM property mismatch (EntryPoint / Modification / Value / outer
+//     Conditions count).
+//   - Composition probe: nested Condition.Data.Reference doesn't resolve to
+//     supplied Perk FormLink (would mean v2.9.0 dispatcher composition gap —
+//     conductor halt per § Mandatory halt-and-report triggers).
+
 Console.WriteLine();
-int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures + p2dFailures + p4InfoFailures + p1MultiCondFailures + p2QustFailures + p1ReadSideFailures + p2ReadSideFailures + p4ReadSideFailures + v293p1Failures + v293p15Failures;
+Section("v2.9.3 P2 — Bridge functional probes (PEPM + composition)");
+int v293p2Failures = 0;
+{
+    var thisDir293p2 = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location)!;
+    var bridgeExe293p2 = Path.GetFullPath(Path.Combine(thisDir293p2,
+        "..", "..", "..", "..", "mutagen-bridge", "bin", "Release", "net8.0", "mutagen-bridge.exe"));
+    if (!File.Exists(bridgeExe293p2))
+    {
+        Console.WriteLine($"  SKIP: mutagen-bridge.exe not found at {bridgeExe293p2}");
+    }
+    else if (!File.Exists(SkyrimEsmForBatch7))
+    {
+        Console.WriteLine($"  SKIP: Skyrim.esm not found at {SkyrimEsmForBatch7}");
+    }
+    else
+    {
+        Console.WriteLine($"  bridge:  {bridgeExe293p2}");
+        Console.WriteLine($"  source:  {SkyrimEsmForBatch7}");
+        Console.WriteLine($"  carrier: PERK Skyrim.esm:10FCFA (AugmentedShock60 — Layer 1.P PEPM anchor)");
+
+        (string stdout, string stderr, int exit) RunBridge293p2(string exe, string stdinJson)
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(exe)
+            {
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            var p = System.Diagnostics.Process.Start(psi)!;
+            p.StandardInput.Write(stdinJson);
+            p.StandardInput.Close();
+            var so = p.StandardOutput.ReadToEnd();
+            var se = p.StandardError.ReadToEnd();
+            p.WaitForExit();
+            return (so, se, p.ExitCode);
+        }
+
+        var v293p2OutDir = Path.Combine(Path.GetTempPath(), "race-probe-v293-p2");
+        Directory.CreateDirectory(v293p2OutDir);
+
+        var augShockFkStr = "Skyrim.esm:10FCFA";
+        var augShockFk = new FormKey(ModKey.FromNameAndExtension("Skyrim.esm"), 0x10FCFA);
+
+        // ─── Probe A: PEPM functional round-trip via bridge ───────────────────
+        Console.WriteLine();
+        Console.WriteLine("  ─── Probe A: PerkEntryPointModifyValue functional round-trip ───");
+        {
+            var outPath = Path.Combine(v293p2OutDir, "v293-p2-pepm-basic.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "race-probe-v293-p2",
+                records = new object[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = augShockFkStr,
+                        source_path = SkyrimEsmForBatch7,
+                        set_fields = new Dictionary<string, object>
+                        {
+                            ["Effects"] = new object[]
+                            {
+                                new Dictionary<string, object>
+                                {
+                                    ["type"] = "PerkEntryPointModifyValue",
+                                    ["EntryPoint"] = "ModSpellMagnitude",
+                                    ["Modification"] = "Multiply",
+                                    ["Value"] = 1.4f,
+                                    ["PerkConditionTabCount"] = (byte)0,
+                                    ["Rank"] = (byte)0,
+                                    ["Priority"] = (byte)0,
+                                },
+                            },
+                        },
+                    },
+                },
+                load_order = new
+                {
+                    game_release = "SkyrimSE",
+                    listings = new[]
+                    {
+                        new { mod_key = "Skyrim.esm", path = SkyrimEsmForBatch7, enabled = true }
+                    }
+                }
+            };
+
+            var (stdout, stderr, exit) = RunBridge293p2(bridgeExe293p2, System.Text.Json.JsonSerializer.Serialize(req));
+            Console.WriteLine($"  bridge exit: {exit}");
+
+            bool jsonOk = false;
+            bool reportedSuccess = false;
+            string firstError = "<none>";
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(stdout);
+                jsonOk = true;
+                var root = doc.RootElement;
+                reportedSuccess = root.TryGetProperty("success", out var sv) && sv.GetBoolean();
+                if (root.TryGetProperty("details", out var dets)
+                    && dets.ValueKind == System.Text.Json.JsonValueKind.Array
+                    && dets.GetArrayLength() > 0)
+                {
+                    var d0 = dets[0];
+                    if (d0.TryGetProperty("error", out var e)) firstError = e.GetString() ?? "<null>";
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  *** FAIL: bridge stdout not valid JSON: {ex.Message}");
+                Console.WriteLine($"      stdout (first 800 chars): {stdout.Substring(0, Math.Min(800, stdout.Length))}");
+                if (!string.IsNullOrEmpty(stderr)) Console.WriteLine($"      stderr: {stderr.Trim()}");
+                v293p2Failures++;
+            }
+
+            if (jsonOk && !reportedSuccess)
+            {
+                Console.WriteLine($"  *** FAIL: bridge reports success=false; first error: {firstError}");
+                v293p2Failures++;
+            }
+            else if (jsonOk && !File.Exists(outPath))
+            {
+                Console.WriteLine($"  *** FAIL: bridge reported success but output ESP missing at {outPath}");
+                v293p2Failures++;
+            }
+            else if (jsonOk)
+            {
+                Console.WriteLine($"  bridge success=true; output ESP at {outPath}");
+
+                var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+                var rbPerk = outMod.Perks.FirstOrDefault(p => p.FormKey == augShockFk);
+                if (rbPerk == null)
+                {
+                    Console.WriteLine($"  *** FAIL: override PERK {augShockFkStr} not found in output ESP");
+                    v293p2Failures++;
+                }
+                else
+                {
+                    Console.WriteLine($"  Readback Effects.Count = {rbPerk.Effects.Count} (expected 1)");
+                    bool effCountOk = rbPerk.Effects.Count == 1;
+                    if (!effCountOk) { Console.WriteLine($"  *** FAIL: Effects.Count != 1"); v293p2Failures++; }
+                    else
+                    {
+                        var eff0 = rbPerk.Effects[0];
+                        var eff0Type = eff0.GetType();
+                        Console.WriteLine($"  Readback Effects[0] runtime type: {eff0Type.Name} (expected PerkEntryPointModifyValue)");
+                        bool typeOk = eff0Type.Name == "PerkEntryPointModifyValue";
+                        if (!typeOk) { Console.WriteLine($"  *** FAIL: runtime type mismatch"); v293p2Failures++; }
+                        else
+                        {
+                            var rbEp = eff0Type.GetProperty("EntryPoint")?.GetValue(eff0)?.ToString();
+                            var rbMod = eff0Type.GetProperty("Modification")?.GetValue(eff0)?.ToString();
+                            var rbVal = eff0Type.GetProperty("Value")?.GetValue(eff0);
+                            var rbConds = eff0Type.GetProperty("Conditions")?.GetValue(eff0) as System.Collections.IEnumerable;
+                            int outerCondCount = rbConds?.Cast<object>().Count() ?? -1;
+                            Console.WriteLine($"  Readback EntryPoint    = {rbEp} (expected ModSpellMagnitude)");
+                            Console.WriteLine($"  Readback Modification  = {rbMod} (expected Multiply)");
+                            Console.WriteLine($"  Readback Value         = {rbVal} (expected 1.4)");
+                            Console.WriteLine($"  Readback outer Conditions.Count = {outerCondCount} (expected 0)");
+
+                            bool epOk = rbEp == "ModSpellMagnitude";
+                            bool modOk = rbMod == "Multiply";
+                            bool valOk = false;
+                            if (rbVal is float fv) valOk = Math.Abs(fv - 1.4f) < 0.0001f;
+                            else if (rbVal != null)
+                            {
+                                try { valOk = Math.Abs(Convert.ToSingle(rbVal) - 1.4f) < 0.0001f; }
+                                catch { valOk = false; }
+                            }
+                            bool condsOk = outerCondCount == 0;
+
+                            if (!epOk || !modOk || !valOk || !condsOk)
+                            {
+                                Console.WriteLine($"  *** FAIL: PEPM property mismatch (EP={epOk}, Mod={modOk}, Val={valOk}, OuterConds={condsOk})");
+                                v293p2Failures++;
+                            }
+                            else
+                            {
+                                Console.WriteLine($"  ✓ PEPM bridge round-trip clean — Branch A → BuildPerkEffectFromJson → Activator → SetPropertyByPath all composed");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ─── Probe B: composition probe — nested HasPerk via v2.9.0 dispatcher ──
+        Console.WriteLine();
+        Console.WriteLine("  ─── Probe B: PEPM + nested PerkCondition + HasPerk parameters (v2.9.0 dispatcher composition) ───");
+        {
+            var outPath = Path.Combine(v293p2OutDir, "v293-p2-pepm-composition.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "race-probe-v293-p2",
+                records = new object[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = augShockFkStr,
+                        source_path = SkyrimEsmForBatch7,
+                        set_fields = new Dictionary<string, object>
+                        {
+                            ["Effects"] = new object[]
+                            {
+                                new Dictionary<string, object>
+                                {
+                                    ["type"] = "PerkEntryPointModifyValue",
+                                    ["EntryPoint"] = "ModSpellMagnitude",
+                                    ["Modification"] = "Multiply",
+                                    ["Value"] = 1.4f,
+                                    ["PerkConditionTabCount"] = (byte)1,
+                                    ["Conditions"] = new object[]
+                                    {
+                                        new Dictionary<string, object>
+                                        {
+                                            ["RunOnTabIndex"] = 1,
+                                            ["Conditions"] = new object[]
+                                            {
+                                                new Dictionary<string, object>
+                                                {
+                                                    ["function"] = "HasPerk",
+                                                    ["operator"] = "==",
+                                                    ["value"] = 1f,
+                                                    ["parameters"] = new Dictionary<string, object>
+                                                    {
+                                                        ["Perk"] = "Skyrim.esm:058200",
+                                                    },
+                                                },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                load_order = new
+                {
+                    game_release = "SkyrimSE",
+                    listings = new[]
+                    {
+                        new { mod_key = "Skyrim.esm", path = SkyrimEsmForBatch7, enabled = true }
+                    }
+                }
+            };
+
+            var (stdout, stderr, exit) = RunBridge293p2(bridgeExe293p2, System.Text.Json.JsonSerializer.Serialize(req));
+            Console.WriteLine($"  bridge exit: {exit}");
+
+            bool jsonOk = false;
+            bool reportedSuccess = false;
+            string firstError = "<none>";
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(stdout);
+                jsonOk = true;
+                var root = doc.RootElement;
+                reportedSuccess = root.TryGetProperty("success", out var sv) && sv.GetBoolean();
+                if (root.TryGetProperty("details", out var dets)
+                    && dets.ValueKind == System.Text.Json.JsonValueKind.Array
+                    && dets.GetArrayLength() > 0)
+                {
+                    var d0 = dets[0];
+                    if (d0.TryGetProperty("error", out var e)) firstError = e.GetString() ?? "<null>";
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  *** FAIL: bridge stdout not valid JSON: {ex.Message}");
+                Console.WriteLine($"      stdout (first 800 chars): {stdout.Substring(0, Math.Min(800, stdout.Length))}");
+                if (!string.IsNullOrEmpty(stderr)) Console.WriteLine($"      stderr: {stderr.Trim()}");
+                v293p2Failures++;
+            }
+
+            if (jsonOk && !reportedSuccess)
+            {
+                Console.WriteLine($"  *** FAIL: bridge reports success=false; first error: {firstError}");
+                Console.WriteLine($"      ↳ Likely indicates v2.9.0 dispatcher composition gap (Q4 lock at risk) — CONDUCTOR ASK");
+                v293p2Failures++;
+            }
+            else if (jsonOk && !File.Exists(outPath))
+            {
+                Console.WriteLine($"  *** FAIL: bridge reported success but output ESP missing at {outPath}");
+                v293p2Failures++;
+            }
+            else if (jsonOk)
+            {
+                Console.WriteLine($"  bridge success=true; output ESP at {outPath}");
+
+                var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+                var rbPerk = outMod.Perks.FirstOrDefault(p => p.FormKey == augShockFk);
+                if (rbPerk == null)
+                {
+                    Console.WriteLine($"  *** FAIL: override PERK {augShockFkStr} not found in output ESP");
+                    v293p2Failures++;
+                }
+                else if (rbPerk.Effects.Count != 1)
+                {
+                    Console.WriteLine($"  *** FAIL: Effects.Count = {rbPerk.Effects.Count} (expected 1)");
+                    v293p2Failures++;
+                }
+                else
+                {
+                    var eff0 = rbPerk.Effects[0];
+                    var eff0Type = eff0.GetType();
+                    var rbConds = eff0Type.GetProperty("Conditions")?.GetValue(eff0) as System.Collections.IEnumerable;
+                    var outerList = rbConds?.Cast<object>().ToList() ?? new List<object>();
+                    Console.WriteLine($"  Readback Effects[0] runtime type: {eff0Type.Name} (expected PerkEntryPointModifyValue)");
+                    Console.WriteLine($"  Readback outer Conditions.Count = {outerList.Count} (expected 1)");
+
+                    if (outerList.Count != 1)
+                    {
+                        Console.WriteLine($"  *** FAIL: outer Conditions.Count != 1 — wrapper not constructed via Branch A recursion");
+                        v293p2Failures++;
+                    }
+                    else
+                    {
+                        var pcWrapper = outerList[0];
+                        var pcWrapperType = pcWrapper.GetType();
+                        var rbRoti = pcWrapperType.GetProperty("RunOnTabIndex")?.GetValue(pcWrapper);
+                        var pcInnerObj = pcWrapperType.GetProperty("Conditions")?.GetValue(pcWrapper);
+                        var pcInnerList = (pcInnerObj as System.Collections.IEnumerable)?.Cast<object>().ToList() ?? new List<object>();
+                        Console.WriteLine($"  Readback Conditions[0].RunOnTabIndex     = {rbRoti} (expected 1)");
+                        Console.WriteLine($"  Readback Conditions[0].Conditions.Count  = {pcInnerList.Count} (expected 1)");
+
+                        bool rotiOk = rbRoti != null && Convert.ToInt32(rbRoti) == 1;
+                        bool innerCountOk = pcInnerList.Count == 1;
+                        if (!rotiOk || !innerCountOk)
+                        {
+                            Console.WriteLine($"  *** FAIL: wrapper-level mismatch (RunOnTabIndex={rotiOk}, InnerCount={innerCountOk})");
+                            v293p2Failures++;
+                        }
+                        else
+                        {
+                            var innerCond = pcInnerList[0];
+                            var innerCondType = innerCond.GetType();
+                            Console.WriteLine($"  Readback Conditions[0].Conditions[0] runtime type: {innerCondType.Name}");
+                            var innerData = innerCondType.GetProperty("Data")?.GetValue(innerCond);
+                            var innerDataType = innerData?.GetType();
+                            Console.WriteLine($"  Readback inner Condition.Data runtime type: {innerDataType?.Name ?? "<null>"}");
+
+                            // HasPerkConditionData exposes the Perk slot (IFormLinkOrIndex<IPerkGetter>).
+                            // Per coverage-smoke Test 286 readback pattern (line 5912–5917): walk
+                            // .Perk → .Link → .FormKey. GetValue() returns a boxed FormKey struct;
+                            // ToString gives "HEXID:plugin" — match by substring rather than
+                            // boxed-struct equality.
+                            object? readPerkRefObj = null;
+                            if (innerData != null)
+                            {
+                                var perkProp = innerDataType!.GetProperty("Perk");
+                                var perkSlot = perkProp?.GetValue(innerData);
+                                if (perkSlot != null)
+                                {
+                                    var linkProp = perkSlot.GetType().GetProperty("Link");
+                                    var linkObj = linkProp?.GetValue(perkSlot);
+                                    if (linkObj != null)
+                                    {
+                                        var fkProp = linkObj.GetType().GetProperty("FormKey");
+                                        readPerkRefObj = fkProp?.GetValue(linkObj);
+                                    }
+                                    if (readPerkRefObj == null)
+                                    {
+                                        var fkProp = perkSlot.GetType().GetProperty("FormKey");
+                                        readPerkRefObj = fkProp?.GetValue(perkSlot);
+                                    }
+                                }
+                            }
+                            var expectedPerkFk = new FormKey(ModKey.FromNameAndExtension("Skyrim.esm"), 0x058200);
+                            var readPerkRefStr = readPerkRefObj?.ToString() ?? "<null>";
+                            Console.WriteLine($"  Readback inner Condition.Data.Perk.Link.FormKey = {readPerkRefStr} (expected to contain 058200 + Skyrim.esm)");
+
+                            // FormKey.ToString format = "HEXID:plugin" (e.g. "058200:Skyrim.esm").
+                            // Match the hex local ID + plugin substring rather than equality on the boxed struct.
+                            bool refOk = readPerkRefStr.Contains("058200", StringComparison.OrdinalIgnoreCase)
+                                         && readPerkRefStr.Contains("Skyrim.esm", StringComparison.OrdinalIgnoreCase);
+                            bool dataTypeOk = innerDataType?.Name == "HasPerkConditionData";
+
+                            if (!dataTypeOk || !refOk)
+                            {
+                                Console.WriteLine($"  *** FAIL: composition mismatch (DataType={dataTypeOk}, PerkReference={refOk})");
+                                Console.WriteLine($"      ↳ v2.9.0 RouteParameterSlot dispatch may not be composing — CONDUCTOR ASK");
+                                v293p2Failures++;
+                            }
+                            else
+                            {
+                                Console.WriteLine($"  ✓ Composition probe clean — Branch A (PERK Effects) → BuildPerkEffectFromJson");
+                                Console.WriteLine($"    → SetPropertyByPath (Conditions) → Branch A (PerkCondition wrapper)");
+                                Console.WriteLine($"    → SetPropertyByPath (inner Conditions) → Branch A (Condition / typeof(Condition))");
+                                Console.WriteLine($"    → BuildConditionFromJson → BuildCondition → v2.9.0 RouteParameterSlot");
+                                Console.WriteLine($"    → IFormLinkOrIndex<IPerkGetter> branch — Q4 lock holds untouched.");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ─── Helper: invoke bridge with a single-record set_fields:{Effects:[entry]} ─
+        //     Returns (success, firstError, readbackPerk) — readbackPerk null on fail.
+        //     Uses AugmentedShock60 (Skyrim.esm:10FCFA) as the universal carrier:
+        //     replace-semantics on the Effects array means any PERK works as carrier
+        //     (the source's own Effects is replaced by the test payload).
+        (bool success, string firstError, IPerkGetter? readbackPerk, string outPath)
+        InvokeLeafBridge(string slug, object effectsEntry)
+        {
+            var outPath = Path.Combine(v293p2OutDir, $"v293-p2-leaf-{slug}.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "race-probe-v293-p2",
+                records = new object[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = augShockFkStr,
+                        source_path = SkyrimEsmForBatch7,
+                        set_fields = new Dictionary<string, object>
+                        {
+                            ["Effects"] = new object[] { effectsEntry },
+                        },
+                    },
+                },
+                load_order = new
+                {
+                    game_release = "SkyrimSE",
+                    listings = new[]
+                    {
+                        new { mod_key = "Skyrim.esm", path = SkyrimEsmForBatch7, enabled = true }
+                    }
+                }
+            };
+            var (so, _, _) = RunBridge293p2(bridgeExe293p2, System.Text.Json.JsonSerializer.Serialize(req));
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(so);
+                var root = doc.RootElement;
+                bool ok = root.TryGetProperty("success", out var sv) && sv.GetBoolean();
+                string err = "<none>";
+                if (root.TryGetProperty("details", out var dets)
+                    && dets.ValueKind == System.Text.Json.JsonValueKind.Array
+                    && dets.GetArrayLength() > 0)
+                {
+                    var d0 = dets[0];
+                    if (d0.TryGetProperty("error", out var e)) err = e.GetString() ?? "<null>";
+                }
+                if (!ok || !File.Exists(outPath))
+                    return (ok, err, null, outPath);
+                var outMod = SkyrimMod.CreateFromBinary(outPath, SkyrimRelease.SkyrimSE);
+                var rb = outMod.Perks.FirstOrDefault(p => p.FormKey == augShockFk);
+                return (true, "<none>", rb, outPath);
+            }
+            catch (Exception ex)
+            {
+                return (false, $"JSON parse error: {ex.Message}; stdout (first 400): {so.Substring(0, Math.Min(400, so.Length))}", null, outPath);
+            }
+        }
+
+        // ─── Helper: invoke bridge expecting failure (negative cells 1.D.*) ──
+        (bool success, string firstError) InvokeNegativeBridge(string slug, string formidOverride, object setFields)
+        {
+            var outPath = Path.Combine(v293p2OutDir, $"v293-p2-neg-{slug}.esp");
+            if (File.Exists(outPath)) File.Delete(outPath);
+            var req = new
+            {
+                command = "patch",
+                output_path = outPath,
+                esl_flag = false,
+                author = "race-probe-v293-p2",
+                records = new object[]
+                {
+                    new
+                    {
+                        op = "override",
+                        formid = formidOverride,
+                        source_path = SkyrimEsmForBatch7,
+                        set_fields = setFields,
+                    },
+                },
+                load_order = new
+                {
+                    game_release = "SkyrimSE",
+                    listings = new[]
+                    {
+                        new { mod_key = "Skyrim.esm", path = SkyrimEsmForBatch7, enabled = true }
+                    }
+                }
+            };
+            var (so, _, _) = RunBridge293p2(bridgeExe293p2, System.Text.Json.JsonSerializer.Serialize(req));
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(so);
+                var root = doc.RootElement;
+                bool ok = root.TryGetProperty("success", out var sv) && sv.GetBoolean();
+                string err = "<none>";
+                if (root.TryGetProperty("details", out var dets)
+                    && dets.ValueKind == System.Text.Json.JsonValueKind.Array
+                    && dets.GetArrayLength() > 0)
+                {
+                    var d0 = dets[0];
+                    if (d0.TryGetProperty("error", out var e)) err = e.GetString() ?? "<null>";
+                }
+                return (ok, err);
+            }
+            catch (Exception ex)
+            {
+                return (false, $"JSON parse error: {ex.Message}");
+            }
+        }
+
+        // PEPMA Modification enum reflection — pick a valid member at probe-time
+        // (per-class enum, distinct from PEPM/PEPMs's {Set, Add, Multiply}). Audit
+        // § Phase 2 implications #7 flagged this as needing dump; capture here.
+        var asm293p2 = typeof(ISkyrimMod).Assembly;
+        var pepmaType293 = asm293p2.GetType("Mutagen.Bethesda.Skyrim.PerkEntryPointModifyActorValue")!;
+        var pepmaModEnum = pepmaType293.GetProperty("Modification")!.PropertyType;
+        var pepmaModNames = Enum.GetNames(pepmaModEnum);
+        Console.WriteLine();
+        Console.WriteLine($"  PerkEntryPointModifyActorValue+ModificationType enum: {pepmaModNames.Length} members: {string.Join(", ", pepmaModNames)}");
+        var pepmaPick = new[] { "Multiply", "MultiplyValue", "Mult" }.FirstOrDefault(n => pepmaModNames.Contains(n))
+                        ?? pepmaModNames.FirstOrDefault() ?? "Set";
+
+        // ─── Layer 1.P leaf functional probes (11 remaining) ──────────────────
+        // Universal FormLink anchor: "Skyrim.esm:0001A6E8" (Lydia, NPC_) — same
+        // pattern as coverage-smoke § Tests 162–279; bridge doesn't validate
+        // FormLink target record types at write-time, so any vanilla FormID
+        // round-trips for FormKey-persistence verification.
+        const string anchorFL = "Skyrim.esm:0001A6E8";
+
+        // Helper: standard per-leaf assertion (Effects.Count==1 + runtime type matches).
+        bool AssertLeafShape(string slug, string expectedTypeName, IPerkGetter? rb, string firstError)
+        {
+            if (rb == null)
+            {
+                Console.WriteLine($"  *** FAIL [{slug}]: bridge fail or readback PERK missing; firstError: {firstError}");
+                v293p2Failures++;
+                return false;
+            }
+            if (rb.Effects.Count != 1)
+            {
+                Console.WriteLine($"  *** FAIL [{slug}]: Effects.Count = {rb.Effects.Count} (expected 1)");
+                v293p2Failures++;
+                return false;
+            }
+            var t = rb.Effects[0].GetType();
+            if (t.Name != expectedTypeName)
+            {
+                Console.WriteLine($"  *** FAIL [{slug}]: runtime type = {t.Name} (expected {expectedTypeName})");
+                v293p2Failures++;
+                return false;
+            }
+            Console.WriteLine($"  ✓ [{slug}] runtime type {expectedTypeName} matches");
+            return true;
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("  ─── Layer 1.P functional probes (remaining 11 leaves) ───");
+
+        // 1.P.PerkAbilityEffect.basic — single Ability FormLink slot.
+        {
+            var (ok, err, rb, _) = InvokeLeafBridge("PerkAbilityEffect", new Dictionary<string, object>
+            {
+                ["type"] = "PerkAbilityEffect",
+                ["Ability"] = anchorFL,
+            });
+            if (AssertLeafShape("PerkAbilityEffect.basic", "PerkAbilityEffect", rb, err))
+            {
+                var eff = rb!.Effects[0];
+                var abilityProp = eff.GetType().GetProperty("Ability")!;
+                var abilityVal = abilityProp.GetValue(eff);
+                var fkProp = abilityVal?.GetType().GetProperty("FormKey");
+                var fkStr = fkProp?.GetValue(abilityVal)?.ToString() ?? "<null>";
+                Console.WriteLine($"      Ability.FormKey = {fkStr} (expected to contain 1A6E8 + Skyrim.esm)");
+                if (!fkStr.Contains("1A6E8", StringComparison.OrdinalIgnoreCase) || !fkStr.Contains("Skyrim.esm", StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"  *** FAIL: PerkAbilityEffect.Ability FormLink mismatch");
+                    v293p2Failures++;
+                }
+            }
+        }
+
+        // 1.P.PerkQuestEffect.basic — Quest FormLink + Stage Byte (Convert.ChangeType).
+        {
+            var (ok, err, rb, _) = InvokeLeafBridge("PerkQuestEffect", new Dictionary<string, object>
+            {
+                ["type"] = "PerkQuestEffect",
+                ["Quest"] = anchorFL,
+                ["Stage"] = 100,
+            });
+            if (AssertLeafShape("PerkQuestEffect.basic", "PerkQuestEffect", rb, err))
+            {
+                var eff = rb!.Effects[0];
+                var t = eff.GetType();
+                var questProp = t.GetProperty("Quest")!;
+                var questVal = questProp.GetValue(eff);
+                var fkProp = questVal?.GetType().GetProperty("FormKey");
+                var fkStr = fkProp?.GetValue(questVal)?.ToString() ?? "<null>";
+                var stageVal = t.GetProperty("Stage")?.GetValue(eff);
+                Console.WriteLine($"      Quest.FormKey = {fkStr}");
+                Console.WriteLine($"      Stage = {stageVal} (Byte; expected 100)");
+                bool stageOk = stageVal != null && Convert.ToInt32(stageVal) == 100;
+                if (!fkStr.Contains("1A6E8", StringComparison.OrdinalIgnoreCase) || !stageOk)
+                {
+                    Console.WriteLine($"  *** FAIL: PerkQuestEffect property mismatch");
+                    v293p2Failures++;
+                }
+            }
+        }
+
+        // 1.P.PerkEntryPointSelectSpell.basic — Spell IFormLink<ISpellGetter> (NOT nullable).
+        // EntryPoint = "Activate" (first 20 enum members per Phase 1.5 dump; valid for
+        // every PerkEntryPoint*-family leaf since EntryType is declared on the abstract
+        // intermediate APerkEntryPointEffect — not per-leaf-restricted at the schema layer).
+        {
+            var (ok, err, rb, _) = InvokeLeafBridge("PerkEntryPointSelectSpell", new Dictionary<string, object>
+            {
+                ["type"] = "PerkEntryPointSelectSpell",
+                ["EntryPoint"] = "Activate",
+                ["Spell"] = anchorFL,
+            });
+            if (AssertLeafShape("PerkEntryPointSelectSpell.basic", "PerkEntryPointSelectSpell", rb, err))
+            {
+                var eff = rb!.Effects[0];
+                var t = eff.GetType();
+                var spellProp = t.GetProperty("Spell")!;
+                var spellVal = spellProp.GetValue(eff);
+                var fkProp = spellVal?.GetType().GetProperty("FormKey");
+                var fkStr = fkProp?.GetValue(spellVal)?.ToString() ?? "<null>";
+                Console.WriteLine($"      Spell.FormKey = {fkStr}");
+                if (!fkStr.Contains("1A6E8", StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"  *** FAIL: PerkEntryPointSelectSpell.Spell FormLink mismatch");
+                    v293p2Failures++;
+                }
+            }
+        }
+
+        // 1.P.PerkEntryPointModifyActorValue.basic — ActorValue + per-class Modification + plain Single Value.
+        {
+            var (ok, err, rb, _) = InvokeLeafBridge("PerkEntryPointModifyActorValue", new Dictionary<string, object>
+            {
+                ["type"] = "PerkEntryPointModifyActorValue",
+                ["EntryPoint"] = "ModSpellMagnitude",
+                ["ActorValue"] = "Destruction",
+                ["Modification"] = pepmaPick,
+                ["Value"] = 1.5f,
+            });
+            if (AssertLeafShape("PerkEntryPointModifyActorValue.basic", "PerkEntryPointModifyActorValue", rb, err))
+            {
+                var eff = rb!.Effects[0];
+                var t = eff.GetType();
+                var avStr = t.GetProperty("ActorValue")?.GetValue(eff)?.ToString();
+                var modStr = t.GetProperty("Modification")?.GetValue(eff)?.ToString();
+                var valObj = t.GetProperty("Value")?.GetValue(eff);
+                Console.WriteLine($"      ActorValue = {avStr} (expected Destruction)");
+                Console.WriteLine($"      Modification = {modStr} (expected {pepmaPick})");
+                Console.WriteLine($"      Value = {valObj} (expected 1.5)");
+                bool avOk = avStr == "Destruction";
+                bool modOk = modStr == pepmaPick;
+                bool valOk = valObj != null && Math.Abs(Convert.ToSingle(valObj) - 1.5f) < 0.0001f;
+                if (!avOk || !modOk || !valOk)
+                {
+                    Console.WriteLine($"  *** FAIL: PerkEntryPointModifyActorValue mismatch (AV={avOk}, Mod={modOk}, Val={valOk})");
+                    v293p2Failures++;
+                }
+            }
+        }
+
+        // 1.P.PerkEntryPointAddActivateChoice.basic — IFormLinkNullable<ISpellGetter> Spell.
+        {
+            var (ok, err, rb, _) = InvokeLeafBridge("PerkEntryPointAddActivateChoice", new Dictionary<string, object>
+            {
+                ["type"] = "PerkEntryPointAddActivateChoice",
+                ["EntryPoint"] = "Activate",
+                ["Spell"] = anchorFL,
+            });
+            if (AssertLeafShape("PerkEntryPointAddActivateChoice.basic", "PerkEntryPointAddActivateChoice", rb, err))
+            {
+                var eff = rb!.Effects[0];
+                var t = eff.GetType();
+                var spellVal = t.GetProperty("Spell")?.GetValue(eff);
+                var fkProp = spellVal?.GetType().GetProperty("FormKey");
+                var fkStr = fkProp?.GetValue(spellVal)?.ToString() ?? "<null>";
+                Console.WriteLine($"      Spell.FormKey (IFormLinkNullable<ISpellGetter>) = {fkStr}");
+                if (!fkStr.Contains("1A6E8", StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"  *** FAIL: AddActivateChoice.Spell FormLinkNullable mismatch");
+                    v293p2Failures++;
+                }
+            }
+        }
+
+        // 1.P.PerkEntryPointSetText.basic — TranslatedString Sub-Loqui Text slot.
+        // Local decision (D): plain-string-to-TranslatedString convenience path.
+        // Branch B's existing JSON-Object → sub-LoquiObject merge handles JSON
+        // strings fed to TranslatedString slots — Mutagen's TranslatedString has
+        // an implicit string conversion. If this fails, surface as ARCH NOTE.
+        {
+            const string testText = "v2.9.3 test text";
+            var (ok, err, rb, _) = InvokeLeafBridge("PerkEntryPointSetText", new Dictionary<string, object>
+            {
+                ["type"] = "PerkEntryPointSetText",
+                ["EntryPoint"] = "Activate",
+                ["Text"] = testText,
+            });
+            if (rb == null)
+            {
+                Console.WriteLine($"  ARCH NOTE [PerkEntryPointSetText.basic]: bridge fail; firstError: {err}");
+                Console.WriteLine($"      ↳ Plain-string-to-TranslatedString convenience path may not be wired in v2.7.x ConvertJsonValue;");
+                Console.WriteLine($"        local decision (D) audit-as-source-of-truth: switching to Branch B sub-LoquiObject merge");
+                Console.WriteLine($"        is the v2.9.3-bounded follow-up. Halt 2 message must surface this.");
+                Console.WriteLine($"      ↳ Counted as v293p2Failures++ for visibility.");
+                v293p2Failures++;
+            }
+            else if (AssertLeafShape("PerkEntryPointSetText.basic", "PerkEntryPointSetText", rb, err))
+            {
+                var eff = rb!.Effects[0];
+                var t = eff.GetType();
+                var textVal = t.GetProperty("Text")?.GetValue(eff);
+                var textStr = textVal?.ToString() ?? "<null>";
+                Console.WriteLine($"      Text (TranslatedString) = {textStr} (expected to contain '{testText}')");
+                if (!textStr.Contains(testText, StringComparison.Ordinal))
+                {
+                    Console.WriteLine($"  *** FAIL: PerkEntryPointSetText.Text round-trip mismatch");
+                    v293p2Failures++;
+                }
+            }
+        }
+
+        // 1.P.PerkEntryPointSelectText.basic — plain System.String Text slot.
+        {
+            const string testText = "v2.9.3 select text";
+            var (ok, err, rb, _) = InvokeLeafBridge("PerkEntryPointSelectText", new Dictionary<string, object>
+            {
+                ["type"] = "PerkEntryPointSelectText",
+                ["EntryPoint"] = "Activate",
+                ["Text"] = testText,
+            });
+            if (AssertLeafShape("PerkEntryPointSelectText.basic", "PerkEntryPointSelectText", rb, err))
+            {
+                var eff = rb!.Effects[0];
+                var textStr = eff.GetType().GetProperty("Text")?.GetValue(eff) as string;
+                Console.WriteLine($"      Text (plain String) = {textStr ?? "<null>"} (expected '{testText}')");
+                if (textStr != testText)
+                {
+                    Console.WriteLine($"  *** FAIL: PerkEntryPointSelectText.Text mismatch");
+                    v293p2Failures++;
+                }
+            }
+        }
+
+        // 1.P.PerkEntryPointAbsoluteValue.basic — Boolean Negative slot (synthetic anchor).
+        {
+            var (ok, err, rb, _) = InvokeLeafBridge("PerkEntryPointAbsoluteValue", new Dictionary<string, object>
+            {
+                ["type"] = "PerkEntryPointAbsoluteValue",
+                ["EntryPoint"] = "Activate",
+                ["Negative"] = false,
+            });
+            if (AssertLeafShape("PerkEntryPointAbsoluteValue.basic", "PerkEntryPointAbsoluteValue", rb, err))
+            {
+                var eff = rb!.Effects[0];
+                var negVal = eff.GetType().GetProperty("Negative")?.GetValue(eff);
+                Console.WriteLine($"      Negative = {negVal} (expected False)");
+                if (negVal == null || (bool)negVal != false)
+                {
+                    Console.WriteLine($"  *** FAIL: PerkEntryPointAbsoluteValue.Negative mismatch");
+                    v293p2Failures++;
+                }
+            }
+        }
+
+        // 1.P.PerkEntryPointAddLeveledItem.basic — IFormLink<ILeveledItemGetter> Item.
+        {
+            var (ok, err, rb, _) = InvokeLeafBridge("PerkEntryPointAddLeveledItem", new Dictionary<string, object>
+            {
+                ["type"] = "PerkEntryPointAddLeveledItem",
+                ["EntryPoint"] = "Activate",
+                ["Item"] = anchorFL,
+            });
+            if (AssertLeafShape("PerkEntryPointAddLeveledItem.basic", "PerkEntryPointAddLeveledItem", rb, err))
+            {
+                var eff = rb!.Effects[0];
+                var itemVal = eff.GetType().GetProperty("Item")?.GetValue(eff);
+                var fkProp = itemVal?.GetType().GetProperty("FormKey");
+                var fkStr = fkProp?.GetValue(itemVal)?.ToString() ?? "<null>";
+                Console.WriteLine($"      Item.FormKey = {fkStr}");
+                if (!fkStr.Contains("1A6E8", StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"  *** FAIL: AddLeveledItem.Item FormLink mismatch");
+                    v293p2Failures++;
+                }
+            }
+        }
+
+        // 1.P.PerkEntryPointAddRangeToValue.basic — From + To Single range.
+        {
+            var (ok, err, rb, _) = InvokeLeafBridge("PerkEntryPointAddRangeToValue", new Dictionary<string, object>
+            {
+                ["type"] = "PerkEntryPointAddRangeToValue",
+                ["EntryPoint"] = "Activate",
+                ["From"] = 0.5f,
+                ["To"] = 1.5f,
+            });
+            if (AssertLeafShape("PerkEntryPointAddRangeToValue.basic", "PerkEntryPointAddRangeToValue", rb, err))
+            {
+                var eff = rb!.Effects[0];
+                var fromVal = eff.GetType().GetProperty("From")?.GetValue(eff);
+                var toVal = eff.GetType().GetProperty("To")?.GetValue(eff);
+                Console.WriteLine($"      From = {fromVal} (expected 0.5), To = {toVal} (expected 1.5)");
+                bool fromOk = fromVal != null && Math.Abs(Convert.ToSingle(fromVal) - 0.5f) < 0.0001f;
+                bool toOk = toVal != null && Math.Abs(Convert.ToSingle(toVal) - 1.5f) < 0.0001f;
+                if (!fromOk || !toOk)
+                {
+                    Console.WriteLine($"  *** FAIL: AddRangeToValue From/To mismatch");
+                    v293p2Failures++;
+                }
+            }
+        }
+
+        // 1.P.PerkEntryPointModifyValues.basic — dual Nullable<Single> Value + Value2.
+        {
+            var (ok, err, rb, _) = InvokeLeafBridge("PerkEntryPointModifyValues", new Dictionary<string, object>
+            {
+                ["type"] = "PerkEntryPointModifyValues",
+                ["EntryPoint"] = "Activate",
+                ["Modification"] = "Multiply",
+                ["Value"] = 1.5f,
+                ["Value2"] = 0.8f,
+            });
+            if (AssertLeafShape("PerkEntryPointModifyValues.basic", "PerkEntryPointModifyValues", rb, err))
+            {
+                var eff = rb!.Effects[0];
+                var v1 = eff.GetType().GetProperty("Value")?.GetValue(eff);
+                var v2 = eff.GetType().GetProperty("Value2")?.GetValue(eff);
+                Console.WriteLine($"      Value = {v1} (expected 1.5), Value2 = {v2} (expected 0.8)");
+                bool v1Ok = v1 != null && Math.Abs(Convert.ToSingle(v1) - 1.5f) < 0.0001f;
+                bool v2Ok = v2 != null && Math.Abs(Convert.ToSingle(v2) - 0.8f) < 0.0001f;
+                if (!v1Ok || !v2Ok)
+                {
+                    Console.WriteLine($"  *** FAIL: ModifyValues Value/Value2 mismatch");
+                    v293p2Failures++;
+                }
+            }
+        }
+
+        // ─── Layer 1.D DSL error probes (negative cells) ──────────────────────
+        Console.WriteLine();
+        Console.WriteLine("  ─── Layer 1.D DSL error probes ───");
+
+        // 1.D.01 — discriminator unknown (BogusType).
+        {
+            var setFields = new Dictionary<string, object>
+            {
+                ["Effects"] = new object[]
+                {
+                    new Dictionary<string, object>
+                    {
+                        ["type"] = "BogusType",
+                        ["EntryPoint"] = "ModSpellMagnitude",
+                    },
+                },
+            };
+            var (success, err) = InvokeNegativeBridge("1D01-bogus-type", augShockFkStr, setFields);
+            bool errOk = !success && err.Contains("BogusType", StringComparison.OrdinalIgnoreCase)
+                         && err.Contains("not found", StringComparison.OrdinalIgnoreCase);
+            Console.WriteLine($"    [1.D.01] type='BogusType': success={success} (expected false), error contains 'BogusType' + 'not found': {errOk}");
+            if (!errOk) { Console.WriteLine($"      actual error: {err}"); v293p2Failures++; }
+        }
+
+        // 1.D.02a — abstract base APerkEffect.
+        {
+            var setFields = new Dictionary<string, object>
+            {
+                ["Effects"] = new object[]
+                {
+                    new Dictionary<string, object> { ["type"] = "APerkEffect" },
+                },
+            };
+            var (success, err) = InvokeNegativeBridge("1D02a-abstract-base", augShockFkStr, setFields);
+            bool errOk = !success && err.Contains("APerkEffect", StringComparison.OrdinalIgnoreCase)
+                         && err.Contains("abstract", StringComparison.OrdinalIgnoreCase);
+            Console.WriteLine($"    [1.D.02a] type='APerkEffect' (abstract base): success={success} (expected false), error contains 'APerkEffect' + 'abstract': {errOk}");
+            if (!errOk) { Console.WriteLine($"      actual error: {err}"); v293p2Failures++; }
+        }
+
+        // 1.D.02b — abstract intermediate APerkEntryPointEffect.
+        {
+            var setFields = new Dictionary<string, object>
+            {
+                ["Effects"] = new object[]
+                {
+                    new Dictionary<string, object> { ["type"] = "APerkEntryPointEffect" },
+                },
+            };
+            var (success, err) = InvokeNegativeBridge("1D02b-abstract-intermediate", augShockFkStr, setFields);
+            bool errOk = !success && err.Contains("APerkEntryPointEffect", StringComparison.OrdinalIgnoreCase)
+                         && err.Contains("abstract", StringComparison.OrdinalIgnoreCase);
+            Console.WriteLine($"    [1.D.02b] type='APerkEntryPointEffect' (abstract intermediate): success={success} (expected false), error contains 'APerkEntryPointEffect' + 'abstract': {errOk}");
+            if (!errOk) { Console.WriteLine($"      actual error: {err}"); v293p2Failures++; }
+        }
+
+        // 1.D.03 — missing 'type' discriminator.
+        {
+            var setFields = new Dictionary<string, object>
+            {
+                ["Effects"] = new object[]
+                {
+                    new Dictionary<string, object>
+                    {
+                        ["EntryPoint"] = "ModSpellMagnitude",
+                        ["Modification"] = "Multiply",
+                        ["Value"] = 1.4f,
+                    },
+                },
+            };
+            var (success, err) = InvokeNegativeBridge("1D03-missing-type", augShockFkStr, setFields);
+            bool errOk = !success && err.Contains("type", StringComparison.OrdinalIgnoreCase)
+                         && (err.Contains("requires", StringComparison.OrdinalIgnoreCase) || err.Contains("missing", StringComparison.OrdinalIgnoreCase));
+            Console.WriteLine($"    [1.D.03] missing 'type' key: success={success} (expected false), error mentions 'type' field requirement: {errOk}");
+            if (!errOk) { Console.WriteLine($"      actual error: {err}"); v293p2Failures++; }
+        }
+
+        // 1.D.06 — Effects array on a non-carrier record (NPC_).
+        // Discover a real NPC FormID at runtime via overlay (mirrors coverage-smoke's
+        // `source.Npcs.FirstOrDefault()` discovery pattern). NPC_ has no Effects
+        // property — Tier C SetPropertyByPath surfaces a "no such property" error.
+        // Verifies v2.9.3's PERK addition didn't accidentally open Effects-list on
+        // every record type.
+        {
+            using var srcMod1d06 = SkyrimMod.CreateFromBinaryOverlay(SkyrimEsmForBatch7, SkyrimRelease.SkyrimSE);
+            var firstNpc = srcMod1d06.Npcs.FirstOrDefault();
+            if (firstNpc == null)
+            {
+                Console.WriteLine($"    [1.D.06] SKIP: no NPC records discoverable in source");
+            }
+            else
+            {
+                var npcFidStr = $"Skyrim.esm:{firstNpc.FormKey.ID:X6}";
+                var setFields = new Dictionary<string, object>
+                {
+                    ["Effects"] = new object[]
+                    {
+                        new Dictionary<string, object> { ["type"] = "PerkEntryPointModifyValue" },
+                    },
+                };
+                var (success, err) = InvokeNegativeBridge("1D06-non-carrier-NPC", npcFidStr, setFields);
+                bool errOk = !success && (err.Contains("Effects", StringComparison.Ordinal) || err.Contains("property", StringComparison.OrdinalIgnoreCase));
+                Console.WriteLine($"    [1.D.06] Effects-list on NPC_ {npcFidStr} (non-carrier): success={success} (expected false), error mentions 'Effects' or 'property': {errOk}");
+                if (!errOk) { Console.WriteLine($"      actual error: {err}"); v293p2Failures++; }
+            }
+        }
+
+        // 1.D.unknown_blob — PerkQuestEffect.Unknown MemorySlice rejection.
+        // Verifies the explicit reject-with-clean-error guard in
+        // BuildPerkEffectFromJson surfaces a clean message rather than a
+        // confusing ConvertJsonValue throw. (Cell candidate per audit § Phase 2 #6.)
+        {
+            var setFields = new Dictionary<string, object>
+            {
+                ["Effects"] = new object[]
+                {
+                    new Dictionary<string, object>
+                    {
+                        ["type"] = "PerkQuestEffect",
+                        ["Quest"] = anchorFL,
+                        ["Stage"] = 100,
+                        ["Unknown"] = "ignored-blob-bytes",
+                    },
+                },
+            };
+            var (success, err) = InvokeNegativeBridge("1D-unknown-blob", augShockFkStr, setFields);
+            bool errOk = !success && err.Contains("Unknown", StringComparison.Ordinal)
+                         && (err.Contains("opaque", StringComparison.OrdinalIgnoreCase) || err.Contains("MemorySlice", StringComparison.OrdinalIgnoreCase));
+            Console.WriteLine($"    [1.D.unknown_blob] PerkQuestEffect.Unknown MemorySlice reject: success={success} (expected false), error mentions 'Unknown' + 'opaque'/'MemorySlice': {errOk}");
+            if (!errOk) { Console.WriteLine($"      actual error: {err}"); v293p2Failures++; }
+        }
+
+        try { Directory.Delete(v293p2OutDir, recursive: true); } catch { /* best-effort */ }
+    }
+}
+
+Console.WriteLine();
+Console.WriteLine($"=== v2.9.3 P2 bridge functional probes (Halt 1+2: PEPM + composition + 11 leaves + DSL errors): {(v293p2Failures == 0 ? "ALL PASS" : $"{v293p2Failures} FAILURE(S)")} ===");
+
+Console.WriteLine();
+int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures + p2dFailures + p4InfoFailures + p1MultiCondFailures + p2QustFailures + p1ReadSideFailures + p2ReadSideFailures + p4ReadSideFailures + v293p1Failures + v293p15Failures + v293p2Failures;
 if (totalFailures > 0)
 {
-    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C + {p2dFailures} v2.9 P2D + {p4InfoFailures} v2.9 P4-INFO + {p1MultiCondFailures} v2.9.1 P1 multi-cond sweep + {p2QustFailures} v2.9.1 P2 quest-cond + {p1ReadSideFailures} v2.9.2 P1 read-side perf-and-shape + {p2ReadSideFailures} v2.9.2 P2 read-side functional + {p4ReadSideFailures} v2.9.2 P4 cross-master + {v293p1Failures} v2.9.3 P1 APerkEffect inventory + {v293p15Failures} v2.9.3 P1.5 PEPM anchor) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT/APERK_EFFECTS_AUDIT ===");
+    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C + {p2dFailures} v2.9 P2D + {p4InfoFailures} v2.9 P4-INFO + {p1MultiCondFailures} v2.9.1 P1 multi-cond sweep + {p2QustFailures} v2.9.1 P2 quest-cond + {p1ReadSideFailures} v2.9.2 P1 read-side perf-and-shape + {p2ReadSideFailures} v2.9.2 P2 read-side functional + {p4ReadSideFailures} v2.9.2 P4 cross-master + {v293p1Failures} v2.9.3 P1 APerkEffect inventory + {v293p15Failures} v2.9.3 P1.5 PEPM anchor + {v293p2Failures} v2.9.3 P2 bridge functional) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT/APERK_EFFECTS_AUDIT ===");
     Environment.Exit(1);
 }
 Console.WriteLine("=== probe complete ===");

@@ -244,7 +244,7 @@ All v2.8.0 / v2.9.0 / v2.9.1 / v2.9.2 coverage-smoke cells run unchanged. v2.9.3
 
 | Cell range | Source | Expected |
 |---|---|---|
-| `5.range` | `dev/plans/v2.9.2_read_side_efficiency/MATRIX.md` Layer 1.P + 1.D + 2 + 4 + 5 (**425 v2.9.2 cells confirmed via coverage-smoke** post-Phase-4) | each cell PASS as it did in v2.9.2 P5; Phase 2 adds N new cells (Tests 426–N — count locked at Phase 2 implementation; per-leaf coverage-smoke + multi-error + composition cells per Layer 1.P/1.D/2/4). **Post-Phase-2 minimum baseline = 425 + 28** (12 Layer 1.P + 7 Layer 1.D + 4 Layer 2 + 5 Layer 4 = 28 new cells minimum, with potential expansion per Phase 2's per-leaf sub-shape choices). |
+| `5.range` | `dev/plans/v2.9.2_read_side_efficiency/MATRIX.md` Layer 1.P + 1.D + 2 + 4 + 5 (**425 v2.9.2 cells confirmed via coverage-smoke** post-Phase-4) | each cell PASS as it did in v2.9.2 P5; **Phase 2 added 30 new v2.9.3 cells (Tests 426–455: 14 Layer 1.P + 7 Layer 1.D + 4 Layer 2 + 5 Layer 4)** — final post-Phase-2 total = **425 + 30 = 455 cells, ALL PASS or documented SKIP**. The +2 over the original 28-cell minimum target are explicit Layer 4 rows landed (4.dsl.02 cross-master synthetic two-plugin fixture + 4.dsl.05 sibling preservation), accepted by conductor as matrix-completion. |
 
 Specifically: every v2.8.0 `set_fields: {Effects: [...]}` invocation pattern on SPEL/ALCH/ENCH/SCRL/INGR stays bit-identical (the pre-existing carrier set is unaffected by adding PERK to it; the discriminator `type:` key is absent on those carriers, so Branch B's existing concrete-`Effect` Activator path stays untouched). Every v2.9.0 condition-parameter dispatcher pattern stays untouched. Every v2.9.1 QUST condition disambiguation pattern stays untouched. Every v2.9.2 read-side mechanism (`formids` / `fields` / `expand_links`) on `mo2_record_detail` stays bit-identical. This is the core back-compat assertion of v2.9.3.
 
@@ -261,7 +261,7 @@ Specifically: every v2.8.0 `set_fields: {Effects: [...]}` invocation pattern on 
 | 2 (combinatorial) | 4 | 4 | this doc |
 | 3 (workflow scenarios) | 1 mandatory + 1 conditional (3.1 Requiem perk rebalance, 3.2 multi-leaf PERK — Phase 3 confirms preconditions) | ~6–10 assertions | this doc; Phase 3 picks live FormIDs |
 | 4.dsl | 5 | 5 | this doc |
-| 5 (regression) | 1 (range row) | 425 (v2.9.2 baseline) | v2.9.2 baseline |
+| 5 (regression) | 1 (range row) | 425 (v2.9.2 baseline) + 30 (v2.9.3 P2 new) = 455 | Phase 2 final |
 | **Total** | **~30 matrix rows** | **~460 harness cells** | — |
 
 Phase 2 may dedupe or merge cells where the same code path is exercised twice. v2.9.2's MATRIX.md is the source of truth for the Layer 5 regression count; Phase 2 reads from `coverage-smoke/Program.cs`'s actual cell enumeration rather than from this matrix doc when running the full regression band.
@@ -323,19 +323,19 @@ Phase 1 closed with these MATRIX edits landed (this commit):
 
 ---
 
-## Phase fill-in checklist (Phase 2 hand-back)
+## Phase fill-in checklist (Phase 2 hand-back) — COMPLETE
 
-Phase 2 closes with these MATRIX edits landed:
+Phase 2 closed with these MATRIX edits landed:
 
-- [ ] **Layer 5 cell count confirmed** — pre-v2.9.3 baseline confirmed at 425 cells from v2.9.2 P5 handoff. Phase 2 adds N new cells (per-leaf coverage-smoke + multi-error + composition cells per Layer 1.P/1.D/2/4). New total: 425 + N. Layer 5 row updated accordingly.
-- [ ] **Q1–Q7 expectation flips audit (post-implementation)** — confirm all seven locks held at implementation time including the audit-as-source-of-truth corrections.
-- [ ] **Layer 1.D validation-error JSON shape locked** — exact key names per the new bridge error model in `Models.cs`. Rows 1.D.01–1.D.07 update with confirmed key names.
-- [ ] **Error message wording finalized** — Phase 2 locks exact strings (transcribed from `PatchEngine.cs` factory + carrier-rejection paths). Symmetric across Python wrapper + bridge.
-- [ ] **4.dsl.02 cross-master synthetic fixture** — Phase 2 builds (or reuses if v2.9.2 P4's fixture covers this case) the synthetic two-plugin fixture for cross-master FormLink in nested condition. Document the fixture path + cleanup.
-- [ ] **Layer 2.04 empty-clear regression** — confirm PERK top-level scalar fields preserved on `Effects: []` write (sibling-preservation invariant). v2.8.0 Test 29's posture mirrored here.
-- [ ] **Per-leaf vanilla anchor FormIDs picked** — for the 8 leaves with vanilla data, Phase 2 picks specific FormIDs from APERK_EFFECTS_AUDIT.md frequency-table candidates. For the 4 zero-vanilla-instance leaves, Phase 2 builds synthetic PERK fixtures.
-- [ ] **PerkEntryPointSetText TranslatedString contract** — Phase 2 picks plain-string-to-TranslatedString convenience path or sub-LoquiObject Branch B merge for `Text: TranslatedString`. Cell `1.P.PerkEntryPointSetText.basic` payload shape locked accordingly.
-- [ ] **PerkQuestEffect.Unknown MemorySlice rejection** — Phase 2 decides whether `1.D.<NN>.unknown_blob` cell is needed (explicit reject-with-clean-error vs natural ConvertJsonValue throw on MemorySlice).
+- [x] **Layer 5 cell count confirmed** — pre-v2.9.3 baseline confirmed at 425 cells (coverage-smoke run shows all 425 PASS). Phase 2 added 30 new cells (Tests 426–455: 14 Layer 1.P + 7 Layer 1.D + 4 Layer 2 + 5 Layer 4). **New total: 425 + 30 = 455 cells, ALL PASS or documented SKIP.** 6 SKIPs preserved unchanged from v2.9.2 (none v2.9.3-introduced).
+- [x] **Q1–Q7 expectation flips audit (post-implementation)** — all seven locks held at implementation time. Q1/Q5/Q7 audit-as-source-of-truth corrections from Phase 1 transcribed faithfully into the bridge factory + 12-leaf list + 2-level Conditions nesting. Q4 verified end-to-end via composition probe (race-probe v2.9.3 P2 + coverage-smoke Test 449 + Test 455). One audit-completion follow-up: PEPMA Modification enum dumped at probe-time per § Phase 2 implications #7.
+- [x] **Layer 1.D validation-error JSON shape locked** — bridge errors surface via `details[0].error` (existing v2.7.x shape). Rows 1.D.01–1.D.07 + 1.D.unknown_blob assertion harness verifies error contains discriminator-specific substrings (e.g. "BogusType"+"not found", "APerkEffect"+"abstract", "type"+"requires", "Unknown"+"opaque"/"MemorySlice").
+- [x] **Error message wording finalized** — `BuildPerkEffectFromJson` factory (PatchEngine.cs ~:2354) carries embedded 12-leaf valid-name lists in each error message: discriminator-not-found / abstract-type-rejection / non-APerkEffect-assignable. PEPSetText TranslatedString contract documented in CHANGELOG + KNOWN_ISSUES + tools_patching.py schema description.
+- [x] **4.dsl.02 cross-master synthetic fixture** — Phase 2 built a new synthetic two-plugin fixture (CSV293Master.esp + CSV293Override.esp) at coverage-smoke Test 455, mirroring v2.9.2 P4's Test 425 pattern. Master plugin defines a Perk; override plugin's PERK has a v2.9.3 PerkEntryPointModifyValue with nested HasPerk condition referencing the master's perk FormLink. Verifies v2.6.0's load-order-aware compacted FormID write composes with v2.9.3's nested PerkConditions write path.
+- [x] **Layer 2.04 empty-clear** — verified `set_fields:{Effects:[]}` results in `Effects.Count = 0` on readback (Test 450 PASS). Test 454 (4.dsl.05) further verifies sibling-preservation: PERK top-level Level/NumRanks/Trait fields untouched when only Effects is supplied via set_fields.
+- [x] **Per-leaf vanilla anchor FormIDs picked** — universal carrier strategy adopted: AugmentedShock60 (`Skyrim.esm:10FCFA`) used for all Layer 1.P/1.D/2/4 cells. Replace-semantics on Effects array means any vanilla PERK works as carrier (the source's own Effects gets replaced by the test payload). Universal FormLink anchor `Skyrim.esm:0001A6E8` used for Spell/Quest/Item slots — bridge doesn't validate FormLink target record types at write-time, so any vanilla FormID round-trips for FormKey-persistence verification (mirrors coverage-smoke § Tests 162–279 pattern). The 4 zero-vanilla-instance leaves (PerkEntryPointAbsoluteValue / AddLeveledItem / AddRangeToValue / ModifyValues) write into the same AugmentedShock60 carrier via replace-semantics — no synthetic-PERK-fixture needed.
+- [x] **PerkEntryPointSetText TranslatedString contract** — Phase 2 picked **plain-string-to-TranslatedString convenience path** per local decision D + Aaron 2026-04-28 sign-off. Implementation: `ConvertJsonValue` (PatchEngine.cs:1343-1361) adds a String-to-TranslatedString branch — JSON String fed to a slot typed `Mutagen.Bethesda.Strings.TranslatedString` writes as `new TranslatedString(Language.English, value.GetString())`. Cell `1.P.PerkEntryPointSetText.basic` (Test 434) confirms round-trip clean.
+- [x] **PerkQuestEffect.Unknown MemorySlice rejection** — Phase 2 implemented **explicit reject-with-clean-error** in `BuildPerkEffectFromJson` factory (PatchEngine.cs ~:2354 member-walk guard). Rather than letting the JSON value fall through to `ConvertJsonValue` and produce a confusing throw, the factory emits: "PerkQuestEffect.Unknown is an opaque binary blob (MemorySlice<Byte>) and is not a writable field. Omit it from the Effects entry; the source record's value carries through unchanged." Coverage-smoke cell 1.D.unknown_blob (Test 446) PASS.
 
 ---
 

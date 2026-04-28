@@ -4,6 +4,93 @@ All plugin changes are made in the Dev Build copy first. Once tested and stable,
 
 ---
 
+## v2.9.3 — TBD
+
+<Phase 5 fills in date.>
+
+PERK.Effects writability — closes the heavier half of the v2.8.0
+carry-over "QUST.Aliases / Stages / Objectives, PERK.Effects."
+`Perk.Effects` is `ExtendedList<APerkEffect>` where `APerkEffect` is
+abstract; v2.9.3's per-subclass factory routes off an explicit `type:`
+discriminator naming the concrete Mutagen leaf class. Factory mirrors
+v2.8.0's `BuildConditionFromJson` extracted-from-`ApplyAddConditions`
+pattern. Replace-semantics on the Effects array, matching v2.8.0's
+posture for SPEL/ALCH/ENCH/SCRL/INGR. Real consumer signal: Authoria's
+Requiem-derived modlist carries ~1900 PERK records; perk magnitude
+rebalancing, condition restructuring, and spell-grant swaps are the
+unblocked workflows.
+
+### Added — bridge
+
+- **PERK.Effects writability via `set_fields: {Effects: [...]}` on PERK
+  records.** Branch A in `ConvertJsonElementToListItem` extends with a
+  `typeof(APerkEffect)` special case routing to a new
+  `BuildPerkEffectFromJson` factory next to `BuildConditionFromJson`.
+  Carrier dispatch is property-type-driven (`Perk.Effects` exposes
+  `ExtendedList<APerkEffect>` via reflection), so adding the type-
+  special-case automatically opens PERK with no carrier-list edit
+  needed. Mutagen 0.53.1 has 12 concrete `APerkEffect` leaves under the
+  abstract base + abstract intermediate `APerkEntryPointEffect` —
+  Phase 1's race-probe inventory + audit `APERK_EFFECTS_AUDIT.md`
+  enumerates them: `PerkAbilityEffect`, `PerkEntryPointAbsoluteValue`,
+  `PerkEntryPointAddActivateChoice`, `PerkEntryPointAddLeveledItem`,
+  `PerkEntryPointAddRangeToValue`, `PerkEntryPointModifyActorValue`,
+  `PerkEntryPointModifyValue`, `PerkEntryPointModifyValues`,
+  `PerkEntryPointSelectSpell`, `PerkEntryPointSelectText`,
+  `PerkEntryPointSetText`, `PerkQuestEffect`. The factory reflects
+  `Mutagen.Bethesda.Skyrim.{TypeName}`, rejects abstract types +
+  non-`APerkEffect`-assignable types, Activator-creates the concrete
+  leaf, then walks each non-discriminator JSON member through
+  `SetPropertyByPath` — which recurses into Branch A for nested
+  `Conditions: ExtendedList<PerkCondition>` and the inner
+  `PerkCondition.Conditions: ExtendedList<Condition>`. Per-leaf shape:
+  PEPM/PEPMs/PEPMA take `EntryPoint` (91-member enum) + `Modification`
+  (per-class enum: PEPM/PEPMs use `{Set, Add, Multiply}`; PEPMA has
+  its own enum) + `Value` (Single — Nullable on PEPM/PEPMs, plain on
+  PEPMA), with PEPMs adding `Value2` and PEPMA adding `ActorValue`;
+  PEPSelectSpell takes `EntryPoint` + `Spell` (FormID);
+  PEPAddActivateChoice takes `EntryPoint` + nullable `Spell`;
+  PEPAddLeveledItem takes `EntryPoint` + `Item` (LVLI);
+  PEPAddRangeToValue takes `EntryPoint` + `From`/`To` (Singles);
+  PEPAbsoluteValue takes `EntryPoint` + `Negative` (bool);
+  PEPSelectText takes `EntryPoint` + plain `Text`; PEPSetText takes
+  `EntryPoint` + `TranslatedString` `Text`; PerkAbilityEffect takes
+  `Ability` (SPEL FormID); PerkQuestEffect takes `Quest` + `Stage`
+  (Byte 0–255). `PerkQuestEffect.Unknown` is an opaque
+  `MemorySlice<Byte>` blob and is rejected at write-time with a clean
+  error — omit it; the source record's value carries through unchanged.
+  Per-effect Conditions on the `APerkEffect` base use a TWO-LEVEL
+  nesting: outer `Conditions` is a list of `PerkCondition` wrappers
+  each carrying `RunOnTabIndex` (int) plus an inner `Conditions` list
+  whose entries take the same shape as the `add_conditions` operator.
+  The inner condition entries compose with v2.9.0's per-function
+  parameter dispatcher (`RouteParameterSlot` +
+  `KnownParameterizedFunctions`) **untouched** — `parameters: {Perk:
+  <FormID>}` on a `HasPerk` condition inside
+  `Effects[i].Conditions[j].Conditions[k]` works exactly as it does at
+  top-level Conditions. **Q4 sanity-confirm evidence:** Phase 2
+  composition probe (race-probe v2.9.3 P2 + coverage-smoke Test 449
+  full-stack composition + Test 455 cross-master) round-tripped a PEPM
+  Effect with nested `HasPerk` parameters via bridge subprocess;
+  readback walked Branch A → `BuildPerkEffectFromJson` →
+  `SetPropertyByPath` (outer Conditions) → Branch A (PerkCondition
+  wrapper, generic Activator path) → `SetPropertyByPath` (inner
+  Conditions) → Branch A (`typeof(Condition)`) →
+  `BuildConditionFromJson` → `BuildCondition` → v2.9.0
+  `RouteParameterSlot` → `IFormLinkOrIndex<IPerkGetter>` and resolved
+  the supplied perk FormLink — **the v2.9.0 dispatcher composes
+  UNTOUCHED**.
+- **TranslatedString single-language convenience plumbing in
+  `ConvertJsonValue`.** A JSON String fed to a slot typed
+  `Mutagen.Bethesda.Strings.TranslatedString` now writes as an
+  English-language entry (mirrors the v2.8.0 IFormLinkNullable single-
+  field FormLink branch pattern directly above). Required for
+  `PerkEntryPointSetText.Text` to satisfy Q2 = A's "ship all 12 leaves"
+  promise; surface expansion is inert (no other operator advertises
+  TranslatedString slot writes).
+
+---
+
 ## v2.9.2 — 2026-04-28
 
 Read-side efficiency for `mo2_record_detail`. Three composable optional

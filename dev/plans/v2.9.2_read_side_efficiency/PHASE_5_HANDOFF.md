@@ -4,7 +4,7 @@
 **Status:** Complete
 **Date:** 2026-04-28
 **Session length:** ~2h (conductor-driven; no executor spawn for Phase 5 per Aaron's Phase 5 approach pick "(a) conductor-driven")
-**Commits made:** `<work-hash>` (work) + this hash-record commit
+**Commits made:** `c397e6f` (work) + this hash-record commit. Tag `v2.9.2` pushed → GitHub release at https://github.com/Avick3110/Claude_MO2/releases/tag/v2.9.2 with `claude-mo2-setup-v2.9.2.exe` attached.
 **Live install synced:** Yes (publish output to `<live>/tools/mutagen-bridge/` + `tools_records.py` + `CHANGELOG.md` + `KNOWN_ISSUES.md` to `<live>/`; Aaron full-restarted MO2; `mo2_ping` returns v2.9.2 at SHIP_SHA)
 
 ## Working version slug

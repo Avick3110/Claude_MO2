@@ -185,6 +185,32 @@ public class ReadRequest
     // switch reads to an env-aware path when this is supplied.
     [JsonPropertyName("load_order")]
     public LoadOrderContext? LoadOrder { get; set; }
+
+    /// <summary>
+    /// v2.9.2 — optional projection list. Each path is dot-segmented
+    /// (e.g. "EditorID", "ActorEffect", "Voices.Male"). The reader walks
+    /// only the requested paths; out-of-projection branches are omitted
+    /// from the response. Auto-traverses lists and dicts mid-path per
+    /// Q1 lock (auto-traversal). Empty list: rejected at validation
+    /// time with a clear error. Absence (null): full payload (v2.9.1
+    /// default — bit-identical preserved).
+    /// </summary>
+    [JsonPropertyName("fields")]
+    public List<string>? Fields { get; set; }
+
+    /// <summary>
+    /// v2.9.2 — optional FormLink expansion list. Each path is dot-
+    /// segmented (e.g. "ActorEffect", "Class"). When the walker
+    /// encounters a FormLink at a named path, descends into the linked
+    /// record and inlines its detail. Single-level only — links inside
+    /// expanded records render as plain FormID strings (no recursion,
+    /// no cycle detection needed). Output shape per Q2 lock (wrapper
+    /// form: <c>{ formid, EditorID, expanded: { ... } }</c>). Empty
+    /// list: rejected. Absence (null): no expansion (v2.9.1 default).
+    /// FormLink predicate matches PatchEngine.cs:1182 IsFormLinkType.
+    /// </summary>
+    [JsonPropertyName("expand_links")]
+    public List<string>? ExpandLinks { get; set; }
 }
 
 public class ReadResponse
@@ -212,6 +238,42 @@ public class ReadResponse
 
     [JsonPropertyName("error_detail")]
     public string? ErrorDetail { get; set; }
+
+    /// <summary>
+    /// v2.9.2 — populated by pre-flight validation when one or more
+    /// <c>fields</c> / <c>expand_links</c> paths fail. Keyed by record
+    /// type code (e.g. "RACE", "QUST"); each value carries three
+    /// per-category lists plus the type's valid-name lists for
+    /// caller-side fixup. Multi-error accumulation per § D — all bad
+    /// entries surface in one round-trip. When non-null,
+    /// <see cref="Success"/> is false and <see cref="Error"/> carries
+    /// the human-readable summary.
+    /// </summary>
+    [JsonPropertyName("validation_errors")]
+    public Dictionary<string, ValidationErrorDetail>? ValidationErrors { get; set; }
+}
+
+/// <summary>
+/// v2.9.2 — per-record-type validation error envelope. Three category
+/// lists for what failed, plus the valid-name lists for context.
+/// Symmetric with v2.9.1's "Tier D" multi-error accumulation pattern.
+/// </summary>
+public class ValidationErrorDetail
+{
+    [JsonPropertyName("bad_field_paths")]
+    public List<string> BadFieldPaths { get; set; } = new();
+
+    [JsonPropertyName("bad_expansion_targets")]
+    public List<string> BadExpansionTargets { get; set; } = new();
+
+    [JsonPropertyName("non_formlink_expansion_targets")]
+    public List<string> NonFormLinkExpansionTargets { get; set; } = new();
+
+    [JsonPropertyName("valid_field_names")]
+    public List<string> ValidFieldNames { get; set; } = new();
+
+    [JsonPropertyName("valid_formlink_field_names")]
+    public List<string> ValidFormLinkFieldNames { get; set; } = new();
 }
 
 // ── Batch Read Request / Response ───────────────────────────────────
@@ -239,6 +301,24 @@ public class ReadBatchRequest
     // Optional in Phase 2 — same semantics as ReadRequest.LoadOrder.
     [JsonPropertyName("load_order")]
     public LoadOrderContext? LoadOrder { get; set; }
+
+    /// <summary>
+    /// v2.9.2 — optional projection list applied to every batch item.
+    /// Same semantics as <see cref="ReadRequest.Fields"/>. Per-record
+    /// validation runs against each unique record type encountered in
+    /// the batch (per § D's per-type validation lock); validation
+    /// errors accumulate per type with multi-error rollup before any
+    /// reads happen.
+    /// </summary>
+    [JsonPropertyName("fields")]
+    public List<string>? Fields { get; set; }
+
+    /// <summary>
+    /// v2.9.2 — optional FormLink expansion list applied to every
+    /// batch item. Same semantics as <see cref="ReadRequest.ExpandLinks"/>.
+    /// </summary>
+    [JsonPropertyName("expand_links")]
+    public List<string>? ExpandLinks { get; set; }
 }
 
 public class ReadBatchResponse
@@ -254,6 +334,18 @@ public class ReadBatchResponse
 
     [JsonPropertyName("error_detail")]
     public string? ErrorDetail { get; set; }
+
+    /// <summary>
+    /// v2.9.2 — per § D's strict-batch validation contract: when one
+    /// or more <c>fields</c> / <c>expand_links</c> paths fail
+    /// validation against any record type encountered in the batch,
+    /// validation errors accumulate keyed by type and surface here
+    /// with <see cref="Success"/> = false. Per-record reads do NOT
+    /// run on validation failure (rollback contract; pre-flight per
+    /// Q4 lock).
+    /// </summary>
+    [JsonPropertyName("validation_errors")]
+    public Dictionary<string, ValidationErrorDetail>? ValidationErrors { get; set; }
 }
 
 // ── Scan Request / Response ─────────────────────────────────────────

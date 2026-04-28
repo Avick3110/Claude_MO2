@@ -346,7 +346,13 @@ def register_record_tools(registry, organizer) -> None:
             "being fetched from a plugin whose checkbox is off in MO2). "
             "Returns all fields with named values, enum labels, flag "
             "names. Set resolve_links=true to annotate FormID strings "
-            "with their EditorID from the load-order index."
+            "with their EditorID from the load-order index. "
+            "v2.9.2 read-side efficiency parameters: pass formids (plural) "
+            "to read N records in one bridge subprocess invocation; pass "
+            "fields to project the response to only requested paths; "
+            "pass expand_links to inline single-level FormLink detail at "
+            "named positions. All three composable; defaults preserve "
+            "v2.9.1 behavior bit-identically."
         ),
         input_schema={
             "type": "object",
@@ -369,7 +375,70 @@ def register_record_tools(registry, organizer) -> None:
                     "description": (
                         "Fetch the record from each listed plugin in one batched "
                         "call. Output shape becomes {'records': [...]} instead of "
-                        "a single record. Mutually exclusive with plugin_name."
+                        "a single record. Mutually exclusive with plugin_name. "
+                        "v2.9.2: when combined with formids, returns the "
+                        "cross-product (each formid x each plugin = N*M cells, "
+                        "each cell carries its own success/error envelope per "
+                        "(formid, plugin_name) pairing)."
+                    ),
+                },
+                "formids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "v2.9.2 batch read mode. List of FormIDs ('PluginName:LocalID') "
+                        "to read in one call. The bridge subprocess starts once and "
+                        "reads N records, amortizing the ~889 ms median startup cost "
+                        "(Phase 1 perf probe) across the batch. At N=200 the per-record "
+                        "marginal drops to ~18.68 ms (Phase 1 axis 2). Output shape "
+                        "becomes {'records': [...]} with per-record success/error "
+                        "envelope (matches existing plugin_names precedent). Mutually "
+                        "exclusive with formid; combinable with plugin_names for "
+                        "cross-product reads (N formids x M plugins = N*M cells, "
+                        "tested cliff-free up to N*M=1000 at 11.7 s wall-clock per "
+                        "Phase 1 axis 6). Empty list rejected. Tested up to N=200 "
+                        "for single-plugin batches and N*M=1000 for cross-product."
+                    ),
+                },
+                "fields": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "v2.9.2 field projection. Project the response to only the "
+                        "requested field paths. Each path is dot-segmented; the "
+                        "walker auto-traverses lists and dicts mid-path "
+                        "(e.g. 'Voices.Male' on a RACE record reads as the male-side "
+                        "of the gendered voices struct; 'Factions.Faction' on an NPC_ "
+                        "reads as the Faction sub-property of each Factions entry). "
+                        "Default (absent): full payload (v2.9.1 behavior preserved). "
+                        "Empty list: rejected. Validation is strict-batch — invalid "
+                        "paths surface together in one error response with the "
+                        "type's full valid-name list (validation_errors keyed by "
+                        "record-type code, three categories per type, multi-error "
+                        "accumulation). Shrinks RACE full-detail (8714 bytes / "
+                        "62 top-level fields per Phase 1 axis 3) by ~80%% on a "
+                        "3-5 path subset."
+                    ),
+                },
+                "expand_links": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "v2.9.2 single-level FormLink expansion. Inline the detail "
+                        "of FormLinks in named fields. Each path names a FormLink-"
+                        "or list-of-FormLink-typed property; the walker descends "
+                        "into the linked record and inlines its detail in a wrapper "
+                        "{'formid', 'EditorID', 'expanded': {...}}. Single-level "
+                        "only — links inside expanded records render as plain "
+                        "FormID strings (no recursion, no cycle detection needed). "
+                        "Composes with resolve_links: true (the expanded inline "
+                        "records' FormIDs are also annotated). Eliminates second-"
+                        "tier round-trips for FormLink-chase patterns "
+                        "(Phase 1 axis 5: 5.11x speedup on a 3-spell RACE; scales "
+                        "with link-count). Empty list rejected. Validation is "
+                        "strict-batch — invalid paths and non-FormLink targets "
+                        "surface together. Missing-master targets render uniform "
+                        "shape {formid, EditorID: null, expanded: null, error: ...}."
                     ),
                 },
                 "resolve_links": {
@@ -377,7 +446,11 @@ def register_record_tools(registry, organizer) -> None:
                     "description": (
                         "When true, post-process the output: FormID strings that "
                         "match a known record get annotated as 'Plugin:FormID "
-                        "(EditorID)'. Unknown FormIDs are left as-is."
+                        "(EditorID)'. Unknown FormIDs are left as-is. v2.9.2: "
+                        "applies recursively across the new fields-projected and "
+                        "expand_links-inlined response shapes — the existing "
+                        "_enrich_formids walker handles the deeper expanded tree "
+                        "without v2.9.2 changes."
                     ),
                     "default": False,
                 },
@@ -872,8 +945,36 @@ def _handle_record_detail(args: dict, plugin_dir: Path) -> str:
     resolve_links = _coerce_bool(args.get('resolve_links'))
     include_disabled = _coerce_bool(args.get('include_disabled'))
 
+    # v2.9.2 — three new optional read-side parameters per PLAN.md § A–F.
+    formids = args.get('formids')
+    fields = args.get('fields')
+    expand_links = args.get('expand_links')
+
     if plugin_names and plugin_name:
         return json.dumps({'error': "Provide either plugin_name or plugin_names, not both."})
+
+    # v2.9.2 — empty-list rejection per Layer 4.dsl.01 / .02 / .03. Absence
+    # (key not present) is the v2.9.1 default; an explicit empty list is
+    # request-author-error.
+    if formids is not None and not isinstance(formids, list):
+        return json.dumps({'error': "formids must be a list of 'PluginName:LocalID' strings."})
+    if formids is not None and len(formids) == 0:
+        return json.dumps({'error': "formids must contain at least one FormID — empty list rejected. Omit the parameter for single-record mode."})
+    if fields is not None and not isinstance(fields, list):
+        return json.dumps({'error': "fields must be a list of dot-segmented path strings."})
+    if fields is not None and len(fields) == 0:
+        return json.dumps({'error': "fields must contain at least one path — empty list rejected. Omit the parameter for full-payload mode."})
+    if expand_links is not None and not isinstance(expand_links, list):
+        return json.dumps({'error': "expand_links must be a list of dot-segmented path strings."})
+    if expand_links is not None and len(expand_links) == 0:
+        return json.dumps({'error': "expand_links must contain at least one path — empty list rejected. Omit the parameter for no-expansion mode."})
+
+    # v2.9.2 — formids is mutually exclusive with formid + editor_id +
+    # plugin_name (single-record selectors). NOT mutually exclusive with
+    # plugin_names per Q6 lock (cross-product semantics — see Q6 amendment
+    # 2026-04-28).
+    if formids is not None and (args.get('formid') or args.get('editor_id') or plugin_name):
+        return json.dumps({'error': "Provide either formids (batch) or formid/editor_id/plugin_name (single-record), not both."})
 
     bridge = _find_bridge_for_read(plugin_dir)
     if bridge is None:
@@ -886,6 +987,17 @@ def _handle_record_detail(args: dict, plugin_dir: Path) -> str:
                 'installs).'
             ),
         })
+
+    # v2.9.2 — formids batch path. Combinable with plugin_names per Q6 lock
+    # for cross-product reads (each formid x each plugin = N*M cells).
+    if formids is not None:
+        return _handle_formids_batch(
+            idx, bridge, formids, plugin_names,
+            fields=fields,
+            expand_links=expand_links,
+            resolve_links=resolve_links,
+            include_disabled=include_disabled,
+        )
 
     # Single-plugin flow (existing behavior) ─────────────────────────────
     if not plugin_names:
@@ -912,21 +1024,37 @@ def _handle_record_detail(args: dict, plugin_dir: Path) -> str:
         if not plugin_path.exists():
             return json.dumps({'error': f'Plugin file not found: {pinfo.path}'})
 
-        response = _run_bridge_read(bridge, {
+        # v2.9.2 — forward fields + expand_links through to the bridge.
+        # Absence preserves v2.9.1 single-record bit-identical behavior;
+        # presence triggers projection / expansion at the bridge walker.
+        bridge_request: dict = {
             'command': 'read_record',
             'plugin_path': str(plugin_path).replace('\\', '/'),
             'formid': f'{origin}:{local_id:06X}',
-        })
+        }
+        if fields is not None:
+            bridge_request['fields'] = fields
+        if expand_links is not None:
+            bridge_request['expand_links'] = expand_links
+        response = _run_bridge_read(bridge, bridge_request)
 
         if not response.get('success'):
-            return json.dumps({
+            # v2.9.2 — pre-flight validation error envelope surfaces here
+            # with response['validation_errors'] populated. Pass it
+            # through structurally so the caller can fix every bad path
+            # in one round-trip.
+            err_payload = {
+                'success': False,
                 'error': response.get('error', 'Bridge read failed.'),
                 'detail': response.get('error_detail') or response.get('stderr'),
-            })
+            }
+            if response.get('validation_errors'):
+                err_payload['validation_errors'] = response['validation_errors']
+            return json.dumps(err_payload, indent=2)
 
-        fields = response.get('fields', {})
+        out_fields = response.get('fields', {})
         if resolve_links:
-            fields = _enrich_formids(fields, idx)
+            out_fields = _enrich_formids(out_fields, idx)
 
         result = {
             'formid': response.get('formid', f'{origin}:{local_id:06X}'),
@@ -934,7 +1062,7 @@ def _handle_record_detail(args: dict, plugin_dir: Path) -> str:
             'editor_id': response.get('editor_id', edid),
             'plugin': ref.plugin,
             'load_order': ref.load_order,
-            'fields': fields,
+            'fields': out_fields,
         }
         return json.dumps(result, indent=2, default=str)
 
@@ -974,26 +1102,38 @@ def _handle_record_detail(args: dict, plugin_dir: Path) -> str:
             'per_plugin_errors': errors,
         }, indent=2)
 
-    response = _run_bridge_read(bridge, {
+    # v2.9.2 — forward fields + expand_links through to the bridge for the
+    # plugin_names path. Absence preserves v2.9.1 batch bit-identical
+    # behavior; presence projects/expands per-item in the bridge walker.
+    batch_request: dict = {
         'command': 'read_records',
         'records': batch_items,
-    }, timeout=max(15, 5 * len(batch_items)))
+    }
+    if fields is not None:
+        batch_request['fields'] = fields
+    if expand_links is not None:
+        batch_request['expand_links'] = expand_links
+    response = _run_bridge_read(bridge, batch_request, timeout=max(15, 5 * len(batch_items)))
 
     if not response.get('success'):
-        return json.dumps({
+        err_payload = {
+            'success': False,
             'error': response.get('error', 'Bridge batch read failed.'),
             'detail': response.get('error_detail') or response.get('stderr'),
             'per_plugin_errors': errors,
-        })
+        }
+        if response.get('validation_errors'):
+            err_payload['validation_errors'] = response['validation_errors']
+        return json.dumps(err_payload, indent=2)
 
     # Attach load_order to each record in the response (bridge doesn't know it).
     out_records = []
     for rec in response.get('records', []):
         plugin_file = rec.get('plugin') or ''
         p_ref = refs_by_plugin.get(plugin_file.lower())
-        fields = rec.get('fields', {})
+        rec_fields = rec.get('fields', {})
         if resolve_links and rec.get('success'):
-            fields = _enrich_formids(fields, idx)
+            rec_fields = _enrich_formids(rec_fields, idx)
         out_records.append({
             'formid': rec.get('formid', f'{origin}:{local_id:06X}'),
             'record_type': rec.get('record_type'),
@@ -1002,7 +1142,7 @@ def _handle_record_detail(args: dict, plugin_dir: Path) -> str:
             'load_order': p_ref.load_order if p_ref else None,
             'success': rec.get('success', False),
             'error': rec.get('error'),
-            'fields': fields if rec.get('success') else None,
+            'fields': rec_fields if rec.get('success') else None,
         })
 
     result = {
@@ -1013,6 +1153,223 @@ def _handle_record_detail(args: dict, plugin_dir: Path) -> str:
     }
     if errors:
         result['per_plugin_errors'] = errors
+    return json.dumps(result, indent=2, default=str)
+
+
+def _handle_formids_batch(
+    idx: LoadOrderIndex,
+    bridge: Path,
+    formids: list,
+    plugin_names: list | None,
+    fields: list | None = None,
+    expand_links: list | None = None,
+    resolve_links: bool = False,
+    include_disabled: bool = False,
+) -> str:
+    """v2.9.2 — formids batch read with optional cross-product on plugin_names.
+
+    Per Q6 lock (2026-04-28): formids x plugin_names is COMBINATION
+    (cross-product), not XOR. Each (formid, plugin_name) pairing is one
+    cell in the response with its own success/error envelope per Q3 lock.
+
+    Three flow shapes:
+      1. formids alone (no plugin_names): each formid resolves to its
+         winning plugin per the index; one cell per formid in the
+         response.
+      2. formids + plugin_names: cross-product. Each formid x each
+         plugin_name = one cell (N*M cells total). Phase 1 axis 6
+         confirmed no cliff up to N*M=1000 at 11.7 s wall-clock.
+      3. fields/expand_links forwarded to the bridge per cell. Pre-
+         flight validation per § D — all bad paths surface together.
+
+    Per-record formid-resolution failures use the per-cell envelope
+    {success: false, error: ...} matching the existing plugin_names
+    precedent at line ~1086. Top-level success: true even if individual
+    cells errored; success: false reserved for (a) all cells failed,
+    (b) bridge validation failed (strict-batch), (c) request shape
+    malformed.
+    """
+    # Resolve each formid → plugin_path. For cross-product mode, also
+    # resolve each (formid, plugin_name) pair.
+    cells: list[dict] = []
+    bridge_items: list[dict] = []
+    cell_keys: list[tuple[str, str]] = []  # (formid_str, plugin_name) → bridge_items index
+
+    if plugin_names:
+        # Cross-product mode (Q6 amendment): N formids x M plugins.
+        for formid_str in formids:
+            origin, local_id = _parse_formid_str(formid_str)
+            if origin is None:
+                for pname in plugin_names:
+                    cells.append({
+                        'formid': formid_str,
+                        'plugin_name': pname,
+                        'success': False,
+                        'error': f'Invalid FormID format: {formid_str}. Use "PluginName:LocalID".',
+                    })
+                continue
+            normalized_formid = f'{origin}:{local_id:06X}'
+            edid = _find_edid(idx, origin, local_id)
+            for pname in plugin_names:
+                p_ref = _resolve_plugin_ref(idx, origin, local_id, pname, include_disabled=True)
+                if p_ref is None:
+                    cells.append({
+                        'formid': normalized_formid,
+                        'editor_id': edid,
+                        'plugin_name': pname,
+                        'success': False,
+                        'error': f"{pname} does not override/define {normalized_formid}.",
+                    })
+                    continue
+                pinfo = idx.get_plugin_info(p_ref.plugin)
+                if pinfo is None or not os.path.exists(pinfo.path):
+                    cells.append({
+                        'formid': normalized_formid,
+                        'editor_id': edid,
+                        'plugin_name': pname,
+                        'success': False,
+                        'error': f'Plugin file not found: {pname}',
+                    })
+                    continue
+                cells.append({
+                    'formid': normalized_formid,
+                    'editor_id': edid,
+                    'plugin_name': pname,
+                    'load_order': p_ref.load_order,
+                    'record_type': p_ref.record_type,
+                    '_pending': True,  # filled in from bridge response
+                })
+                bridge_items.append({
+                    'plugin_path': pinfo.path.replace('\\', '/'),
+                    'formid': normalized_formid,
+                })
+                cell_keys.append((normalized_formid, pname))
+    else:
+        # Single-plugin mode (winning record per formid).
+        for formid_str in formids:
+            origin, local_id = _parse_formid_str(formid_str)
+            if origin is None:
+                cells.append({
+                    'formid': formid_str,
+                    'success': False,
+                    'error': f'Invalid FormID format: {formid_str}. Use "PluginName:LocalID".',
+                })
+                continue
+            normalized_formid = f'{origin}:{local_id:06X}'
+            chain = idx.get_conflict_chain(origin, local_id, include_disabled=include_disabled)
+            if not chain:
+                # Distinguish "not found" from "exists only in disabled".
+                msg = f'FormID not found in load order index: {normalized_formid}'
+                if not include_disabled:
+                    all_chain = idx.get_conflict_chain(origin, local_id, include_disabled=True)
+                    if all_chain:
+                        msg = f'FormID exists only in disabled plugins: {normalized_formid}. Pass include_disabled=true.'
+                cells.append({
+                    'formid': normalized_formid,
+                    'success': False,
+                    'error': msg,
+                })
+                continue
+            ref = chain[-1]
+            pinfo = idx.get_plugin_info(ref.plugin)
+            if pinfo is None or not os.path.exists(pinfo.path):
+                cells.append({
+                    'formid': normalized_formid,
+                    'success': False,
+                    'error': f'Plugin file not found for {ref.plugin}',
+                })
+                continue
+            edid = _find_edid(idx, origin, local_id)
+            cells.append({
+                'formid': normalized_formid,
+                'editor_id': edid,
+                'plugin': ref.plugin,
+                'plugin_name': ref.plugin,
+                'load_order': ref.load_order,
+                'record_type': ref.record_type,
+                '_pending': True,
+            })
+            bridge_items.append({
+                'plugin_path': pinfo.path.replace('\\', '/'),
+                'formid': normalized_formid,
+            })
+            cell_keys.append((normalized_formid, ref.plugin))
+
+    # If every cell failed pre-bridge, return early (no bridge invocation
+    # needed; top-level success: false because nothing succeeded).
+    if not bridge_items:
+        return json.dumps({
+            'success': False,
+            'error': 'No formids resolved successfully.',
+            'records': cells,
+        }, indent=2, default=str)
+
+    # Build the bridge request and forward the new v2.9.2 params.
+    batch_request: dict = {
+        'command': 'read_records',
+        'records': bridge_items,
+    }
+    if fields is not None:
+        batch_request['fields'] = fields
+    if expand_links is not None:
+        batch_request['expand_links'] = expand_links
+    response = _run_bridge_read(
+        bridge, batch_request,
+        timeout=max(15, 5 * len(bridge_items)),
+    )
+
+    if not response.get('success'):
+        # Strict-batch validation failure or subprocess failure — surface
+        # the bridge's error envelope including validation_errors so the
+        # caller can fix every bad path in one round-trip.
+        err_payload = {
+            'success': False,
+            'error': response.get('error', 'Bridge batch read failed.'),
+            'detail': response.get('error_detail') or response.get('stderr'),
+        }
+        if response.get('validation_errors'):
+            err_payload['validation_errors'] = response['validation_errors']
+        return json.dumps(err_payload, indent=2)
+
+    # Match bridge response records back to our cells in order.
+    bridge_records = response.get('records', [])
+    fill_idx = 0
+    for cell in cells:
+        if not cell.get('_pending'):
+            continue
+        cell.pop('_pending', None)
+        if fill_idx >= len(bridge_records):
+            cell['success'] = False
+            cell['error'] = 'Bridge returned fewer records than requested.'
+            continue
+        rec = bridge_records[fill_idx]
+        fill_idx += 1
+        rec_fields = rec.get('fields', {})
+        if resolve_links and rec.get('success'):
+            rec_fields = _enrich_formids(rec_fields, idx)
+        cell['success'] = rec.get('success', False)
+        if rec.get('success'):
+            cell['fields'] = rec_fields
+            # Bridge response carries the canonical formid/record_type/
+            # editor_id; prefer them over the index's view when present.
+            if rec.get('formid'):
+                cell['formid'] = rec['formid']
+            if rec.get('record_type'):
+                cell['record_type'] = rec['record_type']
+            if rec.get('editor_id'):
+                cell['editor_id'] = rec['editor_id']
+        else:
+            cell['error'] = rec.get('error', 'Bridge per-record read failed.')
+
+    # Top-level success: true if at least one cell succeeded; false if all
+    # cells failed (matches Q3 / v2.9.1 plugin_names precedent).
+    any_success = any(c.get('success') for c in cells)
+    result: dict = {
+        'success': any_success,
+        'records': cells,
+    }
+    if not any_success:
+        result['error'] = 'Every formid/plugin cell failed.'
     return json.dumps(result, indent=2, default=str)
 
 

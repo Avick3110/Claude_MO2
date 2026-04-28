@@ -4,6 +4,153 @@ All plugin changes are made in the Dev Build copy first. Once tested and stable,
 
 ---
 
+## v2.9.2 — TBD
+
+Read-side efficiency for `mo2_record_detail`. Three composable optional
+parameters cut AI-driven workflow token cost by roughly three orders of
+magnitude on read-heavy patching tasks. Real consumer signal: a
+168-record patching workflow that today costs ~600+ tool calls
+(168 first-tier `mo2_record_detail` round-trips at ~889 ms median
+subprocess startup each, plus ~1000 second-tier FormLink-chase calls)
+collapses to roughly **1 batched call** with `formids` + `fields` +
+`expand_links` + `resolve_links` composed. All three new parameters are
+additive; defaults preserve v2.9.1 single-record / full-payload /
+no-expansion behavior bit-identically.
+
+Phase 1's perf probe quantified the projected gains against vanilla
+Skyrim.esm: subprocess startup median 889 ms (band 1200–1400 ms;
+faster than expected), per-record marginal at N=200 = 18.68 ms,
+expansion-elimination = 5.11× speedup on a 3-spell race, cross-product
+N×M=1000 at 11.7 s (no cliff; 0.23% of Python timeout budget). RACE
+full-detail payload = 8714 bytes (largest of 8 measured types);
+projection to a 3–5 path subset reduces this by ~80%.
+
+### Added — bridge + MCP
+
+- **`mo2_record_detail` read-side efficiency parameters.** Three
+  composable optional parameters extend the existing tool surface;
+  zero existing-caller behavior changes when the new parameters are
+  absent.
+  - **`formids: [...]`** — batch read mode. List of FormIDs read in
+    one bridge subprocess invocation. Per-record success/error envelope
+    matches the existing `plugin_names` precedent at
+    `tools_records.py:870`. Mutually exclusive with `formid` /
+    `editor_id` / `plugin_name`. Combinable with `plugin_names` for
+    cross-product reads (Q6 lock 2026-04-28: each formid × each
+    plugin = one cell with its own envelope; tested cliff-free up to
+    N×M=1000). Tested up to N=200 single-plugin batches. Empty list
+    rejected.
+  - **`fields: [...]`** — projection. Dot-segmented paths; the bridge
+    walker auto-traverses lists and dicts mid-path per Q1 lock
+    (`Voices.Male` reads as the male-side of the gendered struct;
+    `Factions.Faction` reads as the Faction sub-property of each
+    Factions entry). Out-of-projection branches are omitted from the
+    response. Default (absent): full payload. Empty list rejected.
+    Validation is strict-batch — bad paths surface together in one
+    error response with the type's full valid-name list
+    (`validation_errors` keyed by record-type code, three categories
+    per type, multi-error accumulation per § D pseudocode).
+  - **`expand_links: [...]`** — single-level FormLink expansion.
+    When the walker encounters a FormLink at a named path, descends
+    into the linked record and inlines its detail in a wrapper
+    `{formid, EditorID, expanded: {...}}` per Q2 lock. Single-level
+    only — links inside expanded records render as plain FormID
+    strings (no recursion, no cycle hazard). Missing-master targets
+    render uniform shape `{formid, EditorID: null, expanded: null,
+    error: "..."}`. Composes with `resolve_links: true` (the existing
+    `_enrich_formids` walker handles the deeper expanded tree
+    recursively without v2.9.2 changes). Empty list rejected.
+    Validation strict-batch: bad paths and non-FormLink targets
+    accumulate.
+
+  All three composable on a single call and orthogonal to
+  `resolve_links`. Per-record formid-resolution failures are partial
+  (top-level `success: true`; per-record `success: true/false` per
+  Q3 lock matching the existing `read_records` precedent). Single-
+  record path (`formid: "..."`) composes with the new parameters
+  bit-identically — response shape is the v2.9.1 single-record shape
+  with projection / expansion applied.
+
+- **Pre-flight validation.** `fields` and `expand_links` paths are
+  validated against the record's getter type's reflected property
+  set BEFORE any walking happens (Q4 lock = pre-flight). Validation
+  errors accumulate across all bad entries in one round-trip; no
+  reads execute on validation failure (rollback contract). Per-record-
+  type validation: a mixed-type batch (e.g. QUST + RACE) validates
+  each unique type separately and accumulates errors per type in the
+  response's `validation_errors` keyed by record-type code.
+
+- **`Models.cs`** — `ReadRequest.Fields` + `ReadRequest.ExpandLinks`;
+  `ReadBatchRequest.Fields` + `ReadBatchRequest.ExpandLinks`. Both
+  nullable lists; absence preserves v2.9.1 behavior. New
+  `ReadResponse.ValidationErrors` + `ReadBatchResponse.ValidationErrors`
+  fields carry the per-type strict-batch envelope.
+
+- **`RecordReader.cs`** — three new helpers:
+  - `ValidateFieldsAndExpandLinks` — pre-flight validator, walks the
+    getter type's interface inheritance chain to collect every
+    valid property name (including inherited `EditorID` / `FormKey`
+    from `IMajorRecordGetter`).
+  - `RenderValueProjected` — projection walker; falls through to
+    the v2.9.1 `RenderValue` walker bit-identically when both
+    `fields` and `expand_links` are null.
+  - `ExpandFormLinkValue` — single-level expansion resolver;
+    looks up the linked record in the `modCache`, returns the
+    wrapper-form dict.
+
+  FormLink predicate (`IsFormLinkType` + `IsListOfFormLinkType`)
+  mirrors `PatchEngine.cs:1182` plus the Mutagen list-of-FormLink
+  shape (`IReadOnlyList<IFormLinkGetter<T>>` etc.). Getter interface
+  resolution picks the leaf interface (e.g. `IRaceGetter`) by
+  inheritance walk, not the umbrella `ISkyrimMajorRecordGetter`.
+
+### Changed — schema
+
+- **`mo2_record_detail` input_schema** — three new optional parameters
+  (`formids`, `fields`, `expand_links`) documented with Phase 1's
+  measured numbers as the schema-description anchors ("subprocess
+  startup median 889 ms", "tested cliff-free up to N×M=1000",
+  "5.11× speedup on a 3-spell race"). Existing `plugin_names`
+  description updated to call out the new cross-product semantics
+  per Q6 lock.
+
+### Test infrastructure
+
+- **race-probe** — extended with `=== v2.9.2 P2 — Read-side functional
+  probes ===` section (14 probes anchored on RACE / QUST / NPC_):
+  6 positive (batch / projection-scalar / projection-list / expansion-
+  list / cross-product / composed), 6 error paths (1.D.01 bad fields /
+  1.D.02 bad expand / 1.D.03 non-FormLink / 1.D.04 multi-error
+  accumulation / 1.D.05 cross-type validation / 1.D.06 partial-failure
+  envelope), 2 DSL edges (4.dsl.01-bridge / 4.dsl.02-bridge empty-list
+  rejection). All 14 PASS via bridge subprocess round-trip. Phase 1's
+  P1 perf-and-shape section preserved unchanged.
+- **coverage-smoke** — 24 new cells (Tests 401–424) per `MATRIX.md`
+  § Layer 1.P (7), § Layer 1.D (6), § Layer 2 (5 — incl. Q6
+  cross-product 2.05), § Layer 4.dsl (6 — 4.dsl.06 SKIP-with-reason
+  for missing-master synthetic fixture deferred). Cell IDs match
+  MATRIX exactly. v2.9.0 (382 cells) + v2.9.1 (18 cells) + v2.9.2
+  (24 cells, 1 SKIP) = 424 total cells.
+- **End-to-end MCP→bridge smoke harness** at
+  `<workspace>/scratch/v2.9.2-phase-2-smoke.py` exercises six paths
+  through `_handle_record_detail` (the Python wrapper), verifying
+  every new parameter survives the wrapper passthrough end-to-end.
+  Per the v2.9.1 P4 lesson (`condition_target` slipped through
+  `tools_patching.py`'s `passthrough_keys` whitelist undetected
+  because race-probe + coverage-smoke both bypass the wrapper),
+  the smoke script is the canonical MCP-layer regression check for
+  v2.9.2's three new parameters. All six paths PASS.
+
+### Documentation
+
+- **`KNOWN_ISSUES.md`** — read-side efficiency entry added under
+  "Covered as of v2.9.2" subsection (mirrors v2.9.1 cadence). The
+  pre-existing "RecordReader depth limit" entry stays as-is —
+  projection narrows the walker so depth-limit hits are less likely
+  on projected reads, but the limit itself remains v2.9.x candidate.
+
+---
+
 ## Unreleased
 
 Doc cleanup pass — trim per-session token load on Claude-facing docs. No code or behavior changes; will roll into the next installer build.

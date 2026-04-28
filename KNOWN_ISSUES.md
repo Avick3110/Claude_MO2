@@ -1,6 +1,6 @@
 # Known Issues & Limitations
 
-Current as of v2.9.1. These are known limitations, not bugs. For the full version history see `mo2_mcp/CHANGELOG.md`.
+Current as of v2.9.2. These are known limitations, not bugs. For the full version history see `mo2_mcp/CHANGELOG.md`.
 
 ---
 
@@ -44,6 +44,10 @@ These write-surface gaps are not yet covered by the bridge; future-release candi
 - **AMMO enchantment.** Mutagen's schema does not expose an `ObjectEffect` slot on Ammunition records. `set_enchantment`/`clear_enchantment` are restricted to ARMO/WEAP. Resolving requires an upstream Mutagen schema change.
 - **`GetVATSValueUnknown` Condition function.** The function is in v2.9.0's dispatcher in-scope set (`KnownParameterizedFunctions` carries it; bridge writes `Value` and `ValueType` Int32 slots successfully via reflection), but Mutagen 0.53.1 forgot to override the abstract `AGetVATSValueConditionData.GetValueFunction()` on the `Unknown` subclass — the other six `AGetVATSValue*` concrete subclasses (sub-A IFormLink<T> family) implement it; the Int32-typed Unknown variant does not. Binary serialization throws `NotImplementedException` at the CTDA write step regardless of slot values. Real callers attempting `function: "GetVATSValueUnknown"` get a clean per-record write-time error today. Resolving requires an upstream Mutagen schema change (Mutagen 0.54+ candidate when the missing override lands). Distinct from P2C's `Unknown`-CTDA-round-trip artifact (which was a read-side reclassification — write succeeded; harness type-name lookup couldn't anchor on read).
 - **QUST.Aliases / Stages / Objectives, PERK.Effects.** Out of scope for the current Effects-list mechanism even though the schema shape is similar — sub-class polymorphism makes them harder, and no real consumer has surfaced yet.
+
+### Covered as of v2.9.2
+
+- **Read-side efficiency for `mo2_record_detail` (v2.9.2).** Three composable optional parameters on the existing tool: `formids: [...]` (batch read — N records per subprocess invocation, amortizes the ~889 ms median startup), `fields: [...]` (projection — dot-segmented paths with auto-traversal of lists and dicts mid-path; out-of-projection branches omitted), `expand_links: [...]` (single-level FormLink expansion — wrapper form `{formid, EditorID, expanded: {...}}` at named positions; no recursion). All three composable on a single call and orthogonal to `resolve_links`. Per Q6 lock (2026-04-28), `formids` × `plugin_names` returns the cross-product (N×M cells, each with its own success/error envelope) — tested cliff-free up to N×M=1000 at 11.7 s wall-clock. Validation is strict-batch: bad field paths and bad expansion targets accumulate per record-type into one error response per § D's multi-error contract. Per-record formid resolution failures are partial (top-level `success: true`; per-record envelope per Q3 lock matching the existing `read_records` precedent). Defaults (all three parameters absent) preserve v2.9.1 single-record / full-payload / no-expansion behavior bit-identically. Deferred to v2.9.x: recursive expansion, depth-limit exposure, cross-call result caching, missing-master synthetic test fixture (vanilla Skyrim has no naturally-occurring missing-master FormLinks; `4.dsl.06` cell registers SKIP-with-reason).
 
 ### Covered as of v2.9.1
 

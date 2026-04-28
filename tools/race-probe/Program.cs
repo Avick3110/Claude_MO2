@@ -4236,11 +4236,603 @@ int p1ReadSideFailures = 0;
 }
 Console.WriteLine($"=== v2.9.2 P1 read-side perf + shape sweep: {(p1ReadSideFailures == 0 ? "ALL PASS" : $"{p1ReadSideFailures} FAILURE(S)")} ===");
 
+
+// ─── v2.9.2 P2 — Read-side functional probes (per-axis, error paths) ───
+//
+// Phase 2 functional probes for the three composable read-side axes:
+// batch (formids), projection (fields), expansion (expand_links), plus
+// cross-product (Q6 amendment), composed (all four), and the strict-batch
+// validation error paths (Layer 1.D.01–.06 per MATRIX.md). Anchors mirror
+// Phase 1's resolved Mutagen 0.53.1 names + RACE/QUST/NPC_ FormIDs.
+//
+// Each probe builds a JSON request, pipes it to the bridge subprocess
+// via Process.Start (mirrors v2.9.1 P2's RunBridge / Phase 1's
+// RunBridgePerf), parses the response, and asserts the expected payload
+// shape. Functional probes (not perf): wall-clock not gated, only shape.
+
+Section("v2.9.2 P2 — Read-side functional probes");
+
+int p2ReadSideFailures = 0;
+{
+    var thisDirP2r = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location)!;
+    var bridgeExeP2r = Path.GetFullPath(Path.Combine(thisDirP2r,
+        "..", "..", "..", "..", "mutagen-bridge", "bin", "Release", "net8.0", "mutagen-bridge.exe"));
+    bool haveBridge = File.Exists(bridgeExeP2r);
+    bool haveSkyrimEsm = File.Exists(SkyrimEsmForBatch7);
+
+    if (!haveBridge)
+    {
+        Console.WriteLine($"  SKIP P2 functional: mutagen-bridge.exe not found at {bridgeExeP2r}");
+    }
+    if (!haveSkyrimEsm)
+    {
+        Console.WriteLine($"  SKIP P2 functional: Skyrim.esm not found at {SkyrimEsmForBatch7}");
+    }
+
+    if (haveBridge && haveSkyrimEsm)
+    {
+        // Bridge subprocess invocation helper.
+        (string Stdout, int ExitCode) RunBridgeFn(object req)
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(bridgeExeP2r)
+            {
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            var proc = System.Diagnostics.Process.Start(psi)!;
+            proc.StandardInput.Write(System.Text.Json.JsonSerializer.Serialize(req));
+            proc.StandardInput.Close();
+            var stdout = proc.StandardOutput.ReadToEnd();
+            var _stderr = proc.StandardError.ReadToEnd();
+            proc.WaitForExit();
+            return (stdout, proc.ExitCode);
+        }
+
+        // Helper: parse + assert + bump failure count.
+        void Assert(string label, Func<bool> check)
+        {
+            try
+            {
+                if (check())
+                    Console.WriteLine($"  [PASS] {label}");
+                else
+                {
+                    Console.WriteLine($"  [FAIL] {label}");
+                    p2ReadSideFailures++;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  [FAIL] {label}: {ex.GetType().Name}: {ex.Message}");
+                p2ReadSideFailures++;
+            }
+        }
+
+        // Per-axis anchors (Phase 1 confirmed Mutagen 0.53.1 names).
+        const string raceFid1 = "Skyrim.esm:000D53"; // DraugrRace, ActorEffect.Count=1
+        const string raceFid2 = "Skyrim.esm:012E82"; // DragonRace, Count=2
+        const string raceFid3 = "Skyrim.esm:0131E8"; // BearBlackRace, Count=1
+        const string qustFid1 = "Skyrim.esm:04C49D"; // FollowerCommentary01
+
+        // ── Probe 1: batch (formids alone) ──────────────────────────
+        Console.WriteLine();
+        Console.WriteLine("  ── Probe 1: batch read_records of 3 RACE records ──");
+        {
+            var req = new
+            {
+                command = "read_records",
+                records = new[]
+                {
+                    new { plugin_path = SkyrimEsmForBatch7, formid = raceFid1 },
+                    new { plugin_path = SkyrimEsmForBatch7, formid = raceFid2 },
+                    new { plugin_path = SkyrimEsmForBatch7, formid = raceFid3 },
+                },
+            };
+            var r = RunBridgeFn(req);
+            using var doc = System.Text.Json.JsonDocument.Parse(r.Stdout);
+            var root = doc.RootElement;
+            Assert("top-level success: true", () => root.GetProperty("success").GetBoolean());
+            Assert("3 records returned", () => root.GetProperty("records").GetArrayLength() == 3);
+            Assert("every record success: true", () =>
+            {
+                foreach (var rec in root.GetProperty("records").EnumerateArray())
+                {
+                    if (!rec.GetProperty("success").GetBoolean()) return false;
+                }
+                return true;
+            });
+            Assert("every record has fields dict with > 5 keys", () =>
+            {
+                foreach (var rec in root.GetProperty("records").EnumerateArray())
+                {
+                    if (!rec.TryGetProperty("fields", out var f)) return false;
+                    if (f.ValueKind != System.Text.Json.JsonValueKind.Object) return false;
+                    int count = 0;
+                    foreach (var _ in f.EnumerateObject()) count++;
+                    if (count <= 5) return false;
+                }
+                return true;
+            });
+        }
+
+        // ── Probe 2: projection (fields alone, single record) ───────
+        Console.WriteLine();
+        Console.WriteLine("  ── Probe 2: projection fields=[EditorID] on RACE ──");
+        {
+            var req = new
+            {
+                command = "read_record",
+                plugin_path = SkyrimEsmForBatch7,
+                formid = raceFid1,
+                fields = new[] { "EditorID" },
+            };
+            var r = RunBridgeFn(req);
+            using var doc = System.Text.Json.JsonDocument.Parse(r.Stdout);
+            var root = doc.RootElement;
+            Assert("success: true", () => root.GetProperty("success").GetBoolean());
+            Assert("fields contains only EditorID", () =>
+            {
+                var f = root.GetProperty("fields");
+                int count = 0;
+                bool hasEditorID = false;
+                foreach (var p in f.EnumerateObject())
+                {
+                    count++;
+                    if (p.Name == "EditorID") hasEditorID = true;
+                }
+                return count == 1 && hasEditorID;
+            });
+            Assert("EditorID == DraugrRace", () =>
+                root.GetProperty("fields").GetProperty("EditorID").GetString() == "DraugrRace");
+        }
+
+        // ── Probe 3: projection list-shape (RACE.ActorEffect) ───────
+        Console.WriteLine();
+        Console.WriteLine("  ── Probe 3: projection fields=[ActorEffect] on RACE ──");
+        {
+            var req = new
+            {
+                command = "read_record",
+                plugin_path = SkyrimEsmForBatch7,
+                formid = raceFid1,
+                fields = new[] { "ActorEffect" },
+            };
+            var r = RunBridgeFn(req);
+            using var doc = System.Text.Json.JsonDocument.Parse(r.Stdout);
+            var root = doc.RootElement;
+            Assert("success: true", () => root.GetProperty("success").GetBoolean());
+            Assert("fields contains only ActorEffect", () =>
+            {
+                var f = root.GetProperty("fields");
+                int count = 0;
+                foreach (var _ in f.EnumerateObject()) count++;
+                return count == 1 && f.TryGetProperty("ActorEffect", out _);
+            });
+            Assert("ActorEffect is a non-empty list of FormID strings (no expansion)", () =>
+            {
+                var ae = root.GetProperty("fields").GetProperty("ActorEffect");
+                if (ae.ValueKind != System.Text.Json.JsonValueKind.Array) return false;
+                if (ae.GetArrayLength() < 1) return false;
+                // Each entry should be a plain string FormID, NOT a wrapper dict
+                // (projection alone — no expansion).
+                foreach (var entry in ae.EnumerateArray())
+                {
+                    if (entry.ValueKind != System.Text.Json.JsonValueKind.String) return false;
+                }
+                return true;
+            });
+        }
+
+        // ── Probe 4: expansion (expand_links alone, RACE.ActorEffect) ──
+        Console.WriteLine();
+        Console.WriteLine("  ── Probe 4: expansion expand_links=[ActorEffect] on RACE ──");
+        {
+            var req = new
+            {
+                command = "read_record",
+                plugin_path = SkyrimEsmForBatch7,
+                formid = raceFid1,
+                expand_links = new[] { "ActorEffect" },
+            };
+            var r = RunBridgeFn(req);
+            using var doc = System.Text.Json.JsonDocument.Parse(r.Stdout);
+            var root = doc.RootElement;
+            Assert("success: true", () => root.GetProperty("success").GetBoolean());
+            Assert("ActorEffect entries are wrapper-shape (Q2 lock)", () =>
+            {
+                var ae = root.GetProperty("fields").GetProperty("ActorEffect");
+                if (ae.ValueKind != System.Text.Json.JsonValueKind.Array) return false;
+                if (ae.GetArrayLength() < 1) return false;
+                foreach (var entry in ae.EnumerateArray())
+                {
+                    if (entry.ValueKind != System.Text.Json.JsonValueKind.Object) return false;
+                    if (!entry.TryGetProperty("formid", out _)) return false;
+                    if (!entry.TryGetProperty("expanded", out _)) return false;
+                }
+                return true;
+            });
+        }
+
+        // ── Probe 5: cross-product (formids × plugin_names per Q6) ─────
+        // Simulate cross-product at the bridge level by sending N*M items
+        // (each formid x each plugin = one item). Vanilla Skyrim is one
+        // plugin so M=1 here; the wrapper-side cross-product fan-out is
+        // covered by the end-to-end smoke harness (path (e)). This probe
+        // verifies the bridge can handle N items with both fields and
+        // expand_links applied per item.
+        Console.WriteLine();
+        Console.WriteLine("  ── Probe 5: cross-product simulation (3 RACE × 1 plugin = 3 items) ──");
+        {
+            var req = new
+            {
+                command = "read_records",
+                records = new[]
+                {
+                    new { plugin_path = SkyrimEsmForBatch7, formid = raceFid1 },
+                    new { plugin_path = SkyrimEsmForBatch7, formid = raceFid2 },
+                    new { plugin_path = SkyrimEsmForBatch7, formid = raceFid3 },
+                },
+                fields = new[] { "EditorID" },
+            };
+            var r = RunBridgeFn(req);
+            using var doc = System.Text.Json.JsonDocument.Parse(r.Stdout);
+            var root = doc.RootElement;
+            Assert("success: true", () => root.GetProperty("success").GetBoolean());
+            Assert("3 records, every projected to EditorID only", () =>
+            {
+                var recs = root.GetProperty("records");
+                if (recs.GetArrayLength() != 3) return false;
+                foreach (var rec in recs.EnumerateArray())
+                {
+                    if (!rec.GetProperty("success").GetBoolean()) return false;
+                    var f = rec.GetProperty("fields");
+                    int count = 0;
+                    bool hasEditorID = false;
+                    foreach (var p in f.EnumerateObject())
+                    {
+                        count++;
+                        if (p.Name == "EditorID") hasEditorID = true;
+                    }
+                    if (count != 1 || !hasEditorID) return false;
+                }
+                return true;
+            });
+        }
+
+        // ── Probe 6: composed (all three axes + resolve_links exercised
+        //    at wrapper layer; bridge sees fields + expand_links composed) ──
+        Console.WriteLine();
+        Console.WriteLine("  ── Probe 6: composed fields + expand_links on RACE batch ──");
+        {
+            var req = new
+            {
+                command = "read_records",
+                records = new[]
+                {
+                    new { plugin_path = SkyrimEsmForBatch7, formid = raceFid1 },
+                    new { plugin_path = SkyrimEsmForBatch7, formid = raceFid2 },
+                },
+                fields = new[] { "EditorID", "ActorEffect" },
+                expand_links = new[] { "ActorEffect" },
+            };
+            var r = RunBridgeFn(req);
+            using var doc = System.Text.Json.JsonDocument.Parse(r.Stdout);
+            var root = doc.RootElement;
+            Assert("success: true", () => root.GetProperty("success").GetBoolean());
+            Assert("each record carries ONLY EditorID + ActorEffect (out-of-projection absent)", () =>
+            {
+                foreach (var rec in root.GetProperty("records").EnumerateArray())
+                {
+                    var f = rec.GetProperty("fields");
+                    var keys = new HashSet<string>();
+                    foreach (var p in f.EnumerateObject()) keys.Add(p.Name);
+                    if (keys.Count != 2 || !keys.Contains("EditorID") || !keys.Contains("ActorEffect")) return false;
+                }
+                return true;
+            });
+            Assert("each record's ActorEffect entries are wrapper-shape", () =>
+            {
+                foreach (var rec in root.GetProperty("records").EnumerateArray())
+                {
+                    var ae = rec.GetProperty("fields").GetProperty("ActorEffect");
+                    foreach (var entry in ae.EnumerateArray())
+                    {
+                        if (entry.ValueKind != System.Text.Json.JsonValueKind.Object) return false;
+                        if (!entry.TryGetProperty("formid", out _)) return false;
+                        if (!entry.TryGetProperty("expanded", out _)) return false;
+                    }
+                }
+                return true;
+            });
+        }
+
+        // ── Probe 7: 1.D.01 — bad field path → strict-batch error ──
+        Console.WriteLine();
+        Console.WriteLine("  ── Probe 7 [1.D.01]: bad fields path -> strict-batch error ──");
+        {
+            var req = new
+            {
+                command = "read_record",
+                plugin_path = SkyrimEsmForBatch7,
+                formid = raceFid1,
+                fields = new[] { "BogusField" },
+            };
+            var r = RunBridgeFn(req);
+            using var doc = System.Text.Json.JsonDocument.Parse(r.Stdout);
+            var root = doc.RootElement;
+            Assert("success: false", () => !root.GetProperty("success").GetBoolean());
+            Assert("validation_errors.RACE.bad_field_paths contains BogusField", () =>
+            {
+                var ve = root.GetProperty("validation_errors");
+                var race = ve.GetProperty("RACE");
+                var bad = race.GetProperty("bad_field_paths");
+                foreach (var b in bad.EnumerateArray())
+                {
+                    if (b.GetString() == "BogusField") return true;
+                }
+                return false;
+            });
+            Assert("valid_field_names list non-empty", () =>
+            {
+                var ve = root.GetProperty("validation_errors");
+                var vfn = ve.GetProperty("RACE").GetProperty("valid_field_names");
+                return vfn.GetArrayLength() > 0;
+            });
+        }
+
+        // ── Probe 8: 1.D.02 — bad expand_links path → strict-batch error ──
+        Console.WriteLine();
+        Console.WriteLine("  ── Probe 8 [1.D.02]: bad expand_links path -> strict-batch error ──");
+        {
+            var req = new
+            {
+                command = "read_record",
+                plugin_path = SkyrimEsmForBatch7,
+                formid = raceFid1,
+                expand_links = new[] { "BogusField" },
+            };
+            var r = RunBridgeFn(req);
+            using var doc = System.Text.Json.JsonDocument.Parse(r.Stdout);
+            var root = doc.RootElement;
+            Assert("success: false", () => !root.GetProperty("success").GetBoolean());
+            Assert("validation_errors.RACE.bad_expansion_targets contains BogusField", () =>
+            {
+                var ve = root.GetProperty("validation_errors");
+                var race = ve.GetProperty("RACE");
+                var bad = race.GetProperty("bad_expansion_targets");
+                foreach (var b in bad.EnumerateArray())
+                {
+                    if (b.GetString() == "BogusField") return true;
+                }
+                return false;
+            });
+        }
+
+        // ── Probe 9: 1.D.03 — non-FormLink expand target ─────────
+        Console.WriteLine();
+        Console.WriteLine("  ── Probe 9 [1.D.03]: non-FormLink expand target -> strict-batch error ──");
+        {
+            var req = new
+            {
+                command = "read_record",
+                plugin_path = SkyrimEsmForBatch7,
+                formid = raceFid1,
+                expand_links = new[] { "EditorID" },
+            };
+            var r = RunBridgeFn(req);
+            using var doc = System.Text.Json.JsonDocument.Parse(r.Stdout);
+            var root = doc.RootElement;
+            Assert("success: false", () => !root.GetProperty("success").GetBoolean());
+            Assert("validation_errors.RACE.non_formlink_expansion_targets contains EditorID", () =>
+            {
+                var ve = root.GetProperty("validation_errors");
+                var race = ve.GetProperty("RACE");
+                var bad = race.GetProperty("non_formlink_expansion_targets");
+                foreach (var b in bad.EnumerateArray())
+                {
+                    if (b.GetString() == "EditorID") return true;
+                }
+                return false;
+            });
+            Assert("valid_formlink_field_names contains ActorEffect", () =>
+            {
+                var ve = root.GetProperty("validation_errors");
+                var fln = ve.GetProperty("RACE").GetProperty("valid_formlink_field_names");
+                foreach (var n in fln.EnumerateArray())
+                {
+                    if (n.GetString() == "ActorEffect") return true;
+                }
+                return false;
+            });
+        }
+
+        // ── Probe 10: 1.D.04 — multi-error accumulation ─────────
+        Console.WriteLine();
+        Console.WriteLine("  ── Probe 10 [1.D.04]: multi-error accumulation ──");
+        {
+            var req = new
+            {
+                command = "read_record",
+                plugin_path = SkyrimEsmForBatch7,
+                formid = raceFid1,
+                fields = new[] { "BogusField", "AlsoBogus" },
+                expand_links = new[] { "EditorID", "ActorEffect" },
+            };
+            var r = RunBridgeFn(req);
+            using var doc = System.Text.Json.JsonDocument.Parse(r.Stdout);
+            var root = doc.RootElement;
+            Assert("success: false", () => !root.GetProperty("success").GetBoolean());
+            Assert("bad_field_paths has both BogusField and AlsoBogus", () =>
+            {
+                var bad = root.GetProperty("validation_errors").GetProperty("RACE").GetProperty("bad_field_paths");
+                int hits = 0;
+                foreach (var b in bad.EnumerateArray())
+                {
+                    if (b.GetString() == "BogusField" || b.GetString() == "AlsoBogus") hits++;
+                }
+                return hits == 2;
+            });
+            Assert("non_formlink_expansion_targets contains EditorID", () =>
+            {
+                var bad = root.GetProperty("validation_errors").GetProperty("RACE").GetProperty("non_formlink_expansion_targets");
+                foreach (var b in bad.EnumerateArray())
+                {
+                    if (b.GetString() == "EditorID") return true;
+                }
+                return false;
+            });
+        }
+
+        // ── Probe 11: 1.D.05 — mixed-type batch validation per type ──
+        Console.WriteLine();
+        Console.WriteLine("  ── Probe 11 [1.D.05]: mixed-type batch RACE+QUST with cross-type fields ──");
+        {
+            var req = new
+            {
+                command = "read_records",
+                records = new[]
+                {
+                    new { plugin_path = SkyrimEsmForBatch7, formid = qustFid1 },
+                    new { plugin_path = SkyrimEsmForBatch7, formid = raceFid1 },
+                },
+                // DialogConditions valid only for QUST; ActorEffect valid only for RACE.
+                fields = new[] { "DialogConditions", "ActorEffect" },
+            };
+            var r = RunBridgeFn(req);
+            using var doc = System.Text.Json.JsonDocument.Parse(r.Stdout);
+            var root = doc.RootElement;
+            Assert("success: false", () => !root.GetProperty("success").GetBoolean());
+            Assert("validation_errors keys include both RACE and QUST", () =>
+            {
+                var ve = root.GetProperty("validation_errors");
+                bool hasRace = false, hasQust = false;
+                foreach (var p in ve.EnumerateObject())
+                {
+                    if (p.Name == "RACE") hasRace = true;
+                    if (p.Name == "QUST") hasQust = true;
+                }
+                return hasRace && hasQust;
+            });
+            Assert("RACE.bad_field_paths contains DialogConditions", () =>
+            {
+                var bad = root.GetProperty("validation_errors").GetProperty("RACE").GetProperty("bad_field_paths");
+                foreach (var b in bad.EnumerateArray())
+                {
+                    if (b.GetString() == "DialogConditions") return true;
+                }
+                return false;
+            });
+            Assert("QUST.bad_field_paths contains ActorEffect", () =>
+            {
+                var bad = root.GetProperty("validation_errors").GetProperty("QUST").GetProperty("bad_field_paths");
+                foreach (var b in bad.EnumerateArray())
+                {
+                    if (b.GetString() == "ActorEffect") return true;
+                }
+                return false;
+            });
+        }
+
+        // ── Probe 12: 1.D.06 — per-record formid resolution failure ──
+        // Bogus middle FormID; valid first + third. Top-level success: true,
+        // per-record envelope per Q3 lock — middle entry success: false.
+        Console.WriteLine();
+        Console.WriteLine("  ── Probe 12 [1.D.06]: per-record formid resolution partial failure ──");
+        {
+            var req = new
+            {
+                command = "read_records",
+                records = new[]
+                {
+                    new { plugin_path = SkyrimEsmForBatch7, formid = raceFid1 },
+                    new { plugin_path = SkyrimEsmForBatch7, formid = "Skyrim.esm:FFFFFF" },
+                    new { plugin_path = SkyrimEsmForBatch7, formid = raceFid2 },
+                },
+            };
+            var r = RunBridgeFn(req);
+            using var doc = System.Text.Json.JsonDocument.Parse(r.Stdout);
+            var root = doc.RootElement;
+            Assert("top-level success: true (per Q3 partial-failure envelope)", () =>
+                root.GetProperty("success").GetBoolean());
+            Assert("3 records returned", () => root.GetProperty("records").GetArrayLength() == 3);
+            Assert("records[0].success and records[2].success true; records[1].success false", () =>
+            {
+                var recs = root.GetProperty("records");
+                bool[] expected = { true, false, true };
+                int i = 0;
+                foreach (var rec in recs.EnumerateArray())
+                {
+                    if (rec.GetProperty("success").GetBoolean() != expected[i]) return false;
+                    i++;
+                }
+                return true;
+            });
+            Assert("records[1] has error string mentioning the formid", () =>
+            {
+                var rec1 = root.GetProperty("records")[1];
+                if (!rec1.TryGetProperty("error", out var err)) return false;
+                var s = err.GetString() ?? "";
+                return s.Contains("FFFFFF", StringComparison.Ordinal) || s.Contains("not found", StringComparison.OrdinalIgnoreCase);
+            });
+        }
+
+        // ── Probe 13: 4.dsl.01 — empty formids list rejected ───────
+        // Bridge treats empty records list as error (existing behavior);
+        // the wrapper-side empty formids rejection is exercised via the
+        // end-to-end smoke harness. This probe verifies the bridge's
+        // own empty-records guard still fires.
+        Console.WriteLine();
+        Console.WriteLine("  ── Probe 13 [4.dsl.01-bridge]: bridge empty-records guard ──");
+        {
+            var req = new
+            {
+                command = "read_records",
+                records = new object[] { },
+            };
+            var r = RunBridgeFn(req);
+            using var doc = System.Text.Json.JsonDocument.Parse(r.Stdout);
+            var root = doc.RootElement;
+            Assert("success: false", () => !root.GetProperty("success").GetBoolean());
+            Assert("error mentions empty list", () =>
+            {
+                var err = root.GetProperty("error").GetString() ?? "";
+                return err.Contains("empty", StringComparison.OrdinalIgnoreCase);
+            });
+        }
+
+        // ── Probe 14: 4.dsl.02-bridge — empty fields list rejected ──
+        Console.WriteLine();
+        Console.WriteLine("  ── Probe 14 [4.dsl.02-bridge]: bridge empty-fields-list rejection ──");
+        {
+            var req = new
+            {
+                command = "read_record",
+                plugin_path = SkyrimEsmForBatch7,
+                formid = raceFid1,
+                fields = new string[] { },
+            };
+            var r = RunBridgeFn(req);
+            using var doc = System.Text.Json.JsonDocument.Parse(r.Stdout);
+            var root = doc.RootElement;
+            Assert("success: false", () => !root.GetProperty("success").GetBoolean());
+            Assert("error mentions empty list", () =>
+            {
+                var err = root.GetProperty("error").GetString() ?? "";
+                return err.Contains("empty", StringComparison.OrdinalIgnoreCase);
+            });
+        }
+    }
+}
+Console.WriteLine($"=== v2.9.2 P2 read-side functional probes: {(p2ReadSideFailures == 0 ? "ALL PASS" : $"{p2ReadSideFailures} FAILURE(S)")} ===");
+
 Console.WriteLine();
-int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures + p2dFailures + p4InfoFailures + p1MultiCondFailures + p2QustFailures + p1ReadSideFailures;
+int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures + p2dFailures + p4InfoFailures + p1MultiCondFailures + p2QustFailures + p1ReadSideFailures + p2ReadSideFailures;
 if (totalFailures > 0)
 {
-    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C + {p2dFailures} v2.9 P2D + {p4InfoFailures} v2.9 P4-INFO + {p1MultiCondFailures} v2.9.1 P1 multi-cond sweep + {p2QustFailures} v2.9.1 P2 quest-cond + {p1ReadSideFailures} v2.9.2 P1 read-side perf-and-shape) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
+    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C + {p2dFailures} v2.9 P2D + {p4InfoFailures} v2.9 P4-INFO + {p1MultiCondFailures} v2.9.1 P1 multi-cond sweep + {p2QustFailures} v2.9.1 P2 quest-cond + {p1ReadSideFailures} v2.9.2 P1 read-side perf-and-shape + {p2ReadSideFailures} v2.9.2 P2 read-side functional) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
     Environment.Exit(1);
 }
 Console.WriteLine("=== probe complete ===");

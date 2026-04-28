@@ -5129,11 +5129,1061 @@ int p4ReadSideFailures = 0;
 }
 Console.WriteLine($"=== v2.9.2 P4 cross-master FormLink expansion fix: {(p4ReadSideFailures == 0 ? "ALL PASS" : $"{p4ReadSideFailures} FAILURE(S)")} ===");
 
+// ═══════════════════════════════════════════════════════════════════════════
+// v2.9.3 P1 — APerkEffect inventory + per-subclass shape sweep
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Goal: enumerate every concrete Mutagen.Bethesda.Skyrim.APerkEffect subclass
+// with its non-base reflection slots, prove Activator constructibility per
+// subclass, anchor PerkEntryPointEffect (EntryPoint enum + Modification enum
+// + concrete PerkConditions element type + binary round-trip), anchor
+// PerkAbility + PerkQuestEffect (per-subclass round-trip), and produce a
+// real-world frequency table over vanilla Skyrim.esm + the 4 DLC ESMs.
+//
+// Output drives Phase 1's APERK_EFFECTS_AUDIT.md — Phase 2's bridge factory
+// transcribes this contract; it does not speculate.
+//
+// Halt-and-report triggers (any one increments v293p1Failures + logs an
+// ARCH SURPRISE line; conductor relays to Aaron at Halt 2):
+//   - APerkEffect base type not found in Mutagen 0.53.1 (rename).
+//   - A concrete APerkEffect subclass is itself abstract (third-level
+//     polymorphism — invalidates Q1's flat-discriminator assumption).
+//   - PerkConditions element type is abstract (invalidates Q7 wrapper-object
+//     lock — would require its own per-subclass factory).
+//   - PerkEntryPointEffect synthetic round-trip fails (write or read throws,
+//     or post-readback assertion mismatches).
+
 Console.WriteLine();
-int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures + p2dFailures + p4InfoFailures + p1MultiCondFailures + p2QustFailures + p1ReadSideFailures + p2ReadSideFailures + p4ReadSideFailures;
+Section("v2.9.3 P1 — APerkEffect inventory + per-subclass shape sweep");
+int v293p1Failures = 0;
+{
+    var asm = typeof(ISkyrimMod).Assembly;
+    var aPerkEffectBase = asm.GetType("Mutagen.Bethesda.Skyrim.APerkEffect");
+
+    // ─── Inventory totals ────────────────────────────────────────────
+    Console.WriteLine($"  APerkEffect base: {aPerkEffectBase?.FullName ?? "<NOT FOUND>"}  IsAbstract={aPerkEffectBase?.IsAbstract}");
+    if (aPerkEffectBase == null)
+    {
+        Console.WriteLine($"  *** ARCH SURPRISE: APerkEffect base not found in Mutagen 0.53.1 — Q1 discriminator design rests on this name; halt-worthy");
+        v293p1Failures++;
+    }
+    else if (!aPerkEffectBase.IsAbstract)
+    {
+        Console.WriteLine($"  *** ARCH SURPRISE: APerkEffect is NOT abstract — Q1 design assumed abstract base; halt-worthy");
+        v293p1Failures++;
+    }
+
+    var concretePerkEffects = aPerkEffectBase == null
+        ? new List<Type>()
+        : asm.GetTypes()
+            .Where(t => t.IsClass && !t.IsAbstract
+                     && (t.Namespace?.StartsWith("Mutagen.Bethesda.Skyrim") ?? false)
+                     && !t.Name.EndsWith("BinaryOverlay")
+                     && aPerkEffectBase.IsAssignableFrom(t))
+            .OrderBy(t => t.Name)
+            .ToList();
+
+    // Also enumerate any abstract APerkEffect subclasses (third-level
+    // polymorphism check — would invalidate Q1's flat dispatcher).
+    var abstractPerkEffectSubclasses = aPerkEffectBase == null
+        ? new List<Type>()
+        : asm.GetTypes()
+            .Where(t => t.IsClass && t.IsAbstract && t != aPerkEffectBase
+                     && (t.Namespace?.StartsWith("Mutagen.Bethesda.Skyrim") ?? false)
+                     && !t.Name.EndsWith("BinaryOverlay")
+                     && aPerkEffectBase.IsAssignableFrom(t))
+            .OrderBy(t => t.Name)
+            .ToList();
+
+    Console.WriteLine($"  Concrete APerkEffect subclasses: {concretePerkEffects.Count}");
+    foreach (var t in concretePerkEffects)
+        Console.WriteLine($"    - {t.Name}  ({t.FullName})");
+
+    if (abstractPerkEffectSubclasses.Count > 0)
+    {
+        Console.WriteLine($"  *** ARCH SURPRISE: {abstractPerkEffectSubclasses.Count} abstract APerkEffect subclass(es) found (third-level polymorphism — Q1 flat dispatcher would not cover them):");
+        foreach (var t in abstractPerkEffectSubclasses)
+            Console.WriteLine($"      - {t.FullName}");
+        v293p1Failures++;
+    }
+    else
+    {
+        Console.WriteLine($"  Abstract APerkEffect subclasses (other than base): 0  ✓ flat dispatcher remains correct");
+    }
+
+    // ─── Per-subclass property dump ──────────────────────────────────
+    // Annotate [base] (declared on APerkEffect or its ancestors) vs
+    // [subclass-specific]. Tag FormLink-typed / Enum-typed / List-typed /
+    // sub-LoquiObject-typed inline so the audit reader can scan slot shapes.
+    bool IsFormLinkLike(Type t)
+    {
+        if (!t.IsGenericType) return false;
+        var n = t.GetGenericTypeDefinition().Name;
+        return n.StartsWith("IFormLink") || n.StartsWith("FormLink");
+    }
+    bool IsListLike(Type t)
+    {
+        if (!t.IsGenericType) return false;
+        var n = t.GetGenericTypeDefinition().Name;
+        return n.StartsWith("ExtendedList") || n.StartsWith("IList") || n.StartsWith("List");
+    }
+    string ShapeTag(Type t)
+    {
+        if (IsFormLinkLike(t)) return "[FormLink]";
+        if (t.IsEnum) return "[Enum]";
+        if (IsListLike(t)) return "[List]";
+        if (t.IsClass && t != typeof(string) && (t.Namespace?.StartsWith("Mutagen") ?? false)) return "[Sub-Loqui]";
+        if (t == typeof(int) || t == typeof(float) || t == typeof(bool) || t == typeof(uint) || t == typeof(short) || t == typeof(byte)) return "[Primitive]";
+        return "[Other]";
+    }
+    bool IsBasePerkEffectProp(PropertyInfo p)
+    {
+        if (p.GetIndexParameters().Length > 0) return true;
+        if (p.DeclaringType == null) return true;
+        if (aPerkEffectBase == null) return false;
+        if (p.DeclaringType == aPerkEffectBase) return true;
+        return aPerkEffectBase.IsSubclassOf(p.DeclaringType) || p.DeclaringType.IsAssignableFrom(aPerkEffectBase);
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("  ─── Per-subclass property surface (annotated [base] / [subclass-specific] + shape tag) ────");
+    var perTypeProps = new Dictionary<Type, (List<PropertyInfo> Base, List<PropertyInfo> Specific)>();
+    foreach (var t in concretePerkEffects)
+    {
+        var allProps = t.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => p.GetIndexParameters().Length == 0)
+            .OrderBy(p => p.Name)
+            .ToList();
+        var baseProps = allProps.Where(IsBasePerkEffectProp).ToList();
+        var specificProps = allProps.Where(p => !IsBasePerkEffectProp(p)).ToList();
+        perTypeProps[t] = (baseProps, specificProps);
+
+        Console.WriteLine();
+        Console.WriteLine($"  Subclass: {t.FullName}");
+        Console.WriteLine($"    [base] properties (inherited from APerkEffect/ancestors): {baseProps.Count}");
+        foreach (var p in baseProps)
+            Console.WriteLine($"      {p.Name,-32} {ShapeTag(p.PropertyType),-12} {FriendlyType(p.PropertyType)}  (declared on {p.DeclaringType?.Name})");
+        Console.WriteLine($"    [subclass-specific] properties: {specificProps.Count}");
+        foreach (var p in specificProps)
+            Console.WriteLine($"      {p.Name,-32} {ShapeTag(p.PropertyType),-12} {FriendlyType(p.PropertyType)}  (declared on {p.DeclaringType?.Name})");
+    }
+
+    // ─── Activator constructibility table ────────────────────────────
+    Console.WriteLine();
+    Console.WriteLine("  ─── Activator constructibility table ────────────────");
+    Console.WriteLine($"  {"Type",-40} {"Result",-10} {"Notes",-60}");
+    Console.WriteLine($"  {new string('-', 40),-40} {new string('-', 10),-10} {new string('-', 60),-60}");
+
+    // Abstract base — expected fail (mirrors v2.8.0 EFFECTS_AUDIT shape for Condition).
+    if (aPerkEffectBase != null)
+    {
+        try
+        {
+            var _ = System.Activator.CreateInstance(aPerkEffectBase);
+            Console.WriteLine($"  {aPerkEffectBase.Name,-40} {"OK",-10} {"UNEXPECTED — abstract base should not construct (halt-worthy)",-60}");
+            v293p1Failures++;
+        }
+        catch (Exception ex)
+        {
+            var inner = ex is TargetInvocationException tex && tex.InnerException != null ? tex.InnerException : ex;
+            Console.WriteLine($"  {aPerkEffectBase.Name,-40} {"FAIL",-10} {inner.GetType().Name + ": " + inner.Message,-60}");
+            // Expected: MissingMethodException "Cannot create an abstract class". Don't increment failures.
+        }
+    }
+
+    // Each concrete subclass — expected OK.
+    foreach (var t in concretePerkEffects)
+    {
+        try
+        {
+            var inst = System.Activator.CreateInstance(t);
+            Console.WriteLine($"  {t.Name,-40} {"OK",-10} {"parameterless ctor available; Activator-constructible",-60}");
+        }
+        catch (Exception ex)
+        {
+            var inner = ex is TargetInvocationException tex && tex.InnerException != null ? tex.InnerException : ex;
+            Console.WriteLine($"  {t.Name,-40} {"FAIL",-10} {inner.GetType().Name + ": " + inner.Message,-60}");
+            Console.WriteLine($"      *** ARCH SURPRISE: concrete APerkEffect subclass {t.Name} not Activator-constructible — Q2 ship-full-set assumes parameterless ctor; halt-worthy");
+            v293p1Failures++;
+        }
+    }
+
+    // ─── PerkEntryPointEffect anchor section ─────────────────────────
+    Console.WriteLine();
+    Console.WriteLine("  ─── PerkEntryPointEffect anchor: enum dumps + PerkConditions element-type + round-trip ────");
+    var pepeType = asm.GetType("Mutagen.Bethesda.Skyrim.PerkEntryPointEffect");
+    if (pepeType == null)
+    {
+        Console.WriteLine($"  *** ARCH SURPRISE: PerkEntryPointEffect not found in Mutagen 0.53.1 — Layer 1.P anchor + Q1 example reference depend on this name; halt-worthy");
+        v293p1Failures++;
+    }
+    else
+    {
+        // EntryPoint enum dump.
+        var entryPointProp = pepeType.GetProperty("EntryPoint", BindingFlags.Public | BindingFlags.Instance);
+        if (entryPointProp == null || !entryPointProp.PropertyType.IsEnum)
+        {
+            Console.WriteLine($"  *** ARCH SURPRISE: PerkEntryPointEffect.EntryPoint missing or not enum (got {entryPointProp?.PropertyType.Name ?? "<null>"}); halt-worthy");
+            v293p1Failures++;
+        }
+        else
+        {
+            var epType = entryPointProp.PropertyType;
+            var epNames = Enum.GetNames(epType);
+            Console.WriteLine($"  EntryPoint enum: {epType.FullName}  ({epNames.Length} members)");
+            var preview = string.Join(", ", epNames.Take(20));
+            Console.WriteLine($"    First 20: {preview}{(epNames.Length > 20 ? ", ..." : "")}");
+            // Full dump on a separate, demarcated line range so the audit doc
+            // can transcribe representative values without re-running the probe.
+            Console.WriteLine($"    Full member list ({epNames.Length}):");
+            for (int i = 0; i < epNames.Length; i++)
+                Console.WriteLine($"      [{i,3}] {epNames[i]}");
+        }
+
+        // Modification / Function / PerkType enum dump — Mutagen may name it
+        // differently across versions, so probe for any enum named like
+        // "Modification" / "Function" / "PerkType" on PerkEntryPointEffect.
+        var modificationProp = pepeType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => p.PropertyType.IsEnum && (p.Name.Contains("Modification") || p.Name.Contains("Function") || p.Name == "PerkType"))
+            .FirstOrDefault();
+        if (modificationProp == null)
+        {
+            // Not a hard halt — but document the observation. Phase 2 schema
+            // description references it.
+            Console.WriteLine($"  Modification/Function/PerkType enum: NOT FOUND on PerkEntryPointEffect — investigate (Phase 0 default Q5 example used 'Modification')");
+        }
+        else
+        {
+            var mNames = Enum.GetNames(modificationProp.PropertyType);
+            Console.WriteLine($"  Modification-style enum: {modificationProp.Name} : {modificationProp.PropertyType.FullName}  ({mNames.Length} members)");
+            Console.WriteLine($"    Members: {string.Join(", ", mNames)}");
+        }
+
+        // PerkConditions property + element type confirmation.
+        var pcProp = pepeType.GetProperty("PerkConditions", BindingFlags.Public | BindingFlags.Instance);
+        if (pcProp == null)
+        {
+            Console.WriteLine($"  *** ARCH SURPRISE: PerkEntryPointEffect.PerkConditions property NOT FOUND; halt-worthy");
+            v293p1Failures++;
+        }
+        else
+        {
+            Console.WriteLine($"  PerkConditions property type: {FriendlyType(pcProp.PropertyType)}");
+            Type? pcElementType = null;
+            if (pcProp.PropertyType.IsGenericType)
+            {
+                var genericArgs = pcProp.PropertyType.GetGenericArguments();
+                if (genericArgs.Length >= 1) pcElementType = genericArgs[0];
+            }
+            if (pcElementType == null)
+            {
+                Console.WriteLine($"  *** ARCH SURPRISE: PerkConditions element type could not be resolved from generic arguments; halt-worthy");
+                v293p1Failures++;
+            }
+            else
+            {
+                Console.WriteLine($"  PerkConditions element type: {pcElementType.FullName}  IsAbstract={pcElementType.IsAbstract}  IsInterface={pcElementType.IsInterface}");
+                if (pcElementType.IsAbstract || pcElementType.IsInterface)
+                {
+                    Console.WriteLine($"  *** ARCH SURPRISE: PerkConditions element type is abstract/interface — Q7 wrapper-object lock would need its own per-subclass factory inside the wrapper; halt-worthy");
+                    v293p1Failures++;
+                }
+                else
+                {
+                    Console.WriteLine($"  ✓ PerkConditions element type is concrete — Q7 wrapper-object lock holds; Activator-constructible expected");
+                    // Confirm the concrete element type is itself Activator-constructible.
+                    try
+                    {
+                        var pcInst = System.Activator.CreateInstance(pcElementType);
+                        Console.WriteLine($"  ✓ PerkCondition Activator.CreateInstance OK (parameterless ctor available)");
+                    }
+                    catch (Exception ex)
+                    {
+                        var inner = ex is TargetInvocationException tex && tex.InnerException != null ? tex.InnerException : ex;
+                        Console.WriteLine($"  *** ARCH SURPRISE: PerkConditions element type {pcElementType.Name} not Activator-constructible: {inner.GetType().Name}: {inner.Message}; halt-worthy");
+                        v293p1Failures++;
+                    }
+                }
+            }
+        }
+
+        // Round-trip a synthetic PerkEntryPointEffect through binary write+read.
+        // Mirrors AugmentedShock60's read-side render shape (ModSpellMagnitude /
+        // Multiply / 1.5 / one PerkCondition tab / one nested GetActorValue).
+        Console.WriteLine();
+        Console.WriteLine("  ─── PerkEntryPointEffect synthetic round-trip ────");
+        try
+        {
+            var rtModKey = ModKey.FromNameAndExtension("PerkRT.esp");
+            var rtMod = new SkyrimMod(rtModKey, SkyrimRelease.SkyrimSE);
+            var rtPerk = new Perk(new FormKey(rtModKey, 0xA01), SkyrimRelease.SkyrimSE)
+            {
+                EditorID = "PerkRT_PEPE",
+            };
+
+            var pepe = (object)System.Activator.CreateInstance(pepeType)!;
+
+            // Set EntryPoint = ModSpellMagnitude.
+            var epProp = pepeType.GetProperty("EntryPoint")!;
+            var epEnumType = epProp.PropertyType;
+            object? epValue = null;
+            try { epValue = Enum.Parse(epEnumType, "ModSpellMagnitude", ignoreCase: true); }
+            catch { /* fall through; report below */ }
+            if (epValue == null)
+            {
+                Console.WriteLine($"  *** ARCH SURPRISE: 'ModSpellMagnitude' not a member of {epEnumType.Name}; round-trip cannot proceed; halt-worthy");
+                v293p1Failures++;
+            }
+            else
+            {
+                epProp.SetValue(pepe, epValue);
+
+                // Set Modification-style enum if present (best-effort; Mutagen's
+                // Modification enum tends to include MultiplyValue / Multiply or
+                // similar).
+                var modProp = modificationProp;
+                if (modProp != null)
+                {
+                    var modEnumType = modProp.PropertyType;
+                    var modNames = Enum.GetNames(modEnumType);
+                    var preferred = new[] { "Multiply", "MultiplyValue", "Mult" };
+                    string? pickedModName = preferred.FirstOrDefault(n => modNames.Contains(n));
+                    if (pickedModName == null && modNames.Length > 0) pickedModName = modNames[0];
+                    if (pickedModName != null)
+                    {
+                        var modVal = Enum.Parse(modEnumType, pickedModName);
+                        modProp.SetValue(pepe, modVal);
+                        Console.WriteLine($"  Modification enum set to '{pickedModName}' (preferred Multiply if available)");
+                    }
+                }
+
+                // Value (Single/float).
+                var valueProp = pepeType.GetProperty("Value", BindingFlags.Public | BindingFlags.Instance);
+                if (valueProp != null && (valueProp.PropertyType == typeof(float) || valueProp.PropertyType == typeof(System.Single)))
+                {
+                    valueProp.SetValue(pepe, 1.5f);
+                }
+                else
+                {
+                    Console.WriteLine($"  Note: PerkEntryPointEffect.Value not Single ({valueProp?.PropertyType.Name ?? "<null>"}) — skipped value set");
+                }
+
+                // Build a synthetic PerkCondition wrapping a ConditionFloat
+                // (GetActorValueConditionData; ActorValue = Destruction;
+                // ComparisonValue = 60).
+                var pcProp2 = pepeType.GetProperty("PerkConditions");
+                if (pcProp2 != null && pcProp2.PropertyType.IsGenericType)
+                {
+                    var pcElType = pcProp2.PropertyType.GetGenericArguments()[0];
+                    var pcInstWrapper = System.Activator.CreateInstance(pcElType);
+
+                    // RunOnTabIndex (Int32 — name varies; probe for it).
+                    var rotiProp = pcElType.GetProperty("RunOnTabIndex", BindingFlags.Public | BindingFlags.Instance);
+                    if (rotiProp != null) rotiProp.SetValue(pcInstWrapper, (sbyte)1 == default(sbyte) ? Convert.ChangeType(1, rotiProp.PropertyType) : Convert.ChangeType(1, rotiProp.PropertyType));
+
+                    // Conditions list on the wrapper.
+                    var pcConditionsProp = pcElType.GetProperty("Conditions", BindingFlags.Public | BindingFlags.Instance);
+                    if (pcConditionsProp != null)
+                    {
+                        var pcConditionsList = pcConditionsProp.GetValue(pcInstWrapper);
+
+                        // Build the inner ConditionFloat with GetActorValueConditionData.
+                        var condFloat = new ConditionFloat
+                        {
+                            ComparisonValue = 60f,
+                            CompareOperator = CompareOperator.GreaterThanOrEqualTo,
+                        };
+                        var gavType = asm.GetType("Mutagen.Bethesda.Skyrim.GetActorValueConditionData")!;
+                        var gavData = System.Activator.CreateInstance(gavType)!;
+                        var avProp = gavType.GetProperty("ActorValue", BindingFlags.Public | BindingFlags.Instance)!;
+                        var avValue = Enum.Parse(avProp.PropertyType, "Destruction", ignoreCase: true);
+                        avProp.SetValue(gavData, avValue);
+                        var dataProp = typeof(ConditionFloat).GetProperty("Data", BindingFlags.Public | BindingFlags.Instance)!;
+                        dataProp.SetValue(condFloat, gavData);
+
+                        // pcConditionsList is ExtendedList<Condition>; Add via reflection.
+                        var addMethod = pcConditionsList!.GetType().GetMethod("Add", new[] { typeof(Mutagen.Bethesda.Skyrim.Condition) });
+                        if (addMethod != null)
+                            addMethod.Invoke(pcConditionsList, new object[] { condFloat });
+                        else
+                            Console.WriteLine($"  Note: PerkCondition.Conditions has no Add(Condition) method via reflection — skipped nested condition");
+                    }
+
+                    // Add the wrapper to PerkConditions list.
+                    var pcList = pcProp2.GetValue(pepe);
+                    var addPc = pcList!.GetType().GetMethod("Add", new[] { pcElType });
+                    if (addPc != null)
+                        addPc.Invoke(pcList, new object[] { pcInstWrapper! });
+                }
+
+                // Attach to a synthetic PERK record's Effects list.
+                var perkEffectsProp = typeof(Perk).GetProperty("Effects", BindingFlags.Public | BindingFlags.Instance);
+                if (perkEffectsProp == null)
+                {
+                    Console.WriteLine($"  *** ARCH SURPRISE: Perk.Effects property NOT FOUND; halt-worthy");
+                    v293p1Failures++;
+                }
+                else
+                {
+                    var effectsList = perkEffectsProp.GetValue(rtPerk);
+                    var addEff = effectsList!.GetType().GetMethod("Add", new[] { aPerkEffectBase! });
+                    if (addEff == null)
+                    {
+                        Console.WriteLine($"  *** ARCH SURPRISE: Perk.Effects has no Add(APerkEffect) method via reflection; halt-worthy");
+                        v293p1Failures++;
+                    }
+                    else
+                    {
+                        addEff.Invoke(effectsList, new object[] { pepe });
+                        rtMod.Perks.Add(rtPerk);
+
+                        // Write + read.
+                        var rtDir = Path.Combine(Path.GetTempPath(), "raceprobe-v2.9.3-p1");
+                        Directory.CreateDirectory(rtDir);
+                        var rtPath = Path.Combine(rtDir, "PerkRT.esp");
+                        rtMod.WriteToBinary(rtPath);
+                        var fileInfo = new FileInfo(rtPath);
+                        Console.WriteLine($"  Wrote synthetic PERK ESP: {rtPath}  ({fileInfo.Length} bytes)");
+
+                        var rb = SkyrimMod.CreateFromBinary(rtPath, SkyrimRelease.SkyrimSE);
+                        var rbPerk = rb.Perks.FirstOrDefault();
+                        if (rbPerk == null)
+                        {
+                            Console.WriteLine($"  *** ARCH SURPRISE: round-trip readback has no PERK records; halt-worthy");
+                            v293p1Failures++;
+                        }
+                        else
+                        {
+                            var rbEffectsObj = perkEffectsProp.GetValue(rbPerk);
+                            var rbEffects = (rbEffectsObj as System.Collections.IEnumerable)?.Cast<object>().ToList() ?? new List<object>();
+                            Console.WriteLine($"  Readback Effects.Count = {rbEffects.Count} (expected 1)");
+                            if (rbEffects.Count != 1)
+                            {
+                                Console.WriteLine($"  *** ARCH SURPRISE: round-trip Effects.Count mismatch; halt-worthy");
+                                v293p1Failures++;
+                            }
+                            else
+                            {
+                                var rbEff0 = rbEffects[0];
+                                var rbEff0Type = rbEff0.GetType();
+                                Console.WriteLine($"  Readback Effects[0] runtime type: {rbEff0Type.Name}");
+                                bool typeMatches = rbEff0Type.Name == "PerkEntryPointEffect" || rbEff0Type.Name.StartsWith("PerkEntryPointEffect");
+                                if (!typeMatches)
+                                {
+                                    Console.WriteLine($"  *** ARCH SURPRISE: readback runtime type {rbEff0Type.Name} != PerkEntryPointEffect; halt-worthy");
+                                    v293p1Failures++;
+                                }
+                                else
+                                {
+                                    Console.WriteLine($"  ✓ Readback effect type matches PerkEntryPointEffect");
+
+                                    // Best-effort property assertions; failures here are halt-worthy
+                                    // because the PEPE round-trip is a Q1 + Q7 + Q4 keystone.
+                                    var rbEpProp = rbEff0Type.GetProperty("EntryPoint");
+                                    var rbValueProp = rbEff0Type.GetProperty("Value");
+                                    var rbPcProp = rbEff0Type.GetProperty("PerkConditions");
+                                    var rbEpVal = rbEpProp?.GetValue(rbEff0)?.ToString();
+                                    var rbValueVal = rbValueProp?.GetValue(rbEff0);
+                                    var rbPcList = (rbPcProp?.GetValue(rbEff0) as System.Collections.IEnumerable)?.Cast<object>().ToList() ?? new List<object>();
+
+                                    Console.WriteLine($"  Readback EntryPoint = {rbEpVal} (expected ModSpellMagnitude)");
+                                    Console.WriteLine($"  Readback Value      = {rbValueVal} (expected 1.5)");
+                                    Console.WriteLine($"  Readback PerkConditions.Count = {rbPcList.Count} (expected 1)");
+
+                                    bool epOk = rbEpVal == "ModSpellMagnitude";
+                                    bool valOk = rbValueVal is float fv && Math.Abs(fv - 1.5f) < 0.0001f;
+                                    bool pcOk = rbPcList.Count == 1;
+                                    if (!epOk || !valOk || !pcOk)
+                                    {
+                                        Console.WriteLine($"  *** ARCH SURPRISE: round-trip property mismatch (EntryPoint={epOk}, Value={valOk}, PerkConditions={pcOk}); halt-worthy");
+                                        v293p1Failures++;
+                                    }
+                                    else
+                                    {
+                                        Console.WriteLine($"  ✓ PerkEntryPointEffect synthetic round-trip clean — EntryPoint + Value + PerkConditions count all match");
+
+                                        // Drill into the nested PerkCondition + Condition for full
+                                        // composition evidence (Q7 wrapper + v2.8.0 BuildCondition route).
+                                        var rbPcWrapper = rbPcList[0];
+                                        var rbPcWrapperType = rbPcWrapper.GetType();
+                                        var rbRotiVal = rbPcWrapperType.GetProperty("RunOnTabIndex")?.GetValue(rbPcWrapper);
+                                        var rbInnerCondsObj = rbPcWrapperType.GetProperty("Conditions")?.GetValue(rbPcWrapper);
+                                        var rbInnerConds = (rbInnerCondsObj as System.Collections.IEnumerable)?.Cast<object>().ToList() ?? new List<object>();
+                                        Console.WriteLine($"  Readback PerkConditions[0].RunOnTabIndex   = {rbRotiVal} (expected 1)");
+                                        Console.WriteLine($"  Readback PerkConditions[0].Conditions.Count = {rbInnerConds.Count} (expected 1)");
+                                        if (rbInnerConds.Count >= 1)
+                                        {
+                                            var rbInnerCond = rbInnerConds[0];
+                                            var rbInnerCondType = rbInnerCond.GetType();
+                                            Console.WriteLine($"  Readback PerkConditions[0].Conditions[0] runtime type: {rbInnerCondType.Name}");
+                                            // Mutagen wraps records read via CreateFromBinary in *BinaryOverlay
+                                            // when read via overlay; CreateFromBinary (full) should give
+                                            // ConditionFloat directly. Either way, Data property is exposed.
+                                            var rbDataProp = rbInnerCondType.GetProperty("Data");
+                                            if (rbDataProp != null)
+                                            {
+                                                var rbData = rbDataProp.GetValue(rbInnerCond);
+                                                Console.WriteLine($"  Readback inner Condition.Data runtime type: {rbData?.GetType().Name}");
+                                                var rbAvProp = rbData?.GetType().GetProperty("ActorValue");
+                                                var rbAvVal = rbAvProp?.GetValue(rbData)?.ToString();
+                                                Console.WriteLine($"  Readback inner Condition.Data.ActorValue = {rbAvVal} (expected Destruction)");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Cleanup synthetic fixture — best-effort.
+                        try { Directory.Delete(rtDir, recursive: true); } catch { /* best-effort */ }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            var inner = ex is TargetInvocationException tex && tex.InnerException != null ? tex.InnerException : ex;
+            Console.WriteLine($"  *** ARCH SURPRISE: PerkEntryPointEffect round-trip threw {inner.GetType().Name}: {inner.Message}; halt-worthy");
+            Console.WriteLine($"      stack: {inner.StackTrace?.Split('\n').FirstOrDefault()?.Trim()}");
+            v293p1Failures++;
+        }
+    }
+
+    // ─── PerkAbility / PerkQuestEffect anchor sections ───────────────
+    void RoundTripSubclassAnchor(string subclassName, Action<object, Type> populate, Action<object, Type> assertReadback)
+    {
+        Console.WriteLine();
+        Console.WriteLine($"  ─── {subclassName} anchor: synthetic round-trip ────");
+        var t = asm.GetType($"Mutagen.Bethesda.Skyrim.{subclassName}");
+        if (t == null)
+        {
+            Console.WriteLine($"  Note: {subclassName} not enumerated in concrete subclass set; skipping anchor (Phase 2 schema description omits it).");
+            return;
+        }
+        try
+        {
+            var rtModKey = ModKey.FromNameAndExtension($"PerkRT_{subclassName}.esp");
+            var rtMod = new SkyrimMod(rtModKey, SkyrimRelease.SkyrimSE);
+            var rtPerk = new Perk(new FormKey(rtModKey, 0xA01), SkyrimRelease.SkyrimSE) { EditorID = $"PerkRT_{subclassName}" };
+
+            var inst = System.Activator.CreateInstance(t)!;
+            populate(inst, t);
+
+            var perkEffectsProp = typeof(Perk).GetProperty("Effects", BindingFlags.Public | BindingFlags.Instance)!;
+            var effectsList = perkEffectsProp.GetValue(rtPerk)!;
+            var addEff = effectsList.GetType().GetMethod("Add", new[] { aPerkEffectBase! });
+            if (addEff == null)
+            {
+                Console.WriteLine($"  *** ARCH SURPRISE: Perk.Effects.Add(APerkEffect) not found via reflection for {subclassName}; halt-worthy");
+                v293p1Failures++;
+                return;
+            }
+            addEff.Invoke(effectsList, new object[] { inst });
+            rtMod.Perks.Add(rtPerk);
+
+            var rtDir = Path.Combine(Path.GetTempPath(), $"raceprobe-v2.9.3-p1-{subclassName}");
+            Directory.CreateDirectory(rtDir);
+            var rtPath = Path.Combine(rtDir, $"PerkRT_{subclassName}.esp");
+            rtMod.WriteToBinary(rtPath);
+            Console.WriteLine($"  Wrote synthetic PERK ESP: {rtPath}  ({new FileInfo(rtPath).Length} bytes)");
+
+            var rb = SkyrimMod.CreateFromBinary(rtPath, SkyrimRelease.SkyrimSE);
+            var rbPerk = rb.Perks.FirstOrDefault();
+            var rbEffects = (perkEffectsProp.GetValue(rbPerk) as System.Collections.IEnumerable)?.Cast<object>().ToList() ?? new List<object>();
+            if (rbEffects.Count != 1)
+            {
+                Console.WriteLine($"  *** ARCH SURPRISE: {subclassName} round-trip Effects.Count = {rbEffects.Count} (expected 1); halt-worthy");
+                v293p1Failures++;
+                try { Directory.Delete(rtDir, recursive: true); } catch { }
+                return;
+            }
+            var rbEff0 = rbEffects[0];
+            var rbEff0Type = rbEff0.GetType();
+            Console.WriteLine($"  Readback Effects[0] runtime type: {rbEff0Type.Name} (expected match for {subclassName})");
+            bool typeMatches = rbEff0Type.Name == subclassName || rbEff0Type.Name.StartsWith(subclassName);
+            if (!typeMatches)
+            {
+                Console.WriteLine($"  *** ARCH SURPRISE: {subclassName} round-trip type mismatch; halt-worthy");
+                v293p1Failures++;
+            }
+            else
+            {
+                Console.WriteLine($"  ✓ {subclassName} round-trip type matches");
+                assertReadback(rbEff0, rbEff0Type);
+            }
+            try { Directory.Delete(rtDir, recursive: true); } catch { }
+        }
+        catch (Exception ex)
+        {
+            var inner = ex is TargetInvocationException tex && tex.InnerException != null ? tex.InnerException : ex;
+            Console.WriteLine($"  *** ARCH SURPRISE: {subclassName} round-trip threw {inner.GetType().Name}: {inner.Message}; halt-worthy");
+            Console.WriteLine($"      stack: {inner.StackTrace?.Split('\n').FirstOrDefault()?.Trim()}");
+            v293p1Failures++;
+        }
+    }
+
+    var anchorSpellKey = new FormKey(ModKey.FromNameAndExtension("Skyrim.esm"), 0x0CF788);
+    var anchorQuestKey = new FormKey(ModKey.FromNameAndExtension("Skyrim.esm"), 0x000200);
+
+    RoundTripSubclassAnchor("PerkAbility",
+        populate: (inst, t) =>
+        {
+            var abilityProp = t.GetProperty("Ability", BindingFlags.Public | BindingFlags.Instance);
+            if (abilityProp == null) throw new InvalidOperationException("PerkAbility.Ability property not found");
+            // Construct FormLink<ISpellGetter>(anchorSpellKey) via reflection so we
+            // don't bake a specific generic argument shape — Mutagen may use
+            // IFormLink<ISpellGetter> or FormLink<ISpellGetter>.
+            if (abilityProp.PropertyType.IsGenericType)
+            {
+                var inner = abilityProp.PropertyType.GetGenericArguments()[0];
+                var concreteType = typeof(FormLink<>).MakeGenericType(inner);
+                var link = System.Activator.CreateInstance(concreteType, anchorSpellKey)!;
+                abilityProp.SetValue(inst, link);
+            }
+        },
+        assertReadback: (rbEff0, rbEff0Type) =>
+        {
+            var abilityProp = rbEff0Type.GetProperty("Ability");
+            var rbAbility = abilityProp?.GetValue(rbEff0);
+            var rbFkProp = rbAbility?.GetType().GetProperty("FormKey");
+            var rbFkVal = rbFkProp?.GetValue(rbAbility);
+            Console.WriteLine($"  Readback PerkAbility.Ability.FormKey = {rbFkVal} (expected {anchorSpellKey})");
+            if (!anchorSpellKey.Equals(rbFkVal))
+            {
+                Console.WriteLine($"  *** ARCH SURPRISE: PerkAbility.Ability FormKey round-trip mismatch; halt-worthy");
+                v293p1Failures++;
+            }
+            else
+            {
+                Console.WriteLine($"  ✓ PerkAbility.Ability FormLink round-trip clean");
+            }
+        });
+
+    RoundTripSubclassAnchor("PerkQuestEffect",
+        populate: (inst, t) =>
+        {
+            var questProp = t.GetProperty("Quest", BindingFlags.Public | BindingFlags.Instance);
+            var stageProp = t.GetProperty("Stage", BindingFlags.Public | BindingFlags.Instance);
+            if (questProp == null) throw new InvalidOperationException("PerkQuestEffect.Quest property not found");
+            if (stageProp == null) throw new InvalidOperationException("PerkQuestEffect.Stage property not found");
+            if (questProp.PropertyType.IsGenericType)
+            {
+                var inner = questProp.PropertyType.GetGenericArguments()[0];
+                var concreteType = typeof(FormLink<>).MakeGenericType(inner);
+                var link = System.Activator.CreateInstance(concreteType, anchorQuestKey)!;
+                questProp.SetValue(inst, link);
+            }
+            // Stage is typically an integer (Int32 / Int16 / Byte). Convert
+            // 100 to whatever Mutagen exposes.
+            stageProp.SetValue(inst, Convert.ChangeType(100, stageProp.PropertyType));
+        },
+        assertReadback: (rbEff0, rbEff0Type) =>
+        {
+            var questProp = rbEff0Type.GetProperty("Quest");
+            var stageProp = rbEff0Type.GetProperty("Stage");
+            var rbQuest = questProp?.GetValue(rbEff0);
+            var rbFkProp = rbQuest?.GetType().GetProperty("FormKey");
+            var rbFkVal = rbFkProp?.GetValue(rbQuest);
+            var rbStageVal = stageProp?.GetValue(rbEff0);
+            Console.WriteLine($"  Readback PerkQuestEffect.Quest.FormKey = {rbFkVal} (expected {anchorQuestKey})");
+            Console.WriteLine($"  Readback PerkQuestEffect.Stage         = {rbStageVal} (expected 100)");
+            bool fkOk = anchorQuestKey.Equals(rbFkVal);
+            bool stageOk = rbStageVal != null && Convert.ToInt32(rbStageVal) == 100;
+            if (!fkOk || !stageOk)
+            {
+                Console.WriteLine($"  *** ARCH SURPRISE: PerkQuestEffect round-trip mismatch (Quest={fkOk}, Stage={stageOk}); halt-worthy");
+                v293p1Failures++;
+            }
+            else
+            {
+                Console.WriteLine($"  ✓ PerkQuestEffect Quest+Stage round-trip clean");
+            }
+        });
+
+    // ─── Real-world frequency probe (informational, non-halting) ─────
+    // Scope: vanilla Skyrim.esm + 4 DLC ESMs at the Steam Data dir.
+    // Per conductor sign-off 2026-04-28: full Authoria sampling overkill;
+    // DLC ESMs give the canonical Bethesda pattern (Werewolf/Vampire perks
+    // in Dawnguard.esm; Standing Stone / Black Book perks in Dragonborn.esm).
+    // Missing files are skipped + noted; non-halting.
+    Console.WriteLine();
+    Console.WriteLine("  ─── Real-world frequency probe (vanilla + 4 DLC ESMs) ────");
+    var skyrimDataDir = @"E:\SteamLibrary\steamapps\common\Skyrim Special Edition\Data\";
+    var esmsToScan = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" };
+    // perPlugin[plugin][subclassName] = (effectCount, recordCount)
+    var perPlugin = new Dictionary<string, Dictionary<string, (int Effects, int Records)>>();
+    var totals = new Dictionary<string, (int Effects, int Records)>();
+    int totalPerksScanned = 0;
+
+    foreach (var esmName in esmsToScan)
+    {
+        var path = Path.Combine(skyrimDataDir, esmName);
+        if (!File.Exists(path))
+        {
+            Console.WriteLine($"  {esmName,-20} SKIP (not present at {path})");
+            continue;
+        }
+        try
+        {
+            using var srcMod = SkyrimMod.CreateFromBinaryOverlay(path, SkyrimRelease.SkyrimSE);
+            var pluginRow = new Dictionary<string, (int Effects, int Records)>();
+            int perkCount = 0;
+            foreach (var perk in srcMod.Perks)
+            {
+                perkCount++;
+                var seenInThisPerk = new HashSet<string>();
+                var effects = perk.Effects;
+                if (effects == null) continue;
+                foreach (var eff in effects)
+                {
+                    var sn = eff.GetType().Name;
+                    // Strip BinaryOverlay suffix to keep the names stable across
+                    // overlay vs full read.
+                    if (sn.EndsWith("BinaryOverlay")) sn = sn.Substring(0, sn.Length - "BinaryOverlay".Length);
+                    (int Effects, int Records) prev = pluginRow.TryGetValue(sn, out var pv) ? pv : (0, 0);
+                    int recordIncrement = seenInThisPerk.Add(sn) ? 1 : 0;
+                    pluginRow[sn] = (prev.Effects + 1, prev.Records + recordIncrement);
+                    (int Effects, int Records) prevTotal = totals.TryGetValue(sn, out var tv) ? tv : (0, 0);
+                    totals[sn] = (prevTotal.Effects + 1, prevTotal.Records + recordIncrement);
+                }
+            }
+            perPlugin[esmName] = pluginRow;
+            totalPerksScanned += perkCount;
+            Console.WriteLine($"  {esmName,-20} OK   ({perkCount} PERK records scanned)");
+        }
+        catch (Exception ex)
+        {
+            var inner = ex is TargetInvocationException tex && tex.InnerException != null ? tex.InnerException : ex;
+            Console.WriteLine($"  {esmName,-20} FAIL ({inner.GetType().Name}: {inner.Message}) — informational only, non-halting");
+        }
+    }
+
+    // Per-plugin breakdown.
+    Console.WriteLine();
+    Console.WriteLine($"  Per-plugin breakdown (effect-instance count / distinct PERK-record count):");
+    foreach (var kv in perPlugin)
+    {
+        Console.WriteLine($"    {kv.Key}:");
+        foreach (var sub in kv.Value.OrderByDescending(s => s.Value.Effects))
+            Console.WriteLine($"      {sub.Key,-32} {sub.Value.Effects,6} effects across {sub.Value.Records,5} PERK record(s)");
+    }
+
+    // Aggregate totals.
+    Console.WriteLine();
+    Console.WriteLine($"  Aggregate totals across {totalPerksScanned} PERK records (vanilla + DLC):");
+    var grandEffects = totals.Values.Sum(v => v.Effects);
+    foreach (var sub in totals.OrderByDescending(s => s.Value.Effects))
+    {
+        var pct = grandEffects > 0 ? (sub.Value.Effects * 100.0 / grandEffects) : 0;
+        Console.WriteLine($"    {sub.Key,-32} {sub.Value.Effects,6} effects ({pct,5:F1}%) across {sub.Value.Records,5} record(s)");
+    }
+}
+
+Console.WriteLine();
+Console.WriteLine($"=== v2.9.3 P1 APerkEffect inventory + shape sweep: {(v293p1Failures == 0 ? "ALL PASS" : $"{v293p1Failures} FAILURE(S)")} ===");
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v2.9.3 P1.5 — PerkEntryPointModifyValue anchor (re-targeted PEPE-replacement)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Phase 1.5 supplemental probe per conductor sign-off 2026-04-28 after
+// Halt 2 surfaced that "PerkEntryPointEffect" doesn't exist in Mutagen 0.53.1
+// (the actual schema decomposes into 12 concrete leaves under the abstract
+// APerkEntryPointEffect intermediate). PerkEntryPointModifyValue is the
+// 60.3% dominant leaf — AugmentedShock60-style perks land here. Re-targets
+// the round-trip evidence the original P1 PEPE anchor couldn't capture.
+//
+// Confirms:
+//   - APerkEntryPointEffect+EntryType enum dump (the actual EntryPoint enum,
+//     declared on the abstract intermediate; ~140 expected per PLAN § Background).
+//   - PerkEntryPointModifyValue+ModificationType enum dump (per-leaf, NOT shared).
+//   - Synthetic round-trip: ModSpellMagnitude / Multiply-or-fallback / 1.5 /
+//     one PerkCondition wrapper / one ConditionFloat (GetActorValue, Destruction, 60).
+//   - Records the literal Modification enum value used + whether fallback fired.
+
+Console.WriteLine();
+Section("v2.9.3 P1.5 — PerkEntryPointModifyValue anchor (PEPE-replacement)");
+int v293p15Failures = 0;
+{
+    var asm = typeof(ISkyrimMod).Assembly;
+    var aPerkEffectBase = asm.GetType("Mutagen.Bethesda.Skyrim.APerkEffect");
+    var pepmType = asm.GetType("Mutagen.Bethesda.Skyrim.PerkEntryPointModifyValue");
+    var apepeType = asm.GetType("Mutagen.Bethesda.Skyrim.APerkEntryPointEffect");
+
+    if (pepmType == null)
+    {
+        Console.WriteLine($"  *** ARCH SURPRISE: PerkEntryPointModifyValue not found in Mutagen 0.53.1 — Phase 1.5 anchor invalid; halt-worthy");
+        v293p15Failures++;
+    }
+    else if (apepeType == null)
+    {
+        Console.WriteLine($"  *** ARCH SURPRISE: APerkEntryPointEffect (abstract intermediate) not found in Mutagen 0.53.1 — EntryPoint enum lookup invalid; halt-worthy");
+        v293p15Failures++;
+    }
+    else
+    {
+        // ─── EntryPoint enum dump (declared on APerkEntryPointEffect) ────
+        var entryPointProp = pepmType.GetProperty("EntryPoint", BindingFlags.Public | BindingFlags.Instance);
+        if (entryPointProp == null || !entryPointProp.PropertyType.IsEnum)
+        {
+            Console.WriteLine($"  *** ARCH SURPRISE: PerkEntryPointModifyValue.EntryPoint missing or not enum (got {entryPointProp?.PropertyType.Name ?? "<null>"}); halt-worthy");
+            v293p15Failures++;
+        }
+        else
+        {
+            var epType = entryPointProp.PropertyType;
+            var epNames = Enum.GetNames(epType);
+            Console.WriteLine($"  EntryPoint enum: {epType.FullName}  ({epNames.Length} members)");
+            Console.WriteLine($"    First 20: {string.Join(", ", epNames.Take(20))}{(epNames.Length > 20 ? ", ..." : "")}");
+            Console.WriteLine($"    Full member list ({epNames.Length}):");
+            for (int i = 0; i < epNames.Length; i++)
+                Console.WriteLine($"      [{i,3}] {epNames[i]}");
+        }
+
+        // ─── Modification enum dump (per-leaf on PerkEntryPointModifyValue) ─
+        var modProp = pepmType.GetProperty("Modification", BindingFlags.Public | BindingFlags.Instance);
+        string? pickedModName = null;
+        bool modFallbackFired = false;
+        if (modProp == null || !modProp.PropertyType.IsEnum)
+        {
+            Console.WriteLine($"  *** ARCH SURPRISE: PerkEntryPointModifyValue.Modification missing or not enum (got {modProp?.PropertyType.Name ?? "<null>"}); halt-worthy");
+            v293p15Failures++;
+        }
+        else
+        {
+            var modEnumType = modProp.PropertyType;
+            var modNames = Enum.GetNames(modEnumType);
+            Console.WriteLine();
+            Console.WriteLine($"  Modification enum: {modEnumType.FullName}  ({modNames.Length} members)");
+            Console.WriteLine($"    Members: {string.Join(", ", modNames)}");
+            // Pick: prefer "Multiply" / "MultiplyValue" / "Mult"; fall back to first.
+            var preferred = new[] { "Multiply", "MultiplyValue", "Mult" };
+            pickedModName = preferred.FirstOrDefault(n => modNames.Contains(n));
+            if (pickedModName == null && modNames.Length > 0)
+            {
+                pickedModName = modNames[0];
+                modFallbackFired = true;
+            }
+        }
+
+        // ─── Synthetic round-trip ────────────────────────────────────────
+        Console.WriteLine();
+        Console.WriteLine("  ─── PerkEntryPointModifyValue synthetic round-trip ────");
+        try
+        {
+            var rtModKey = ModKey.FromNameAndExtension("PerkRT_PEPM.esp");
+            var rtMod = new SkyrimMod(rtModKey, SkyrimRelease.SkyrimSE);
+            var rtPerk = new Perk(new FormKey(rtModKey, 0xA01), SkyrimRelease.SkyrimSE)
+            {
+                EditorID = "PerkRT_PEPM",
+            };
+
+            var pepm = (object)System.Activator.CreateInstance(pepmType)!;
+
+            // Set EntryPoint = ModSpellMagnitude (declared on abstract APerkEntryPointEffect).
+            // entryPointProp is non-null here — earlier guard halts on null/non-enum.
+            object? epValue = null;
+            try { epValue = Enum.Parse(entryPointProp!.PropertyType, "ModSpellMagnitude", ignoreCase: true); }
+            catch { /* report below */ }
+            if (epValue == null)
+            {
+                Console.WriteLine($"  *** ARCH SURPRISE: 'ModSpellMagnitude' not a member of {entryPointProp!.PropertyType.Name}; round-trip aborted; halt-worthy");
+                v293p15Failures++;
+            }
+            else
+            {
+                entryPointProp!.SetValue(pepm, epValue);
+
+                // Set Modification (per-leaf enum).
+                if (modProp != null && pickedModName != null)
+                {
+                    var modVal = Enum.Parse(modProp.PropertyType, pickedModName);
+                    modProp.SetValue(pepm, modVal);
+                    Console.WriteLine($"  Modification picked: {pickedModName}{(modFallbackFired ? " (FALLBACK — preferred Multiply/MultiplyValue/Mult not found; used first member)" : " (preferred match)")}");
+                }
+
+                // Set Value = 1.5f (Nullable<Single> on PEPM).
+                var valueProp = pepmType.GetProperty("Value", BindingFlags.Public | BindingFlags.Instance);
+                if (valueProp != null)
+                {
+                    object valueAssign = (float?)1.5f;  // boxed as Nullable<Single>
+                    valueProp.SetValue(pepm, valueAssign);
+                    Console.WriteLine($"  Value set to 1.5f ({FriendlyType(valueProp.PropertyType)})");
+                }
+                else
+                {
+                    Console.WriteLine($"  *** ARCH SURPRISE: PerkEntryPointModifyValue.Value property NOT FOUND; halt-worthy");
+                    v293p15Failures++;
+                }
+
+                // Build a synthetic PerkCondition wrapper (RunOnTabIndex=1) with
+                // one nested ConditionFloat (GetActorValueConditionData, ActorValue=Destruction).
+                // Conditions list is on APerkEffect base (not PEPM-specific).
+                var conditionsProp = pepmType.GetProperty("Conditions", BindingFlags.Public | BindingFlags.Instance);
+                if (conditionsProp != null && conditionsProp.PropertyType.IsGenericType)
+                {
+                    var pcElType = conditionsProp.PropertyType.GetGenericArguments()[0];
+                    var pcInstWrapper = System.Activator.CreateInstance(pcElType)!;
+
+                    // RunOnTabIndex (Mutagen-typed; convert 1 to whatever Mutagen exposes).
+                    var rotiProp = pcElType.GetProperty("RunOnTabIndex", BindingFlags.Public | BindingFlags.Instance);
+                    if (rotiProp != null)
+                        rotiProp.SetValue(pcInstWrapper, Convert.ChangeType(1, rotiProp.PropertyType));
+
+                    // Inner Conditions list.
+                    var pcConditionsProp = pcElType.GetProperty("Conditions", BindingFlags.Public | BindingFlags.Instance);
+                    if (pcConditionsProp != null)
+                    {
+                        var pcConditionsList = pcConditionsProp.GetValue(pcInstWrapper);
+                        var condFloat = new ConditionFloat
+                        {
+                            ComparisonValue = 60f,
+                            CompareOperator = CompareOperator.GreaterThanOrEqualTo,
+                        };
+                        var gavType = asm.GetType("Mutagen.Bethesda.Skyrim.GetActorValueConditionData")!;
+                        var gavData = System.Activator.CreateInstance(gavType)!;
+                        var avProp = gavType.GetProperty("ActorValue", BindingFlags.Public | BindingFlags.Instance)!;
+                        var avValue = Enum.Parse(avProp.PropertyType, "Destruction", ignoreCase: true);
+                        avProp.SetValue(gavData, avValue);
+                        var dataProp = typeof(ConditionFloat).GetProperty("Data", BindingFlags.Public | BindingFlags.Instance)!;
+                        dataProp.SetValue(condFloat, gavData);
+
+                        var addCond = pcConditionsList!.GetType().GetMethod("Add", new[] { typeof(Mutagen.Bethesda.Skyrim.Condition) });
+                        if (addCond != null)
+                            addCond.Invoke(pcConditionsList, new object[] { condFloat });
+                    }
+
+                    // Add wrapper to outer Conditions on the PEPM instance.
+                    var outerCondsList = conditionsProp.GetValue(pepm);
+                    var addPc = outerCondsList!.GetType().GetMethod("Add", new[] { pcElType });
+                    if (addPc != null)
+                        addPc.Invoke(outerCondsList, new object[] { pcInstWrapper });
+                }
+
+                // Attach to a synthetic PERK record's Effects list.
+                var perkEffectsProp = typeof(Perk).GetProperty("Effects", BindingFlags.Public | BindingFlags.Instance)!;
+                var effectsList = perkEffectsProp.GetValue(rtPerk)!;
+                var addEff = effectsList.GetType().GetMethod("Add", new[] { aPerkEffectBase! });
+                if (addEff == null)
+                {
+                    Console.WriteLine($"  *** ARCH SURPRISE: Perk.Effects.Add(APerkEffect) not found; halt-worthy");
+                    v293p15Failures++;
+                }
+                else
+                {
+                    addEff.Invoke(effectsList, new object[] { pepm });
+                    rtMod.Perks.Add(rtPerk);
+
+                    var rtDir = Path.Combine(Path.GetTempPath(), "raceprobe-v2.9.3-p15-pepm");
+                    Directory.CreateDirectory(rtDir);
+                    var rtPath = Path.Combine(rtDir, "PerkRT_PEPM.esp");
+                    rtMod.WriteToBinary(rtPath);
+                    var fileInfo = new FileInfo(rtPath);
+                    Console.WriteLine($"  Wrote synthetic PERK ESP: {rtPath}  ({fileInfo.Length} bytes)");
+
+                    var rb = SkyrimMod.CreateFromBinary(rtPath, SkyrimRelease.SkyrimSE);
+                    var rbPerk = rb.Perks.FirstOrDefault();
+                    if (rbPerk == null)
+                    {
+                        Console.WriteLine($"  *** ARCH SURPRISE: round-trip readback has no PERK records; halt-worthy");
+                        v293p15Failures++;
+                    }
+                    else
+                    {
+                        var rbEffects = (perkEffectsProp.GetValue(rbPerk) as System.Collections.IEnumerable)?.Cast<object>().ToList() ?? new List<object>();
+                        Console.WriteLine($"  Readback Effects.Count = {rbEffects.Count} (expected 1)");
+                        if (rbEffects.Count != 1) { Console.WriteLine($"  *** ARCH SURPRISE: round-trip Effects.Count mismatch; halt-worthy"); v293p15Failures++; }
+                        else
+                        {
+                            var rbEff0 = rbEffects[0];
+                            var rbEff0Type = rbEff0.GetType();
+                            Console.WriteLine($"  Readback Effects[0] runtime type: {rbEff0Type.Name}");
+                            bool typeMatches = rbEff0Type.Name == "PerkEntryPointModifyValue" || rbEff0Type.Name.StartsWith("PerkEntryPointModifyValue");
+                            if (!typeMatches) { Console.WriteLine($"  *** ARCH SURPRISE: readback type {rbEff0Type.Name} != PerkEntryPointModifyValue; halt-worthy"); v293p15Failures++; }
+                            else
+                            {
+                                Console.WriteLine($"  ✓ Readback effect type matches PerkEntryPointModifyValue");
+
+                                var rbEpVal = rbEff0Type.GetProperty("EntryPoint")?.GetValue(rbEff0)?.ToString();
+                                var rbModVal = rbEff0Type.GetProperty("Modification")?.GetValue(rbEff0)?.ToString();
+                                var rbValueRaw = rbEff0Type.GetProperty("Value")?.GetValue(rbEff0);
+                                var rbCondsList = (rbEff0Type.GetProperty("Conditions")?.GetValue(rbEff0) as System.Collections.IEnumerable)?.Cast<object>().ToList() ?? new List<object>();
+
+                                Console.WriteLine($"  Readback EntryPoint    = {rbEpVal} (expected ModSpellMagnitude)");
+                                Console.WriteLine($"  Readback Modification  = {rbModVal} (expected {pickedModName})");
+                                Console.WriteLine($"  Readback Value         = {rbValueRaw} (expected 1.5)");
+                                Console.WriteLine($"  Readback Conditions.Count = {rbCondsList.Count} (expected 1)");
+
+                                bool epOk = rbEpVal == "ModSpellMagnitude";
+                                bool modOk = rbModVal == pickedModName;
+                                // Value is Nullable<Single>; might come back as float or float?.
+                                bool valOk = false;
+                                if (rbValueRaw is float fv) valOk = Math.Abs(fv - 1.5f) < 0.0001f;
+                                else if (rbValueRaw != null)
+                                {
+                                    try { valOk = Math.Abs(Convert.ToSingle(rbValueRaw) - 1.5f) < 0.0001f; }
+                                    catch { valOk = false; }
+                                }
+                                bool condsOk = rbCondsList.Count == 1;
+
+                                if (!epOk || !modOk || !valOk || !condsOk)
+                                {
+                                    Console.WriteLine($"  *** ARCH SURPRISE: round-trip property mismatch (EntryPoint={epOk}, Modification={modOk}, Value={valOk}, Conditions.Count={condsOk}); halt-worthy");
+                                    v293p15Failures++;
+                                }
+                                else
+                                {
+                                    Console.WriteLine($"  ✓ PerkEntryPointModifyValue synthetic round-trip clean — EntryPoint + Modification + Value + outer Conditions count all match");
+
+                                    // Drill into the wrapper + nested condition for full Q4/Q7 composition evidence.
+                                    var rbPcWrapper = rbCondsList[0];
+                                    var rbPcWrapperType = rbPcWrapper.GetType();
+                                    var rbRotiVal = rbPcWrapperType.GetProperty("RunOnTabIndex")?.GetValue(rbPcWrapper);
+                                    var rbInnerCondsObj = rbPcWrapperType.GetProperty("Conditions")?.GetValue(rbPcWrapper);
+                                    var rbInnerConds = (rbInnerCondsObj as System.Collections.IEnumerable)?.Cast<object>().ToList() ?? new List<object>();
+                                    Console.WriteLine($"  Readback Conditions[0].RunOnTabIndex   = {rbRotiVal} (expected 1)");
+                                    Console.WriteLine($"  Readback Conditions[0].Conditions.Count = {rbInnerConds.Count} (expected 1)");
+                                    if (rbInnerConds.Count >= 1)
+                                    {
+                                        var rbInnerCond = rbInnerConds[0];
+                                        var rbInnerCondType = rbInnerCond.GetType();
+                                        Console.WriteLine($"  Readback Conditions[0].Conditions[0] runtime type: {rbInnerCondType.Name}");
+                                        var rbDataProp = rbInnerCondType.GetProperty("Data");
+                                        if (rbDataProp != null)
+                                        {
+                                            var rbData = rbDataProp.GetValue(rbInnerCond);
+                                            Console.WriteLine($"  Readback inner Condition.Data runtime type: {rbData?.GetType().Name}");
+                                            var rbAvProp = rbData?.GetType().GetProperty("ActorValue");
+                                            var rbAvVal = rbAvProp?.GetValue(rbData)?.ToString();
+                                            Console.WriteLine($"  Readback inner Condition.Data.ActorValue = {rbAvVal} (expected Destruction)");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    try { Directory.Delete(rtDir, recursive: true); } catch { /* best-effort */ }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            var inner = ex is TargetInvocationException tex && tex.InnerException != null ? tex.InnerException : ex;
+            Console.WriteLine($"  *** ARCH SURPRISE: PerkEntryPointModifyValue round-trip threw {inner.GetType().Name}: {inner.Message}; halt-worthy");
+            Console.WriteLine($"      stack: {inner.StackTrace?.Split('\n').FirstOrDefault()?.Trim()}");
+            v293p15Failures++;
+        }
+    }
+}
+
+Console.WriteLine();
+Console.WriteLine($"=== v2.9.3 P1.5 PerkEntryPointModifyValue anchor: {(v293p15Failures == 0 ? "ALL PASS" : $"{v293p15Failures} FAILURE(S)")} ===");
+
+Console.WriteLine();
+int totalFailures = auditFailures + effectsAuditFailures + inventoryFailures + p2aFailures + p2bFailures + p2cFailures + p2dFailures + p4InfoFailures + p1MultiCondFailures + p2QustFailures + p1ReadSideFailures + p2ReadSideFailures + p4ReadSideFailures + v293p1Failures + v293p15Failures;
 if (totalFailures > 0)
 {
-    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C + {p2dFailures} v2.9 P2D + {p4InfoFailures} v2.9 P4-INFO + {p1MultiCondFailures} v2.9.1 P1 multi-cond sweep + {p2QustFailures} v2.9.1 P2 quest-cond + {p1ReadSideFailures} v2.9.2 P1 read-side perf-and-shape + {p2ReadSideFailures} v2.9.2 P2 read-side functional + {p4ReadSideFailures} v2.9.2 P4 cross-master) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT ===");
+    Console.WriteLine($"=== probe FAILED: {totalFailures} audit failure(s) ({auditFailures} v2.7.1 + {effectsAuditFailures} v2.8 P1 + {inventoryFailures} v2.9 P1 + {p2aFailures} v2.9 P2A + {p2bFailures} v2.9 P2B + {p2cFailures} v2.9 P2C + {p2dFailures} v2.9 P2D + {p4InfoFailures} v2.9 P4-INFO + {p1MultiCondFailures} v2.9.1 P1 multi-cond sweep + {p2QustFailures} v2.9.1 P2 quest-cond + {p1ReadSideFailures} v2.9.2 P1 read-side perf-and-shape + {p2ReadSideFailures} v2.9.2 P2 read-side functional + {p4ReadSideFailures} v2.9.2 P4 cross-master + {v293p1Failures} v2.9.3 P1 APerkEffect inventory + {v293p15Failures} v2.9.3 P1.5 PEPM anchor) — reclassify in AUDIT/EFFECTS_AUDIT/CONDITIONS_AUDIT/APERK_EFFECTS_AUDIT ===");
     Environment.Exit(1);
 }
 Console.WriteLine("=== probe complete ===");

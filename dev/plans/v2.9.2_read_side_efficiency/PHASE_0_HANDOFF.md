@@ -4,7 +4,7 @@
 **Status:** Complete
 **Date:** 2026-04-28
 **Session length:** ~1h
-**Commits made:** `<work-hash>` (work) + this hash-record commit
+**Commits made:** `46c8474` (work) + this hash-record commit
 **Live install synced:** No (Phase 0 is docs-only; live remains at v2.9.1 per CLAUDE.md exemption — Phase 0 doesn't touch the live install or invoke MCP tools)
 
 ## Working version slug
@@ -47,7 +47,7 @@ These are pre-litigated and carry forward to Phase 1's executor without re-debat
 - **`<plan>/PLAN.md` and `<plan>/CONDUCTOR_KICKOFF.md` force-added** in this same commit. The scoping session that wrote them left them untracked; Phase 0's single-commit deliverable per PLAN § I bundles all four artifacts together.
 - **`<plan>/PHASE_0_HANDOFF.md`** — NEW (this file).
 
-No production code touched. No version bump. Single-commit deliverable: PLAN.md + MATRIX.md + CONDUCTOR_KICKOFF.md + PHASE_0_HANDOFF.md force-added together in `<work-hash>` (work) + this hash-record commit.
+No production code touched. No version bump. Single-commit deliverable: PLAN.md + MATRIX.md + CONDUCTOR_KICKOFF.md + PHASE_0_HANDOFF.md force-added together in `46c8474` (work) + this hash-record commit.
 
 ## Verification performed
 
@@ -211,7 +211,7 @@ Phase 1's responsibilities (per PLAN.md § Phase 1):
 | MATRIX.md exists with Layer 1.P / 1.D / 2 / 3 / 4 / 5 scaffold + naming convention | ✅ landed in this commit |
 | MATRIX.md § Phase fill-in checklists enumerate exact post-Phase-N edits | ✅ landed at MATRIX.md bottom (3 checklists: Phase 1 / Phase 2 / Phase 3 hand-back) |
 | Conductor decisions inherited (slug=v2.9.2, single-mechanism scope, no scope absorption, single-commit deliverable for Phase 0 per § I) | ✅ recorded above |
-| PLAN.md + CONDUCTOR_KICKOFF.md committed in `<work-hash>` (this commit's force-add) and readable | ✅ |
+| PLAN.md + CONDUCTOR_KICKOFF.md committed in `46c8474` (this commit's force-add) and readable | ✅ |
 | 6 design questions awaiting Aaron lock | ✅ posted in § Conductor asks above |
 | v2.9.1 PHASE_2_HANDOFF.md / PHASE_4_HANDOFF.md / PHASE_5_HANDOFF.md available as reference for Phase 2 wrapper-passthrough discipline + Phase 5 ship cadence | ✅ (`dev/plans/v2.9.1_quest_condition_disambiguation/`) |
 

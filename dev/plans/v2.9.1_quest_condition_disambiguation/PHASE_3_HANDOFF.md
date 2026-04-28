@@ -4,7 +4,7 @@
 **Status:** Complete
 **Date:** 2026-04-28
 **Session length:** Across two executor sessions (original phase-3-executor pre-token-exhaustion preflight + 3.1; resumed phase-3-executor for 3.2 + handoff). ~2h cumulative across both.
-**Commits made:** `<work-hash>` (work) + this commit (hash-record)
+**Commits made:** `a5b503b` (work) + this commit (hash-record)
 **Live install synced:** Yes — at v2.9.1 throughout this phase (`mo2_ping` returns `version: "2.9.1"`); pre-Phase-3 sync delivered Phase 4's `tools_patching.py` `passthrough_keys` fix to the live install.
 
 ## Working version slug

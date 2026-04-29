@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "grep -qE '\"(file_path|filePath)\":\"[^\"]*mo2_mcp[^\"]*tools_[^\"]+\\.py\"' && echo '{\"hookSpecificOutput\": {\"hookEventName\": \"PostToolUse\", \"additionalContext\": \"Edit on an MCP tool file in mo2_mcp/. The description= string in registry.register() calls is Claude-facing documentation, not changelog text. Lead with action triggers (Use this when reading >2 records) not version markers (v2.9.X batch read mode). Demote internal phase/perf references — operational meaning ranks above provenance for an LLM scanning the tool registry. KB-style summary docs duplicating tool registry content are forbidden. For MCP construction patterns reference, invoke the claude-api skill.\"}}' || true"
+          },
+          {
+            "type": "command",
+            "command": "grep -qE '\"(file_path|filePath)\":\"[^\"]*\\.claude[^\"]*skills[^\"]*SKILL\\.md\"' && echo '{\"hookSpecificOutput\": {\"hookEventName\": \"PostToolUse\", \"additionalContext\": \"Edit on a skill SKILL.md in .claude/skills/. If you changed the description: frontmatter, validate trigger reliability with anthropic-skills:skill-creator scripts/run_loop.py (eval set: 8-10 should-trigger + 8-10 should-not-trigger queries). Skill description rewrites to critical skills (session-strategy especially) require this validation before ship. Known limitation: run_loop.py validation hits a Windows-env block — run_eval.py uses select() on subprocess pipes which doesnt work on Windows. See feedback_descriptions_are_documentation.md for context and substitute manual reasoning when blocked.\"}}' || true"
+          }
+        ]
+      }
+    ]
+  }
+}

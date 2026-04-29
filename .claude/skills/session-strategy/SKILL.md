@@ -1,5 +1,5 @@
 ---
-description: Operational rules for sessions using heavy MCP tool use, multiple parallel calls, or mixed tool types (MCP + Bash + file processing). Covers safe vs unsafe parallel batching (never mix Bash + MCP in one batch), agent delegation rules for bulk reads, context management and priority order when approaching limits, and tool-specific notes (record index, large plugin conflicts, file listing, editor ID searches). Use at the start of any session involving extensive MCP work or when orchestrating many parallel calls.
+description: Operational rules for any session that uses the Claude_MO2 MCP tools (mo2_*). Use this whenever the user mentions modlists, mods, plugins, conflicts, ESP patches, NPCs, leveled lists, BSAs, NIF meshes, FUZ audio, Papyrus scripts, or record investigations — even if you think you only need a few calls or can answer directly. Covers parallel batching (never mix Bash + MCP in one batch), batch-read patterns on mo2_record_detail (formids/fields/expand_links — prefer over multiple parallel calls for >2 records), agent delegation for bulk work, and context management. Many tasks that look simple expand into bulk work — load this before scoping the investigation, not after sequential calls add up.
 ---
 
 # MCP Session Operational Rules

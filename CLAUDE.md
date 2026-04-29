@@ -17,10 +17,11 @@ Once `mo2_*` tools are available:
 - **Call `mo2_build_record_index` explicitly only** for `force_rebuild=true`, when you want the status dict back, or to eat the cold-build cost up front before many queries.
 - **Scan this directory for `CLAUDE_*.md` addon files** beyond this one. Load them — modlist-specific balance philosophy, conventions, and rules that extend these general instructions. No addon files = general mode (fully functional, just less context).
 
-## Knowledge base
+## Tool documentation
 
-- **`kb/KB_Tools.md`** — load for any MCP session. Core tool reference, FormID display format (`PluginName:LocalID`), field interpretation output types.
-- **`.claude/skills/`** — task-specific procedures and tool-category references. Auto-load on trigger; don't manually invoke.
+Each `mo2_*` tool's schema (visible in the tool registry at session start) is the authoritative documentation — name, description, and input parameters. Read the schema for any tool before bulk usage; it covers when to use the tool, batch parameters, and operational warnings (e.g. CELL/WRLD plugin caveats on `mo2_plugin_conflicts`, batch-read parameters on `mo2_record_detail`). Use `ToolSearch` to fetch a fresh schema if you've been working in a session a while and want to re-confirm a tool's surface.
+
+- **`.claude/skills/`** — task-specific procedures and cross-tool patterns. Auto-load on trigger; don't manually invoke. The `session-strategy` skill covers parallel batching, batch-read patterns, and context management for any MCP-heavy work — load it proactively at session start.
 - **User-provided tool prerequisites** (BSArch, PapyrusCompiler + Scripts.zip, nif-tool.exe) are configured per-install at `mo2_mcp/tool_paths.json`. Locations vary by install — check `tool_paths.json` and `KNOWN_ISSUES.md` rather than assuming defaults.
 - **Modlist-specific KB files** referenced by an addon's routing table — load the relevant ones before analysis.
 

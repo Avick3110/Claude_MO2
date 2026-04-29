@@ -18,7 +18,7 @@
 ; 5. Reports which optional tools are detected post-install.
 
 #define AppName "Claude MO2"
-#define AppVersion "2.9.4"
+#define AppVersion "2.9.5"
 #define AppPublisher "Aaronavich"
 #define AppURL "https://github.com/Aaronavich/claude-mo2"
 #define PluginFolder "mo2_mcp"
@@ -110,8 +110,10 @@ Source: "..\README.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignorev
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
 Source: "..\KNOWN_ISSUES.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
 Source: "..\CLAUDE.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
-Source: "..\kb\KB_Tools.md"; DestDir: "{app}\plugins\{#PluginFolder}\kb"; Flags: ignoreversion
-Source: "..\KNOWLEDGEBASE.md"; DestDir: "{app}\plugins\{#PluginFolder}"; Flags: ignoreversion
+; v2.9.5 retired kb/KB_Tools.md and KNOWLEDGEBASE.md — tool descriptions in
+; mo2_mcp/tools_*.py @mcp.tool registrations are the authoritative documentation.
+; The kb/ folder pattern remains available for future narrow topic references
+; (per CLAUDE.md "Building knowledge through use") but no KB files ship today.
 
 ; Skills — Claude Code auto-discovers .claude/skills/*/SKILL.md when the user
 ; opens Claude Code in this dir. Trigger-matched, loaded on demand.

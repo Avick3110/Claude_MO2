@@ -1,0 +1,22 @@
+[
+  {"query": "the modlist keeps crashing in Whiterun and I can't figure out why, can you help me debug it", "should_trigger": true},
+  {"query": "I want to add the steel keyword to all iron daggers in my load order so they get repaired together", "should_trigger": true},
+  {"query": "look at this NPC mod called Xelzaz, what plugins are needed and is it conflict-free with my Authoria install?", "should_trigger": true},
+  {"query": "compare the Lydia NPC record across vanilla, Bijin, and Pandorable - she looks weird in game and I want to know which one is winning", "should_trigger": true},
+  {"query": "find me every leveled list that affects bandit gear so I can make a merged patch", "should_trigger": true},
+  {"query": "go through Beyond Skyrim Bruma and tell me what I'm getting myself into - any heavy CELL/WRLD edits?", "should_trigger": true},
+  {"query": "I just installed a new combat overhaul. give me the rundown - any conflicts with Requiem?", "should_trigger": true},
+  {"query": "Aaron asked me to investigate why deer give 0 gold when looted - track down the BSA or the override", "should_trigger": true},
+  {"query": "my apothecary mod isn't working - shopkeepers don't have any of the new potions in their inventory", "should_trigger": true},
+  {"query": "look at the Authoria addon files and tell me what's different from base requiem in terms of perk balance", "should_trigger": true},
+  {"query": "what's the difference between Skyrim's leveled lists and Fallout 4's leveled lists conceptually, no need to look at any specific mod", "should_trigger": false},
+  {"query": "explain how Papyrus differs from C++ in terms of memory model and garbage collection", "should_trigger": false},
+  {"query": "I want to learn how to use xEdit to make my own merged patches by hand - walk me through the UI", "should_trigger": false},
+  {"query": "review this Reddit post about Requiem 5.0 design philosophy and tell me if the author makes good points", "should_trigger": false},
+  {"query": "what does the term 'merging plugins' mean in modding terminology - is it the same as 'merged patches' or different?", "should_trigger": false},
+  {"query": "tell me about the cultural context of Skyrim's Nordic folklore and how it draws from real history", "should_trigger": false},
+  {"query": "I'm writing a blog post about why Bethesda games ship with bugs - help me structure the argument", "should_trigger": false},
+  {"query": "can you write me a python script that parses ESP file headers myself, without using any of your MCP tools?", "should_trigger": false},
+  {"query": "compare the development culture of Bethesda Game Studios vs CDPR around modding support", "should_trigger": false},
+  {"query": "give me a checklist for backing up my Skyrim save files via cp before I do something risky", "should_trigger": false}
+]

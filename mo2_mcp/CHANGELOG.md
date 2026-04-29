@@ -4,6 +4,153 @@ All plugin changes are made in the Dev Build copy first. Once tested and stable,
 
 ---
 
+## v2.9.5 — 2026-04-29
+
+Consumer-facing description redesign — schemas are the documentation.
+Live consumer Claude session on 2026-04-29 ran ~3,500 sequential
+`mo2_record_detail` calls instead of using the v2.9.2 `formids` batch
+parameter (shipped 2026-04-28). Audit found the v2.9.2 batch params
+WERE present in the tool schema with detailed property descriptions —
+but the lead lines were "v2.9.2 batch read mode", "Phase 1 axis 2",
+"Phase 1 axis 6" (internal version/perf markers from the dev process),
+not action triggers. The operational guidance ("use this when reading
+more than ~2 records") was buried five lines deep behind developer
+jargon. The consumer Claude saw the schema, didn't internalize it,
+and pattern-matched on basic single-record usage. Separately,
+`kb/KB_Tools.md` duplicated tool reference content in a hand-curated
+parallel layer that drifted (the v2.9.2 batch params never made it
+into KB_Tools.md). The architectural shift: tool descriptions in
+`@mcp.tool` registrations ARE the documentation. KB-style summary
+docs are retired.
+
+### Changed — `mo2_record_detail` description (`mo2_mcp/tools_records.py`)
+
+- **Tool-level description** rewritten to lead with action: "Get full
+  interpreted field data for one or more records" (vs prior "for a
+  specific record"). Batching guidance promoted to a bolded second
+  sentence — "**For reading more than ~2 records, prefer the formids
+  batch parameter over multiple parallel calls**" — so any Claude
+  scanning the tool registry sees the action trigger before any
+  details. Per-param mentions condensed; internal version markers
+  removed.
+- **`formids` property description** rewritten. Old lead: "v2.9.2
+  batch read mode." New lead: "Read multiple records in a single
+  batched call. Use this any time you need more than ~2 records."
+  Internal references ("Phase 1 perf probe", "Phase 1 axis 2", "Phase
+  1 axis 6") removed. Performance numbers retained where actionable
+  (~900ms subprocess startup, ~19ms marginal at N=200).
+- **`fields` property description** rewritten. Old lead: "v2.9.2 field
+  projection." New lead: "Project the response to only the requested
+  field paths. Use this when you only need specific fields from a
+  large record — cuts payload ~80% on a 3-5 path subset." Internal
+  Phase references removed.
+- **`expand_links` property description** rewritten. Old lead: "v2.9.2
+  single-level FormLink expansion." New lead: "Inline the detail of
+  FormLinks at named paths. Use this when you'd otherwise chase a
+  FormLink with a second mo2_record_detail call." Phase references
+  removed; speedup metric retained without phase tag.
+
+### Changed — `mo2_plugin_conflicts` description (`mo2_mcp/tools_records.py`)
+
+- Added the operational warning that previously lived only in
+  `kb/KB_Tools.md` and the `session-strategy` skill body: **"do NOT
+  call this on plugins that touch CELL or WRLD records heavily —
+  output can be enormous and saturate context. For those, use
+  mo2_query_records filtered to the plugin instead."** This warning
+  is critical for context budgets and now travels with the tool's
+  own schema.
+
+### Changed — `session-strategy` skill description (`.claude/skills/session-strategy/SKILL.md`)
+
+- Trigger description rewritten for accuracy. Per skill-creator's
+  guidance ("Claude has a tendency to undertrigger skills — make
+  descriptions a little pushy") and the live-consumer evidence (the
+  prior description never fired despite the work being eligible for
+  it). Old description triggered on a meta-condition Claude can't
+  predict at trigger-time ("sessions involving extensive MCP work").
+  New description triggers on user-recognizable phrasings: "Use this
+  whenever the user mentions modlists, mods, plugins, conflicts, ESP
+  patches, NPCs, leveled lists, BSAs, NIF meshes, FUZ audio, Papyrus
+  scripts, or record investigations — even if you think you only need
+  a few calls or can answer directly." The "even if" framing is
+  the pushy pattern skill-creator recommends to counter undertriggering.
+  Skill body content unchanged — it was already current with v2.9.2
+  batch-read patterns at lines 98-106.
+
+### Changed — `CLAUDE.md`
+
+- Replaced the "Knowledge base" section with a "Tool documentation"
+  section. Old text instructed consumers to "load `kb/KB_Tools.md`
+  for any MCP session" as a comprehensive tool reference. New text
+  points consumers at the MCP tool registry schemas as the
+  authoritative documentation, and at `session-strategy` for
+  cross-tool patterns. The "Building knowledge through use"
+  three-bucket scheme (modlist rule → addon, procedure → skill,
+  topic reference → kb/) is preserved — `kb/` remains available for
+  narrow topic references that stand alone, but comprehensive tool
+  reference duplication is now forbidden.
+
+### Removed
+
+- **`kb/KB_Tools.md`** (160 lines). All non-redundant content already
+  lived in tool schemas (the `mo2_record_detail` rewrite explicitly
+  pulls forward the batching guidance; the CELL/WRLD warning landed
+  in `mo2_plugin_conflicts`). FormID format (`PluginName:LocalID`)
+  and field-interpretation output types are part of `mo2_record_detail`'s
+  natural surface — Claude reads them directly from the schema's
+  return-shape examples and from the actual responses it gets.
+- **`KNOWLEDGEBASE.md`** (10-line index file). With KB_Tools.md gone,
+  the index pointed at nothing. Skills auto-discovery and addon
+  routing are documented in `CLAUDE.md` directly.
+- **Installer** (`installer/claude-mo2-installer.iss`) — removed the
+  two `Source:` lines that bundled `KB_Tools.md` and `KNOWLEDGEBASE.md`
+  into `<MO2>/plugins/mo2_mcp/`.
+
+### README.md
+
+- Updated to v2.9.5 install link.
+- "Tool Reference" section: replaced the "See `kb/KB_Tools.md`"
+  pointer with text noting that each tool's full schema is registered
+  with the MCP server and visible to any MCP client at session start
+  — the schema IS the reference.
+- "Addon System" section: added the `.claude/skills/<name>/SKILL.md`
+  bullet (previously implicit via CLAUDE.md). Updated the `KB_[Topic].md`
+  bullet to clarify that it's for narrow topic references, not
+  comprehensive tool reference duplication.
+
+### No code changes, no bridge changes
+
+v2.9.5 is description-and-docs-only at the source level. The bridge
+is re-published per Q7 lock for SHA-chain hygiene; SHIP SHAs may
+differ from v2.9.4's only by .NET build determinism factors. No
+behavior change to any tool's runtime semantics — the same arguments
+produce bit-identical responses. v2.9.4's `_AUTOSTOP_EXEMPT_PATTERN`
+deny-list is unchanged.
+
+### Architectural rule going forward
+
+Tool descriptions in `@mcp.tool` registrations are Claude-facing
+documentation, not changelog entries. New `description=` strings
+added or modified in `mo2_mcp/tools_*.py` should lead with the action
+("Use this when X") not the version marker ("v2.9.X feature Y"), and
+should demote internal phase/perf references that don't help an LLM
+decide when to use the tool. KB-style comprehensive summary docs
+that parallel the tool registry are forbidden — they drift the moment
+a tool description is updated. This rule is captured in conductor
+memory; future Claude_MO2 sessions see it on every dev startup.
+
+### Upgrade hygiene
+
+Upgrading over v2.9.4 leaves the old `kb/KB_Tools.md` and
+`KNOWLEDGEBASE.md` in `<MO2>/plugins/mo2_mcp/` as orphans — Inno
+Setup only removes files it installed, not files that are no longer
+in the [Files] manifest. They're harmless (CLAUDE.md no longer routes
+to them), but can be manually deleted for tidiness. A clean reinstall
+(delete the plugin folder first, then run the installer) avoids this
+entirely.
+
+---
+
 ## v2.9.4 — 2026-04-29
 
 Auto-stop deny-list (xEdit-clarity capability) — narrows MO2's

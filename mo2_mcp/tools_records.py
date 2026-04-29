@@ -335,24 +335,22 @@ def register_record_tools(registry, organizer) -> None:
     registry.register(
         name="mo2_record_detail",
         description=(
-            "Get full interpreted field data for a specific record. "
+            "Get full interpreted field data for one or more records. "
             "Provide a FormID ('Skyrim.esm:012E49') or Editor ID. "
-            "By default returns the winning record among enabled plugins; "
-            "specify plugin_name to get a specific plugin's version, or "
-            "plugin_names (plural) to fetch the record from multiple "
-            "plugins in one call (useful for diffing a conflict chain). "
-            "Pass include_disabled=true to resolve against disabled "
-            "plugins too (needed if the record only exists in or is "
-            "being fetched from a plugin whose checkbox is off in MO2). "
-            "Returns all fields with named values, enum labels, flag "
-            "names. Set resolve_links=true to annotate FormID strings "
-            "with their EditorID from the load-order index. "
-            "v2.9.2 read-side efficiency parameters: pass formids (plural) "
-            "to read N records in one bridge subprocess invocation; pass "
-            "fields to project the response to only requested paths; "
-            "pass expand_links to inline single-level FormLink detail at "
-            "named positions. All three composable; defaults preserve "
-            "v2.9.1 behavior bit-identically."
+            "**For reading more than ~2 records, prefer the formids batch "
+            "parameter over multiple parallel calls — each individual call "
+            "pays a ~900ms subprocess startup; one batched call pays it "
+            "once.** Returns all fields with named values, enum labels, "
+            "and flag names. Use plugin_name to read a specific plugin's "
+            "version (default: the winning record among enabled plugins). "
+            "Use plugin_names (plural, with formid or formids) to compare "
+            "a record across plugins. Use fields to project the response "
+            "to specific paths (cuts payload ~80%% on big records). Use "
+            "expand_links to inline FormLink targets at named paths "
+            "(eliminates second-tier lookup round-trips). Pass "
+            "include_disabled=true to resolve against unticked plugins. "
+            "Pass resolve_links=true to annotate FormID strings with "
+            "their EditorIDs from the load-order index."
         ),
         input_schema={
             "type": "object",
@@ -386,59 +384,53 @@ def register_record_tools(registry, organizer) -> None:
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "v2.9.2 batch read mode. List of FormIDs ('PluginName:LocalID') "
-                        "to read in one call. The bridge subprocess starts once and "
-                        "reads N records, amortizing the ~889 ms median startup cost "
-                        "(Phase 1 perf probe) across the batch. At N=200 the per-record "
-                        "marginal drops to ~18.68 ms (Phase 1 axis 2). Output shape "
-                        "becomes {'records': [...]} with per-record success/error "
-                        "envelope (matches existing plugin_names precedent). Mutually "
-                        "exclusive with formid; combinable with plugin_names for "
-                        "cross-product reads (N formids x M plugins = N*M cells, "
-                        "tested cliff-free up to N*M=1000 at 11.7 s wall-clock per "
-                        "Phase 1 axis 6). Empty list rejected. Tested up to N=200 "
-                        "for single-plugin batches and N*M=1000 for cross-product."
+                        "Read multiple records in a single batched call. Use this "
+                        "any time you need more than ~2 records — one batched call "
+                        "amortizes the ~900ms subprocess startup across the batch "
+                        "(per-record marginal drops to ~19ms at N=200). Each FormID "
+                        "is 'PluginName:LocalID'. Output shape becomes "
+                        "{'records': [...]} with a per-record success/error envelope. "
+                        "Mutually exclusive with formid. Combinable with plugin_names "
+                        "for cross-product reads (each formid x each plugin = one "
+                        "cell, tested up to N*M=1000). Empty list rejected. Tested "
+                        "up to N=200 single-plugin and N*M=1000 cross-product."
                     ),
                 },
                 "fields": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "v2.9.2 field projection. Project the response to only the "
-                        "requested field paths. Each path is dot-segmented; the "
-                        "walker auto-traverses lists and dicts mid-path "
-                        "(e.g. 'Voices.Male' on a RACE record reads as the male-side "
-                        "of the gendered voices struct; 'Factions.Faction' on an NPC_ "
-                        "reads as the Faction sub-property of each Factions entry). "
-                        "Default (absent): full payload (v2.9.1 behavior preserved). "
-                        "Empty list: rejected. Validation is strict-batch — invalid "
-                        "paths surface together in one error response with the "
-                        "type's full valid-name list (validation_errors keyed by "
-                        "record-type code, three categories per type, multi-error "
-                        "accumulation). Shrinks RACE full-detail (8714 bytes / "
-                        "62 top-level fields per Phase 1 axis 3) by ~80%% on a "
-                        "3-5 path subset."
+                        "Project the response to only the requested field paths. "
+                        "Use this when you only need specific fields from a large "
+                        "record — cuts payload ~80%% on a 3-5 path subset of a "
+                        "typical RACE/NPC_/etc record. Each path is dot-segmented; "
+                        "the walker auto-traverses lists and dicts mid-path "
+                        "(e.g. 'Voices.Male' on a RACE reads the male-side of the "
+                        "gendered voices struct; 'Factions.Faction' on an NPC_ "
+                        "reads the Faction sub-property of each Factions entry). "
+                        "Default (absent): full payload. Empty list rejected. "
+                        "Invalid paths surface together with the record type's "
+                        "full valid-name list."
                     ),
                 },
                 "expand_links": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "v2.9.2 single-level FormLink expansion. Inline the detail "
-                        "of FormLinks in named fields. Each path names a FormLink-"
-                        "or list-of-FormLink-typed property; the walker descends "
-                        "into the linked record and inlines its detail in a wrapper "
-                        "{'formid', 'EditorID', 'expanded': {...}}. Single-level "
-                        "only — links inside expanded records render as plain "
-                        "FormID strings (no recursion, no cycle detection needed). "
-                        "Composes with resolve_links: true (the expanded inline "
-                        "records' FormIDs are also annotated). Eliminates second-"
-                        "tier round-trips for FormLink-chase patterns "
-                        "(Phase 1 axis 5: 5.11x speedup on a 3-spell RACE; scales "
-                        "with link-count). Empty list rejected. Validation is "
-                        "strict-batch — invalid paths and non-FormLink targets "
-                        "surface together. Missing-master targets render uniform "
-                        "shape {formid, EditorID: null, expanded: null, error: ...}."
+                        "Inline the detail of FormLinks at named paths. Use this "
+                        "when you'd otherwise chase a FormLink with a second "
+                        "mo2_record_detail call — eliminates that round-trip "
+                        "(~5x speedup on a 3-spell race record; scales with "
+                        "link-count). Each path names a FormLink-typed (or "
+                        "list-of-FormLink-typed) property; the walker descends "
+                        "one level and returns {'formid', 'EditorID', 'expanded': "
+                        "{...}} per target. Single-level only — FormLinks inside "
+                        "expanded records remain plain FormID strings. Composes "
+                        "with resolve_links: true (the expanded inline records' "
+                        "FormIDs are also annotated). Empty list rejected. Invalid "
+                        "paths and non-FormLink targets surface together. Missing-"
+                        "master targets render as {formid, EditorID: null, "
+                        "expanded: null, error: ...}."
                     ),
                 },
                 "resolve_links": {
@@ -513,10 +505,13 @@ def register_record_tools(registry, organizer) -> None:
         description=(
             "Show all records that a plugin overrides from its masters, "
             "grouped by record type. Shows counts and sample records. "
-            "By default filters conflict chains to enabled plugins only "
-            "and returns empty if the target plugin itself is disabled. "
-            "Pass include_disabled=true to see the plugin's overrides "
-            "regardless of enable state."
+            "**Warning: do NOT call this on plugins that touch CELL or "
+            "WRLD records heavily — output can be enormous and saturate "
+            "context. For those, use mo2_query_records filtered to the "
+            "plugin instead.** By default filters conflict chains to "
+            "enabled plugins only and returns empty if the target plugin "
+            "itself is disabled. Pass include_disabled=true to see the "
+            "plugin's overrides regardless of enable state."
         ),
         input_schema={
             "type": "object",

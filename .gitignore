@@ -47,3 +47,8 @@ claude-mo2-setup-*.exe
 # Kept locally for project history but not committed (some entries contain
 # personal paths and early-era modlist-specific context).
 dev/
+
+# Personal Claude Code settings (per-machine dev hooks, etc.) — gitignored
+# by Claude Code convention. settings.json (committed) is for team-wide
+# rules; settings.local.json is for personal overrides.
+.claude/settings.local.json

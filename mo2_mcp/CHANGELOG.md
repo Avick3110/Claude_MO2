@@ -4,6 +4,81 @@ All plugin changes are made in the Dev Build copy first. Once tested and stable,
 
 ---
 
+## v2.9.4 — 2026-04-29
+
+Auto-stop deny-list (xEdit-clarity capability) — narrows MO2's
+auto-stop-on-launch to a regex deny-list that exempts the xEdit
+family, so the MCP server stays alive during xEdit sessions. Claude
+can issue read queries (record_detail, query_records, conflict_chain,
+etc.) concurrent with an active xEdit window. First concrete shipped
+instance of the read-surface-equally-with-write pillar of the
+xEdit-clarity vision; the v3.0 daemon ships the latency-amortization
+half later (per-call ~10 s subprocess cost → sub-microsecond after
+daemon mode). Real consumer signal: Claude reading records while the
+user has xEdit open viewing the same data — workflow blocked
+pre-v2.9.4 because the v1.0.3 auto-stop-on-launch fired on every
+executable launch, xEdit included. Empirically validated 2026-04-29
+evening: 13/13 MCP queries during a 6-min xEdit session, MO2 log
+smoking gun on the new `keeping server alive ... (exempt)` qInfo,
+and a 9.9 s record-index lazy build during xEdit's USVFS-setup
+window — the original v1.0.3 hang race scenario — completed cleanly.
+
+### Added — plugin lifecycle (`mo2_mcp/__init__.py`)
+
+- **`_AUTOSTOP_EXEMPT_PATTERN` regex deny-list (lines 96-103).**
+  15 game-edition prefixes covering the xEdit family across SSE /
+  Enderal / FO4 / FO76 / FNV / FO3 / TES4 / TES5 / TES3 / SF1 + the
+  user-renamed `xEdit.exe` wildcard. Tail `[\w \-]*\.exe$` tolerates
+  version/build suffixes (`SSEEdit64.exe`, `xEdit64.exe`,
+  `TES5Edit32.exe`, etc.). Match is case-insensitive against
+  `os.path.basename(app_path)`.
+- **Modified `_on_about_to_run` (lines 238-260).** Early-return on
+  exempt-pattern match: emits `keeping server alive across launch of
+  <path> (exempt)` qInfo and zeros `_was_running_before_launch` so
+  the existing `_on_finished_run` guard takes no restart action when
+  the exempt exe exits. Non-exempt path (game launches, Synthesis,
+  etc.) is structurally unchanged.
+- **`import re`** added at top of file.
+
+### Behavior
+
+- xEdit-family executables (14 game-edition variants + `xEdit.exe`
+  wildcard) **no longer trigger the auto-stop-on-launch.** The MCP
+  server stays running for the entire xEdit session.
+- Game launches (Skyrim Special Edition, SKSE loaders), Synthesis,
+  BodySlide, and all other non-xEdit executables continue to trigger
+  the auto-stop unchanged. Synthesis intentionally NOT exempted —
+  batch-patcher with no concurrent-read use case + Mutagen overlay
+  shape similar to game launches; easy 1-line regex extension if
+  consumer signal surfaces.
+- Visibility-lag UX caveat: xEdit reads load order at startup, so
+  MCP-driven plugin writes mid-xEdit-session are invisible to xEdit
+  until reload. Write-time detection-and-warn is a v3.0 daemon
+  candidate; v2.9.4 documents the rough edge in `KNOWN_ISSUES.md`
+  § Environmental quirks.
+
+### Carryover-by-analogy correction
+
+The v1.0.3 auto-stop-on-launch was added to prevent an MO2 hang
+caused by the HTTP server thread conflicting with MO2's VFS setup
+during executable launches. The original failure mode was empirically
+observed only on **game launches** (Skyrim and similar). xEdit /
+BodySlide / etc. were added to the implicit scope by analogy — listed
+as covered cases in v1.0.3's notes but never independently verified.
+v2.9.4's 6-min xEdit live test (covering the highest-risk
+concurrent-USVFS-load scenario — record-index lazy build firing
+during xEdit's own USVFS setup) confirms the hang race is specific
+to game-engine launches, not to xEdit's incremental
+open-records-on-demand pattern.
+
+### No bridge changes
+
+v2.9.4 is plugin-Python-only at the source level. The bridge is
+re-published per Q7 lock for SHA-chain hygiene; SHIP SHAs may differ
+from v2.9.3's only by .NET build determinism factors.
+
+---
+
 ## v2.9.3 — 2026-04-29
 
 PERK.Effects writability — closes the heavier half of the v2.8.0

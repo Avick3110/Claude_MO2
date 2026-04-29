@@ -4,7 +4,7 @@ An MCP server plugin that connects AI assistants to [Mod Organizer 2](https://ww
 
 ## Quick Install (Recommended)
 
-**Download [claude-mo2-setup-v2.9.3.exe](https://github.com/Avick3110/Claude_MO2/releases/latest/download/claude-mo2-setup-v2.9.3.exe) and run it.**
+**Download [claude-mo2-setup-v2.9.4.exe](https://github.com/Avick3110/Claude_MO2/releases/latest/download/claude-mo2-setup-v2.9.4.exe) and run it.**
 
 The installer:
 - Detects whether .NET 8 Runtime is installed; guides you to Microsoft's download page if missing
@@ -56,7 +56,7 @@ See [Manual Install](#manual-install) below if you prefer to copy files yourself
 Alternative to the installer above. Use this if you prefer to copy files yourself, or if you're on a platform where the installer doesn't run.
 
 1. Copy the `mo2_mcp/` folder into your MO2 `plugins/` directory
-2. Copy `claude-mo2-setup-v2.9.3.exe` internals (specifically, the bundled `tools/mutagen-bridge/` and `tools/spooky-cli/`) into `plugins/mo2_mcp/tools/` — or run the installer once to populate those, then copy the result somewhere else
+2. Copy `claude-mo2-setup-v2.9.4.exe` internals (specifically, the bundled `tools/mutagen-bridge/` and `tools/spooky-cli/`) into `plugins/mo2_mcp/tools/` — or run the installer once to populate those, then copy the result somewhere else
 3. Restart MO2
 4. Start the server: **Tools > Start/Stop Claude Server**
 
@@ -130,7 +130,7 @@ Claude will offer to create these as it learns about your modlist. They allow Cl
 
 - **Localhost only** — the server binds to `127.0.0.1`, never exposed to the network
 - **User-controlled** — you manually start and stop the server from MO2's Tools menu
-- **Auto-stop on launch** — the server stops when MO2 launches any executable (Skyrim, xEdit, etc.) and restarts after it exits, preventing conflicts with MO2's VFS setup
+- **Auto-stop on launch** — the server stops when MO2 launches game executables (Skyrim, SKSE loaders, etc.) and restarts after they exit, preventing conflicts with MO2's VFS setup. As of v2.9.4, xEdit-family executables are exempt — the server stays alive during xEdit sessions to enable concurrent record queries
 - **Write-sandboxed** — write access is limited to creating new files in one designated output mod
 - **Read-only modlist** — cannot modify your load order, plugin state, or MO2 settings
 - **No authentication** — the server has no auth mechanism. This is safe because it only binds to localhost, but be aware that any process on your machine can make requests to it while it's running

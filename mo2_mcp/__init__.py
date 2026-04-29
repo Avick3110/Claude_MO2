@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 from PyQt6.QtCore import qInfo, qWarning
 from PyQt6.QtGui import QIcon
@@ -70,6 +71,36 @@ def _ensure_claude_mcp_config(port: int) -> None:
         qInfo(f"{PLUGIN_NAME}: registered MCP server with Claude Code in {config_path}")
     except Exception as exc:
         qWarning(f"{PLUGIN_NAME}: failed to update Claude Code MCP config: {exc}")
+
+
+# Executables exempt from the auto-stop-before-launch behavior.
+#
+# The auto-stop in `_on_about_to_run` was added in v1.0.3 to prevent an MO2
+# hang caused by the HTTP server thread conflicting with MO2's VFS setup
+# during game launch (Skyrim and similar). The original failure mode was
+# observed on game launch; xEdit / Synthesis / etc. were added to the implicit
+# scope by analogy, never empirically verified.
+#
+# This deny-list is an experimental v3.0-viability change (2026-04-29):
+# xEdit is exempted so the MCP server stays alive during xEdit's lifetime,
+# enabling the xEdit-clarity workflow (Claude reads records while the user
+# has xEdit open for interactive viewing). Synthesis is intentionally NOT
+# exempted — it's a batch patcher (no interactive concurrent-read use case)
+# and it loads the modlist via Mutagen, which is exactly the resource-
+# contention shape the original auto-stop was protecting against.
+#
+# Pattern matches xEdit family with any version/build suffix (e.g. SSEEdit.exe,
+# SSEEdit64.exe, xEdit.exe, xEdit64.exe, TES5Edit32.exe). Match is case-
+# insensitive against os.path.basename(app_path); allows word chars, spaces,
+# and hyphens between the prefix and `.exe` to handle build-suffix conventions.
+_AUTOSTOP_EXEMPT_PATTERN = re.compile(
+    r'^('
+    r'sseedit|tes5edit|tes5vredit|enderalseedit|enderaledit|'
+    r'fo4edit|fo4vredit|fo76edit|fnvedit|fo3edit|'
+    r'tes4edit|tes4redit|tes3edit|sf1edit|xedit'
+    r')[\w \-]*\.exe$',
+    re.IGNORECASE,
+)
 
 
 class Mo2McpPlugin(mobase.IPluginTool):
@@ -205,7 +236,20 @@ class Mo2McpPlugin(mobase.IPluginTool):
     # ── Auto-stop/restart around executable launches ────────────────
 
     def _on_about_to_run(self, app_path: str) -> bool:
-        """Called by MO2 before launching any executable."""
+        """Called by MO2 before launching any executable.
+
+        Exempts xEdit (interactive viewer) from the auto-stop so the MCP
+        server stays alive during xEdit's lifetime, enabling the xEdit-clarity
+        workflow (Claude queries records while user has xEdit open). Synthesis
+        and game launches still trigger the auto-stop. See
+        `_AUTOSTOP_EXEMPT_PATTERN` above for rationale + scope.
+        """
+        exe_name = os.path.basename(app_path)
+        if _AUTOSTOP_EXEMPT_PATTERN.match(exe_name):
+            qInfo(f"{PLUGIN_NAME}: keeping server alive across launch of {app_path} (exempt)")
+            self._was_running_before_launch = False
+            return True
+
         if self._server and self._server.is_running():
             qInfo(f"{PLUGIN_NAME}: stopping server before launch of {app_path}")
             self._server.stop()

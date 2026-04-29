@@ -2,6 +2,8 @@
 
 **Status:** SHIPPED 2026-04-29 evening. Single-session conductor ship; description-and-docs-only; no multi-phase plan archive.
 
+**Ship commit:** `ecd637f`. The source state at this commit was built into `claude-mo2-setup-v2.9.5.exe` and synced to the live install at `E:\Skyrim Modding\Authoria - Requiem Reforged\plugins\mo2_mcp\`.
+
 ## What landed
 
 Per `PLAN.md` in this directory. Full narrative in `mo2_mcp/CHANGELOG.md` § v2.9.5 entry and `build-output/RELEASE_NOTES_v2.9.5.md`.

@@ -4,7 +4,7 @@
 **Status:** Complete
 **Date:** 2026-04-29
 **Session length:** ~1h conductor wall-clock (compressed Phase 1 — pre-ship verification + version bump + doc audit + build chain + live sync + 3-path sanity + tag/push/release)
-**Commits made:** `<work-hash>` (work) + this hash-record commit
+**Commits made:** `1149f8d` (work) + this hash-record commit
 **Live install synced:** Yes — re-synced from `tools/mutagen-bridge/bin/Release/net8.0/publish/` (with `runtimes/` subdir via `cp -rv`) to `<live>/tools/mutagen-bridge/`; SHIP SHA present + verified via `mo2_ping` post-restart
 
 ## Locks (final, inherited from Phase 0)

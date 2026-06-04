@@ -1,4 +1,4 @@
-# Claude MO2
+# Claude MO2 ***Depreciated*** New version here: https://github.com/Avick3110/houseCARL
 
 An MCP server plugin that connects AI assistants to [Mod Organizer 2](https://www.modorganizer.org/), giving them live read access to your Skyrim SE modlist. Claude (or any MCP-compatible client) can query your load order, read records inside any ESP/ESM/ESL, detect conflicts across your entire plugin list, analyze SKSE DLLs, and help you understand and develop your modlist.
 
